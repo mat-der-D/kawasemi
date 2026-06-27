@@ -18,7 +18,7 @@ Kiro-style Spec-Driven Development on an agentic SDLC
 - Use `/kiro-spec-status [feature-name]` to check progress
 
 ## Development Guidelines
-- Think in English, generate responses in English. All Markdown content written to project files (e.g., requirements.md, design.md, tasks.md, research.md, validation reports) MUST be written in the target language configured for this specification (see spec.json.language).
+- Think in English, respond in Japanese. All Markdown content written to project files (e.g., requirements.md, design.md, tasks.md, research.md, validation reports) MUST be written in the target language configured for this specification (see spec.json.language).
 
 ## Minimal Workflow
 - Phase 0 (optional): `/kiro-steering`, `/kiro-steering-custom`
