@@ -17,8 +17,9 @@
 
 - [ ] 2. データ層（リポジトリ）
 - [ ] 2.1 (P) 投稿リポジトリを実装する
-  - 投稿の挿入・可視スコープ取得・祖先/子孫走査・削除（関連整合）・編集適用と履歴保存・カウンタ原子更新に加え、`tags` / `status_tags` へのタグ関連付け永続化と、照会可能な読み取り境界（タグ→投稿・投稿→タグ）を実装する（timelines のタグタイムライン・search のハッシュタグインデックスが消費）
-  - 観測可能な完了: 投稿を挿入し ID で取得でき、削除で関連行が整合し、編集で `edited_at` が更新され履歴が `status_edits` に残り、タグ関連付けが永続化され read-only 照会できる（リポジトリ単体テストがグリーン）
+  - 投稿の挿入・可視スコープ取得・祖先/子孫走査・編集適用と履歴保存・カウンタ原子更新に加え、`tags` / `status_tags` へのタグ関連付け永続化と、照会可能な読み取り境界（タグ→投稿・投稿→タグ）を実装する（timelines のタグタイムライン・search のハッシュタグインデックスが消費）
+  - 削除は物理 FK `ON DELETE CASCADE` が扱わない自己参照 2 点を明示的に処理する: (a) 削除対象を `reblog_of_id` で参照するブースト行の明示的なカスケード削除、(b) 削除対象が返信（`in_reply_to_id` あり）であった場合の親投稿 `replies_count` の 1 減算。両者を同一トランザクションで行う
+  - 観測可能な完了: 投稿を挿入し ID で取得でき、削除で当該投稿を参照するブースト行が消え・返信元の `replies_count` が 1 減り（他の関連行は FK CASCADE で整合し）、編集で `edited_at` が更新され履歴が `status_edits` に残り、タグ関連付けが永続化され read-only 照会できる（リポジトリ単体テストがグリーン）
   - _Requirements: 3.1, 3.5, 3.6, 6.1, 6.2, 7.1, 7.4, 8.1, 8.2_
   - _Boundary: StatusRepository, TagRepository_
 - [ ] 2.2 (P) 操作リポジトリを実装する
@@ -33,14 +34,15 @@
   - _Boundary: PollRepository, IdempotencyStore_
 
 - [ ] 3. 可視性・addressing・シリアライズ
-- [ ] 3.1 (P) 可視性判定を実装する
-  - 投稿が viewer から可視かを単一ロジックで判定し、取得・context・操作の可視性チェックで同一適用、未認証は公開のみ可視とする
-  - 観測可能な完了: public/unlisted/private/direct について可視/不可視が単一関数で判定され、未認証文脈で公開のみ可視になる（単体テストがグリーン）
+- [ ] 3.1 (P) 可視性判定と関係シームの委譲ポートを実装する
+  - 投稿が viewer から可視かを単一ロジックで判定し、取得・context・操作の可視性チェックで同一適用、未認証は公開のみ可視とする。`private` の可視判定は viewer が投稿者のフォロワーかどうか（`ViewerRelation`）を要する
+  - 可視性判定・addressing 導出が必要とする関係シーム `RelationshipQuery`（viewer とのフォロー関係解決 `viewer_relation()`、`private`/`unlisted` 配送先フォロワー集合解決 `followers_of()`）の委譲ポート契約と既定実装（関係なし・空フォロワー）を定義する。social-graph 未配線でも安全側の結果（非フォロワー扱い・空フォロワー）で単独動作する
+  - 観測可能な完了: public/unlisted/private/direct について可視/不可視が単一関数で判定され、未認証文脈で公開のみ可視になり、既定 `RelationshipQuery` 実装で `private` 判定が非フォロワー扱いになる（単体テストがグリーン）
   - _Requirements: 4.1, 6.1, 6.3, 6.4, 9.5, 12.4_
-  - _Boundary: VisibilityPolicy_
+  - _Boundary: VisibilityPolicy, RelationshipQuery(port)_
 - [ ] 3.2 (P) addressing 導出を実装する
-  - 可視性から `to`/`cc` と recipient 集合（公開コレクション・フォロワーコレクション・メンション宛）を導出する単一ロジックを実装する
-  - 観測可能な完了: 各可視性に対し決定的な `to`/`cc`/recipient が導出され、direct はメンション限定になる（単体テストがグリーン）
+  - 可視性から `to`/`cc` と recipient 集合（公開コレクション・フォロワーコレクション・メンション宛）を導出する単一ロジックを実装する。`private`/`unlisted` の recipient 確定は `RelationshipQuery::followers_of` の解決結果をフォロワー配送先として実体化する
+  - 観測可能な完了: 各可視性に対し決定的な `to`/`cc`/recipient が導出され、direct はメンション限定になり、既定 `RelationshipQuery`（空フォロワー）では private/unlisted のフォロワー配送先が空集合になる（単体テストがグリーン）
   - _Requirements: 4.1, 4.2_
   - _Boundary: Addressing_
   - _Depends: 3.1_
@@ -53,9 +55,10 @@
 
 - [ ] 4. 連合橋渡し
 - [ ] 4.1 投稿 Activity ビルダと配送依頼を実装する
-  - Create(Note)/Announce/Like/Delete/Update/Undo/Vote の正規 Activity を `JsonLdCodec`・`ActorUrls` で生成し、`Addressing` 由来の recipient を federation-core `DeliveryService::deliver` へ渡す
+  - Create(Note)/Announce/Like/Delete/Update/Undo(Announce|Like) の正規 Activity を `JsonLdCodec`・`ActorUrls` で生成し、`Addressing` 由来の recipient を federation-core `DeliveryService::deliver` へ渡す
+  - 投票は独自の `Vote` Activity type を持たないため生成せず、Mastodon 互換のデファクトワイヤ形 `Create{Note, name=<選択された選択肢のテキスト>}`（宛先＝投票対象 Poll を持つ Status の投稿者アクター）として生成する
   - 論理的に同一の正規 Activity を生成・検証してから配送手段のみを federation-core に分岐させる
-  - 観測可能な完了: 各操作で正規 Activity が生成され、ローカル/リモート混在 recipient が同一 Activity で `DeliveryService` に渡る（単体/結合テストがグリーン）
+  - 観測可能な完了: 各操作で正規 Activity が生成され、ローカル/リモート混在 recipient が同一 Activity で `DeliveryService` に渡り、投票配送が `Create{Note, name=...}` ワイヤ形（`Vote` type ではない）で生成される（単体/結合テストがグリーン）
   - _Requirements: 4.2, 4.3, 4.4, 7.3, 8.4, 9.2, 9.4, 10.2, 10.3, 13.6_
   - _Boundary: StatusActivityBuilder_
   - _Depends: 3.2_
@@ -83,11 +86,12 @@
 - [ ] 6. 受信ハンドラ
 - [ ] 6.1 投稿関連受信ハンドラを実装し登録する
   - Create(Note)/Announce/Like/Delete/Update/Undo のハンドラを実装し、ローカル発生時と同一の状態遷移ロジックを呼び、未知方言プロパティは解釈せず継続する
+  - 受信 `Create{Note, name=...}` が自ローカル Poll の投票ワイヤ形（`inReplyTo`/宛先が自ローカル所有かつ `poll_id` を持つ Status を指し、`name` が当該 Poll の選択肢テキストと一致する）と識別できる場合、`CreateNoteHandler` は通常の Note 取り込みではなく `name` を選択肢へ解決して `PollService` の投票記録へ分岐する
   - 各ハンドラを federation-core の `InboundActivityDispatcher` へ種別宣言付きで登録する。`Undo` は social-graph も登録するため、inner `object` 種別（Announce/Like）を検査し所有しないものは `HandleOutcome::Ignored` を返すファンアウト前提で実装する
-  - 観測可能な完了: リモート Create でローカル Status が取り込まれ、Announce/Like でカウンタが更新され、Delete/Update が反映される（受信結合テストがグリーン）
-  - _Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 15.2, 15.3_
+  - 観測可能な完了: リモート Create でローカル Status が取り込まれ、Announce/Like でカウンタが更新され、Delete/Update が反映され、投票ワイヤ形の Create は Status ではなく投票記録として反映される（受信結合テストがグリーン）
+  - _Requirements: 13.6, 14.1, 14.2, 14.3, 14.4, 14.5, 15.2, 15.3_
   - _Boundary: InboundHandlers_
-  - _Depends: 2.1, 2.2, 2.3, 3.1_
+  - _Depends: 2.1, 2.2, 2.3, 3.1, 5.3_
 - [ ] 6.2 リモート投稿取り込みエントリポイント（StatusIngestService）を実装する
   - 受信 Create(Note) 正規化パスを再利用し、ドキュメント/URL → Status の取り込みを受信 Activity ディスパッチの外（search の `RemoteResolver` 等）からも呼び出せる `StatusIngestService` として公開する
   - 観測可能な完了: URL/ドキュメント指定で Note が取得・正規化され Status として取り込まれる（単体/結合テストがグリーン）。受信ハンドラ経路と同一結果になる
@@ -137,8 +141,9 @@
   - _Boundary: AccountStatusesProviderImpl, AccountCountsContribution_
   - _Depends: 5.1, 7.2_
 - [ ] 9.2 通知イベント（NotificationEvent）を emit する
-  - notifications が所有する `NotificationEventSink`（既定 no-op）へ、favourite / reblog(Announce) / mention / poll-end /（任意で）edit の状態遷移コミット後に冪等に `NotificationEvent` を emit する。イベント型/シンク契約は notifications 所有で再定義しない
-  - 観測可能な完了: 各操作コミット後にシンクへ 1 度だけイベントが渡る（再送で重複しない）ことをテストで確認。既定 no-op のため notifications 未配線でも本 spec は成功する
+  - notifications が所有する `NotificationEventSink`（既定 no-op）へ、favourite / reblog(Announce) / mention /（任意で）edit の状態遷移コミット後に冪等に `NotificationEvent` を emit する。イベント型/シンク契約は notifications 所有で再定義しない
+  - poll-end は状態遷移コミットに紐づく能動トリガが本 spec・現行 federation-core に存在しない（締切到達を検知する遅延ジョブ機構が無い）ため MVP では emit しない。`expired` は `PollSerializer` の読み取り時判定（2.3）に留める
+  - 観測可能な完了: favourite/reblog(Announce)/mention/(任意で)edit の各操作コミット後にシンクへ 1 度だけイベントが渡る（再送で重複しない）ことをテストで確認。既定 no-op のため notifications 未配線でも本 spec は成功する
   - _Requirements: 9.1, 9.2, 10.1, 13.2_
   - _Boundary: InteractionService, StatusService, PollService_
   - _Depends: 5.1, 5.2, 5.3_

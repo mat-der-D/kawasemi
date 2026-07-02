@@ -3,13 +3,15 @@
 - [ ] 1. 基盤: マイグレーション・ドメイン型・委譲境界・モジュール配線
 - [ ] 1.1 マイグレーション 0005 で本 spec 所有テーブルを定義する
   - `migrations/0005_accounts.sql` に `account_profiles` / `remote_accounts` / `custom_emojis` / `instance_settings` を作成（0001 core-runtime / 0002 actor-model / 0003 federation+oauth 衝突 / 0004 media と非衝突の番号として 0005 を採用）
-  - `remote_accounts.actor_uri` UNIQUE、`custom_emojis` 複合主キー（shortcode, domain）、`instance_settings` 単一行（id=1 CHECK）を含める
+  - `account_profiles` に `display_name` / `note`（Account/CredentialAccount の同名フィールド供給元）を含める
+  - `remote_accounts.actor_uri` UNIQUE、`custom_emojis` 複合主キー（shortcode, domain）、`instance_settings` 単一行（id=1 CHECK、`thumbnail`/`languages` 列を含む）を含める
   - 観測可能な完了条件: `spawn_test_app` 起動時に 0005 が自動適用され、4 テーブルが存在しクエリ可能
   - _Requirements: 6.5, 7.2, 8.2, 9.1_
 - [ ] 1.2 アカウント関連のドメイン型を定義する
-  - `AccountRef` / `ProfileField` / `CredentialSource` / `AccountProfile` / `RemoteAccount` / `CustomEmojiView` / `RelationshipView` / `AccountCounts` / `InstanceSettings` を定義
+  - `AccountView` / `ProfileField` / `CredentialSource` / `AccountProfile`（`display_name`/`note` を含む） / `ProfilePatch`（項目別部分更新入力、`None` は変更なし） / `RemoteAccount` / `CustomEmojiView` / `RelationshipView` / `AccountCounts` / `InstanceSettings` を定義
+  - `AccountRef` / `Visibility` は本 spec では定義せず、core-runtime の `domain` モジュールが所有する正準共有型を import して使用する
   - 観測可能な完了条件: 各型が `cargo build` でコンパイルでき、Account 必須フィールドとリモート/ローカルの acct 規律差を型で表現できる
-  - _Requirements: 1.1, 1.2, 1.3, 2.2, 5.2, 7.2, 8.1, 9.2_
+  - _Requirements: 1.1, 1.2, 1.3, 2.2, 5.2, 6.1, 7.2, 8.1, 9.2_
   - _Boundary: model_
   - _Depends: 1.1_
 - [ ] 1.3 下流所有情報の委譲境界（port + 既定実装 + レジストリ）を定義する
@@ -42,19 +44,20 @@
 - [ ] 2.3 (P) カスタム絵文字読み取りリポジトリを実装する
   - `visible_in_picker` を含む一覧取得とショートコード→絵文字解決を read 専用で提供（書き込み API を持たない）
   - 観測可能な完了条件: 投入済み絵文字に対し一覧取得とショートコード解決が期待値を返す統合テストが green
-  - _Requirements: 1.4, 9.1_
+  - _Requirements: 1.4, 9.1, 9.3_
   - _Boundary: CustomEmojiRepository_
   - _Depends: 1.1_
 - [ ] 2.4 (P) インスタンス運用設定リポジトリを実装する
-  - 運用設定行を取得し、未設定項目を安全な既定にマージして常に全項目埋まった値を返す
-  - 観測可能な完了条件: 設定未投入でも全項目が既定で埋まった値が返る統合テストが green
-  - _Requirements: 8.2, 8.3_
+  - 運用設定行を取得し、未設定項目を安全な既定にマージして常に全項目埋まった値を返す（`thumbnail` は既定 `null`、`languages` は既定 `[]` を含む）
+  - 観測可能な完了条件: 設定未投入でも全項目（`thumbnail`/`languages` を含む）が既定で埋まった値が返る統合テストが green
+  - _Requirements: 8.1, 8.2, 8.3_
   - _Boundary: InstanceSettingsRepository_
   - _Depends: 1.1_
 
 - [ ] 3. シリアライザとエンティティ契約ゴールデン
 - [ ] 3.1 (P) Account シリアライザ（ローカル/リモート/Credential 統一）を実装する
   - ローカル（`ResolvedActor` + `AccountProfile`）とリモート（`RemoteAccount`）を共通 Account JSON へ写像。acct/url/uri 規律分け、avatar/header 既定 URL（非 null）、emojis 解決、CredentialAccount の source/role 付与、counts は `AccountCountsProvider`
+  - `display_name`/`note` はローカルは `AccountProfile`、リモートは `RemoteAccount` の同名フィールドから供給する
   - 観測可能な完了条件: 同一入力で決定的 JSON を生成し、avatar/header が常に非 null になる単体テストが green
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.2_
   - _Boundary: AccountSerializer_
@@ -66,8 +69,8 @@
   - _Boundary: RelationshipSerializer_
   - _Depends: 1.2_
 - [ ] 3.3 (P) Instance(v2) シリアライザを実装する
-  - 運用設定 + 本サーバー実制約（version / configuration の上限・許容値、media-pipeline の上限と整合）を合成して Instance(v2) JSON を生成
-  - 観測可能な完了条件: 運用設定値が反映され、未設定項目が既定で埋まり、`configuration` が実制約と整合する単体テストが green
+  - `title`/`description`/`contact`/`rules`/`registrations`/`thumbnail`/`languages` は運用設定（`InstanceSettings`）から供給し、`version`/`source_url` はビルド時定数（`env!("CARGO_PKG_VERSION")` 等）から、`usage.users.active_month` は MVP 固定値プレースホルダから供給して Instance(v2) JSON を合成。`configuration` は media-pipeline の上限等と整合させる
+  - 観測可能な完了条件: 運用設定値が反映され、未設定項目が既定で埋まり、`version`/`source_url`/`usage.users.active_month` が決定的に再現され、`configuration` が実制約と整合する単体テストが green
   - _Requirements: 8.1, 8.2, 8.3, 8.4_
   - _Boundary: InstanceSerializer_
   - _Depends: 1.2, 2.4_
@@ -83,8 +86,7 @@
   - _Requirements: 1.6, 2.4, 5.6, 8.5, 9.5_
   - _Depends: 3.1, 3.2, 3.3, 3.4_
 
-- [ ] 4. リモートアカウントのフェッチ・正規化
-- [ ] 4.1 リモートアカウントフェッチャを実装する
+- [ ] 4. リモートアカウントフェッチャを実装する
   - 有効キャッシュ時は取得せず、ミス/陳腐化時のみ federation-core の `FederationHttpClient` で取得し、JSON-LD 安全展開で正規化（未知プロパティで失敗させず、必須欠落のみ失敗）、結果をキャッシュ upsert
   - 観測可能な完了条件: `FederationHttpClient` モックで取得→正規化→キャッシュ保存が成立し、未知プロパティ付き文書でも正規化が成功する統合テストが green
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
@@ -97,7 +99,7 @@
   - 観測可能な完了条件: ローカル/リモートいずれも Account を返し、未存在で 404 を返すサービス単位テストが green
   - _Requirements: 2.1, 3.1, 3.2, 3.3_
   - _Boundary: AccountService_
-  - _Depends: 3.1, 4.1_
+  - _Depends: 3.1, 4_
 - [ ] 5.2 accounts/:id/statuses（委譲）を実装する
   - アカウント解決 + ページネーション解釈 + 絞り込み/可視性コンテキストを `AccountStatusesProvider` へ受け渡し、未登録時は空ページを返す
   - 観測可能な完了条件: provider 未登録で空ページ（`Link` 付き）を返し、絞り込み条件が provider へ伝達されるテストが green
@@ -129,8 +131,7 @@
   - _Boundary: CustomEmojiService_
   - _Depends: 2.3, 3.4_
 
-- [ ] 6. エンドポイントと横断規約の適用
-- [ ] 6.1 全エンドポイントを横断レイヤーに乗せて mount する
+- [ ] 6. 全エンドポイントを横断レイヤーに乗せて mount する
   - verify_credentials(`read:accounts`)/relationships(`read:follows`)/update_credentials(`write:accounts`) に Bearer+Scope を適用、accounts/:id・accounts/:id/statuses・instance・custom_emojis は任意/公開、エラーは Mastodon 互換本文、リスト系は `Link`+プロキシ尊重 URL、`X-RateLimit-*` 装着点に乗せる
   - 観測可能な完了条件: 各エンドポイントが期待スコープを要求し、未認証で公開応答する箇所が応答し、全エラーが互換 JSON で返る統合テストが green
   - _Requirements: 2.3, 3.4, 5.5, 6.4, 10.1, 10.2, 10.3, 10.4, 10.5_
@@ -142,12 +143,12 @@
   - verify_credentials / accounts/:id / accounts/:id/statuses / relationships / update_credentials の往復を `spawn_test_app` 上で検証（401/403/404/422・ページネーション・委譲未登録時の空/既定・更新反映）
   - 観測可能な完了条件: 上記シナリオの統合テストがすべて green
   - _Requirements: 2.1, 2.3, 3.1, 3.3, 3.4, 4.1, 4.2, 5.1, 5.4, 6.1, 6.3, 6.4_
-  - _Depends: 6.1_
+  - _Depends: 6_
 - [ ] 7.2 instance v2 / custom_emojis とリモート取得の統合テストを通す
   - instance v2 の運用設定反映と既定、custom_emojis の visible 一覧、`FederationHttpClient` モックでのリモート取得→正規化→Account→キャッシュ再利用→取得失敗の互換応答を検証
   - 観測可能な完了条件: instance/custom_emojis/リモート取得の統合テストがすべて green
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 8.1, 8.2, 9.1_
-  - _Depends: 6.1_
+  - _Depends: 6_
 - [ ] 7.3 エンティティ契約ゴールデンの最終検証を行う
   - Account / CredentialAccount / Relationship / Instance(v2) / CustomEmoji のゴールデンが決定的に再現され、null 規律・配列形が固定されていることを最終確認
   - 観測可能な完了条件: 契約ゴールデンテストが決定的に再現し green

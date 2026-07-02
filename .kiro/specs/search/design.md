@@ -516,6 +516,7 @@ pub fn build_search_results(&self, accounts: Vec<serde_json::Value>, statuses: V
 
 - `search_tags`: ハッシュタグ読み取りインデックス（正規化名 UNIQUE・使用集計）。本 spec 所有。upstream 投稿タグから導出。
 - `search_status_tags`: タグ↔投稿の関連（status_id は statuses-core `statuses.id` を論理参照、read-only 導出）。
+- `search_index_watermark`: `HashtagIndexer` のオンデマンドキャッチアップスキャン用カーソル（単一行、最終処理済み `statuses.created_at`/`id` を保持）。本 spec 所有。
 - アカウント/投稿の照合は upstream の `account_profiles`/`remote_accounts`/`statuses` を read-only 参照（本 spec はテーブルを所有しない）。
 - 可視性・関係状態・Account/Status JSON は上流所有（委譲/消費）。
 
@@ -555,6 +556,14 @@ CREATE TABLE search_status_tags (
     PRIMARY KEY (tag_id, status_id)
 );
 CREATE INDEX search_status_tags_status_idx ON search_status_tags(status_id);
+
+CREATE TABLE search_index_watermark (
+    id            BOOLEAN PRIMARY KEY DEFAULT TRUE,  -- 単一行を強制（シングルトン）
+    status_created_at TIMESTAMPTZ,                    -- 最終処理済み statuses.created_at（未保持=初回/バックフィル）
+    status_id     BIGINT,                              -- 最終処理済み statuses.id（tie-break）
+    updated_at    TIMESTAMPTZ NOT NULL,
+    CONSTRAINT search_index_watermark_singleton CHECK (id)
+);
 
 -- 後付け（任意・別マイグレーション、初期配布には含めない）:
 --   CREATE EXTENSION pg_bigm;  CREATE INDEX ... USING gin (... gin_bigm_ops);

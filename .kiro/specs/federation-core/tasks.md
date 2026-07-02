@@ -35,7 +35,8 @@
 - [ ] 2. コア: 署名送受信と公開鍵
 - [ ] 2.1 公開鍵リゾルバを実装する
   - keyId から公開鍵素材（公開鍵 PEM・所有アクター URI）を取得して `remote_public_keys` にキャッシュし、有効キャッシュ時はネットワーク取得を行わず、force 指定で再取得する
-  - 観測可能な完了条件: 初回取得後はキャッシュから返り、force 再取得でネットワーク取得が走る統合テストが通る
+  - キャッシュの有効性を設定値 `federation.public_key_cache_ttl`（既定 24 時間）で判定し、`fetched_at` から TTL を超えたキャッシュは陳腐として扱い次回検証時に再取得する
+  - 観測可能な完了条件: 初回取得後はキャッシュから返り、force 再取得でネットワーク取得が走り、TTL 超過後の解決要求では再度ネットワーク取得が走る統合テストが通る
   - _Requirements: 2.3, 2.4_
   - _Boundary: PublicKeyResolver_
   - _Depends: 1.4_
@@ -47,6 +48,7 @@
   - _Depends: 1.5_
 - [ ] 2.3 署名検証器を実装する
   - 受信署名の形式検出→署名対象再構築→公開鍵検証→本文ダイジェスト検証を行い、署名欠落/不正/期限切れ/鍵取得失敗を検証失敗とし、検証失敗時はキャッシュ無効化＋一度再取得する。検証器自体をモック可能境界として trait 化する
+  - 公開鍵解決がネットワーク/DB 呼び出しを伴う非同期処理であるため、検証処理自体を非同期関数として提供し、本 spec の他の port（`FederationHttpClient` 等）と非同期性を統一する
   - 観測可能な完了条件: 正当署名で署名者 URI を返し、改ざん・欠落・鍵取得失敗が検証失敗になり、両形式で検証が成立する統合テストが通る
   - _Requirements: 2.1, 2.2, 2.5, 2.6, 7.1_
   - _Boundary: SignatureVerifier_
@@ -61,13 +63,15 @@
 - [ ] 3. コア: 受信構成要素と配送構成要素
 - [ ] 3.1 (P) 受信重複排除ストアを実装する
   - Activity id を `received_activities` に記録し、新規判定（新規 true / 既知 false）を提供する
-  - 観測可能な完了条件: 同一 Activity id の二度目が既知と判定される統合テストが通る
+  - 設定値 `federation.received_activity_retention_days`（既定 14 日）を超えて経過した記録行を周期的に削除するプルーニングを提供する
+  - 観測可能な完了条件: 同一 Activity id の二度目が既知と判定され、保持日数を超えた行がプルーニング実行後に削除される統合テストが通る
   - _Requirements: 7.4_
   - _Boundary: ReceivedActivityStore_
   - _Depends: 1.1_
 - [ ] 3.2 (P) 受信ディスパッチ境界とブロック委譲境界を実装する
   - 種別→`InboundActivityHandler` の `InboundActivityDispatcher` レジストリと、既定 no-op の `BlockPolicy` 委譲境界を実装し、未登録種別を安全に扱う
-  - 観測可能な完了条件: スタブハンドラを登録すると対応種別がそれへ委譲され、既定ブロックポリシーが常に非ブロックを返すテストが通る
+  - `BlockPolicy` は宛先コンテキスト（アクター個別 inbox 宛は宛先ローカルアクターの URI が判明した状態、shared inbox 宛は宛先が未確定な状態）を受け取る destination-aware 契約とし、既定実装はいずれの宛先コンテキストでも常に非ブロック（false）を返す
+  - 観測可能な完了条件: スタブハンドラを登録すると対応種別がそれへ委譲され、既定ブロックポリシーがアクター宛・shared inbox 宛いずれの宛先コンテキストでも常に非ブロックを返すテストが通る
   - _Requirements: 7.3, 7.5, 12.1, 12.3_
   - _Boundary: InboundActivityDispatcher, BlockPolicy_
   - _Depends: 1.2_
@@ -83,17 +87,26 @@
   - _Requirements: 10.3, 10.4, 11.4_
   - _Boundary: RecipientTargetResolver_
   - _Depends: 1.3_
-- [ ] 3.5 (P) ActivityPub ドキュメントビルダーを実装する
-  - アクター表現（id・inbox・outbox・公開鍵, owner 非露出）と outbox 順序付きコレクションのページ構築を、actor-model のアクター解決・公開鍵供給と JSON-LD コーデックで実装し、範囲外 Activity を除外する
-  - 観測可能な完了条件: アクター表現に公開鍵が含まれ owner が含まれず、outbox がページ単位で順序付きコレクションとして構築される単体テストが通る
+- [ ] 3.5 (P) ローカルオブジェクト/outbox の下流供給委譲境界を実装する
+  - ローカルオブジェクト/コレクション URL を所有判定し AP JSON 表現を返す `ObjectDocumentProvider` の multi-provider レジストリ（登録順に最初に一致したプロバイダへ委譲、不一致・未登録は None）を実装する
+  - 指定アクターの outbox ページに収録する Activity を供給する `OutboxSource` のレジストリ（登録された全ソースから該当ページ分を収集）を実装する
+  - 両レジストリとも下流未登録の間は安全な既定応答（`ObjectDocumentProvider` は常に None、`OutboxSource` は常に空ページ）を返す既定実装を提供する
+  - 観測可能な完了条件: プロバイダ未登録時に解決要求が None を返し、スタブプロバイダ登録後はその URL 空間の解決結果が返り、複数の `OutboxSource` を登録すると収集結果が束ねられる単体テストが通る
+  - _Requirements: 6.2, 6.6, 8.1, 8.2, 8.3_
+  - _Boundary: ObjectDocumentProvider, OutboxSource_
+- [ ] 3.6 (P) ActivityPub ドキュメントビルダーを実装する
+  - アクター表現（id・inbox・outbox・公開鍵, owner 非露出）を actor-model のアクター解決・公開鍵供給と JSON-LD コーデックで構築する
+  - outbox 順序付きコレクションのページの入れ物（構造・ページング）を構築し、収録する Activity 本体は `OutboxSource` レジストリから収集して範囲外 Activity を除外する
+  - 観測可能な完了条件: アクター表現に公開鍵が含まれ owner が含まれず、outbox がページ単位の順序付きコレクションとして構築され収録項目が `OutboxSource` の供給内容と一致する単体テストが通る
   - _Requirements: 6.1, 6.2, 6.5, 8.1, 8.2, 8.3_
   - _Boundary: ActivityPubDocumentBuilder_
-  - _Depends: 1.2, 1.3_
+  - _Depends: 1.2, 1.3, 3.5_
 
 - [ ] 4. 統合: 受信パイプラインと配送抽象
 - [ ] 4.1 受信パイプラインサービスを実装する
   - `InboxService` でリモート受信フルパイプライン（署名検証→必須プロパティ検証→ブロック判定→重複排除→ディスパッチ）と、署名検証を除く同一意味論経路（process_local）を実装し、各拒否を意味論処理より前に行う
-  - 観測可能な完了条件: 検証失敗が認証失敗・ブロック署名者が拒否・必須欠落が不正・重複が再処理なしになり、リモート経路とローカル経路が同一の重複排除・ディスパッチ処理に合流する統合テストが通る
+  - リモート受信は URL（アクター個別 inbox / shared inbox）から宛先コンテキストを組み立てて `BlockPolicy` へ渡し、in-process の `process_local` は宛先ローカルアクターが確定済みのため常にアクター宛の宛先コンテキストで判定する
+  - 観測可能な完了条件: 検証失敗が認証失敗・ブロック署名者が拒否・必須欠落が不正・重複が再処理なしになり、リモート経路とローカル経路が同一のブロック判定・重複排除・ディスパッチ処理に合流する統合テストが通る
   - _Requirements: 6.4, 7.1, 7.2, 7.3, 7.4, 9.3, 12.1, 12.2_
   - _Boundary: InboxService_
   - _Depends: 2.3, 3.1, 3.2_
@@ -116,25 +129,28 @@
   - 観測可能な完了条件: 複数アクターがそれぞれ JRD で解決され、他ドメイン照会は非解決・不在は未検出、NodeInfo に内部情報が含まれない統合テストが通る
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3_
   - _Boundary: webfinger, nodeinfo_
-  - _Depends: 3.5_
+  - _Depends: 3.6_
 - [ ] 5.2 (P) ActivityPub GET と outbox エンドポイントを実装する
   - アクター/オブジェクト/コレクション GET を content negotiation で activity+json で返し、セキュアモード時は authorized fetch（署名検証）を要求して未署名/検証失敗には表現を返さず、非 AP Accept は表現を返さず、不在は未検出とする。outbox をページ単位の順序付きコレクションで返す
-  - 観測可能な完了条件: AP Accept で activity+json が返り owner を含まず、非 AP Accept は AP 表現を返さず、セキュアモードで未署名 GET が拒否され、outbox がページで返る統合テストが通る
+  - アクター URL 以外（オブジェクト/コレクション）の GET は `ObjectDocumentProvider` レジストリへ委譲し、None は未検出として応答する。outbox の収録項目は `OutboxSource` レジストリから収集し、下流未登録の間は空コレクションを返す
+  - 観測可能な完了条件: AP Accept で activity+json が返り owner を含まず、非 AP Accept は AP 表現を返さず、セキュアモードで未署名 GET が拒否され、outbox がページで返り、下流未登録のオブジェクト URL は未検出、outbox は空コレクションになる統合テストが通る
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.6, 8.1, 8.2, 9.4_
   - _Boundary: ap_get, outbox_
-  - _Depends: 3.5, 4.1_
+  - _Depends: 3.6, 4.1_
 - [ ] 5.3 inbox / shared inbox エンドポイントを実装する
   - inbox（アクター毎）と shared inbox の POST を受信パイプラインへ接続し、検証失敗は認証失敗応答、受理は 202、重複は再処理なしの受領応答とする
-  - 観測可能な完了条件: 署名付き Activity が 202 で受理されディスパッチされ、検証失敗が認証失敗応答になる統合テストが通る
+  - アクター個別 inbox は URL 上の宛先アクターをブロック判定の宛先コンテキストとして渡し、shared inbox は宛先未確定の宛先コンテキストを渡す
+  - 観測可能な完了条件: 署名付き Activity が 202 で受理されディスパッチされ、検証失敗が認証失敗応答になり、アクター個別 inbox と shared inbox のそれぞれで異なる宛先コンテキストが `BlockPolicy` に渡ることが確認できる統合テストが通る
   - _Requirements: 7.1, 7.2_
   - _Boundary: inbox_
   - _Depends: 4.1_
 - [ ] 5.4 連合モジュールを bootstrap と AppState へ配線する
-  - core-runtime 起動設定にセキュアモードフラグと配送リトライ方針を追加し、各 port（HTTP クライアント・公開鍵リゾルバ・既定ブロックポリシー・ディスパッチャ）を構築・配線して連合ルータを土台ルータへ装着し、配送ワーカーを起動して配送サービスとディスパッチャを `AppState` に格納する
-  - 観測可能な完了条件: 起動後に WebFinger・AP GET・inbox・配送が一連で機能し、下流がディスパッチャへハンドラ登録・配送サービスへ配送依頼できる
+  - core-runtime 起動設定にセキュアモードフラグ・配送リトライ方針・公開鍵キャッシュ TTL（`federation.public_key_cache_ttl`）・受信 Activity 保持日数（`federation.received_activity_retention_days`）を追加し、各 port（HTTP クライアント・公開鍵リゾルバ・既定ブロックポリシー・ディスパッチャ・既定 `ObjectDocumentProvider`/`OutboxSource`）を構築・配線して連合ルータを土台ルータへ装着する
+  - 配送ワーカーと受信 Activity プルーニング周期タスクを起動し、配送サービスとディスパッチャを `AppState` に格納する
+  - 観測可能な完了条件: 起動後に WebFinger・AP GET・inbox・配送が一連で機能し、下流がディスパッチャ・`ObjectDocumentProvider`・`OutboxSource` へ登録、配送サービスへ配送依頼できる
   - _Requirements: 7.3, 10.1, 11.1, 11.2_
   - _Boundary: FederationModule, Bootstrap, AppState, Config_
-  - _Depends: 4.2, 4.3, 5.1, 5.2, 5.3_
+  - _Depends: 3.5, 4.2, 4.3, 5.1, 5.2, 5.3_
 
 - [ ] 6. 検証
 - [ ] 6.1 (P) 署名送受信の統合テスト
@@ -144,14 +160,14 @@
   - _Boundary: signatures_it_
   - _Depends: 5.4_
 - [ ] 6.2 (P) 受信・配送キューの統合テスト
-  - inbox 受信のディスパッチ受け渡し・重複再処理なし・ブロック署名者拒否、配送キューの即時復帰・ワーカー送信・バックオフ再試行・恒久失敗・shared inbox 重複排除を検証する
-  - 観測可能な完了条件: ブロック署名者が拒否され、重複 Activity が再処理されず、配送が再試行・恒久失敗・重複排除のとおり振る舞う
+  - inbox 受信のディスパッチ受け渡し・重複再処理なし、アクター個別 inbox 宛のブロック署名者拒否、shared inbox 宛は既定契約どおり一括拒否されないこと、配送キューの即時復帰・ワーカー送信・バックオフ再試行・恒久失敗・shared inbox 重複排除を検証する
+  - 観測可能な完了条件: アクター個別 inbox 宛のブロック署名者が拒否され、shared inbox 宛の同一署名者は既定 `BlockPolicy` の下で受理され、重複 Activity が再処理されず、配送が再試行・恒久失敗・重複排除のとおり振る舞う
   - _Requirements: 7.3, 7.4, 11.1, 11.2, 11.3, 11.4, 11.5, 12.1, 12.2_
   - _Boundary: inbox_delivery_it_
   - _Depends: 5.4_
 - [ ] 6.3 (P) WebFinger/NodeInfo/AP GET の統合テスト
-  - 複数アクター WebFinger 解決・他ドメイン非解決・未検出、NodeInfo の内部情報非露出、AP GET の owner 非露出・content negotiation・セキュアモード authorized fetch・未検出を検証する
-  - 観測可能な完了条件: 上記がグリーンで、AP 表現に owner が含まれずセキュアモードで未署名 GET が拒否される
+  - 複数アクター WebFinger 解決・他ドメイン非解決・未検出、NodeInfo の内部情報非露出、AP GET の owner 非露出・content negotiation・セキュアモード authorized fetch・未検出、下流未登録時の `ObjectDocumentProvider`（オブジェクト URL 未検出）・`OutboxSource`（空 outbox）の既定応答を検証する
+  - 観測可能な完了条件: 上記がグリーンで、AP 表現に owner が含まれずセキュアモードで未署名 GET が拒否され、下流未登録のオブジェクト URL が未検出、outbox が空コレクションとして返る
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 8.1, 8.2, 8.3, 9.1, 9.4_
   - _Boundary: webfinger_nodeinfo_it_
   - _Depends: 5.4_

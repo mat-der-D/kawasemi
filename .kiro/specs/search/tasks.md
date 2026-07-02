@@ -3,8 +3,9 @@
 - [ ] 1. 基盤: スキーマ・ドメイン型・解析・照合ポート
 - [ ] 1.1 検索用テーブルのマイグレーションを追加する
   - `migrations/0010_search.sql` を作成し `search_tags`（`name` UNIQUE・使用集計）と `search_status_tags`（tag_id↔status_id）を定義し、前方一致索引（`text_pattern_ops`）と status_id 索引を設定する
+  - 同マイグレーションに `search_index_watermark`（`id BOOLEAN PRIMARY KEY DEFAULT TRUE` + 単一行強制の CHECK 制約、`status_created_at`、`status_id`、`updated_at`）のシングルトンテーブルを追加し、ハッシュタグインデクサの導出カーソルを永続化できるようにする
   - 既定構成に `CREATE EXTENSION`（`pg_bigm` 等）を含めず、標準 PostgreSQL のみで成立させる。日本語拡張インデックスを後から独立マイグレーション（`CREATE EXTENSION` + GIN）で追加しても本テーブル・既定契約を破壊しない構造（スキーマコメントで後付け経路を明記）にする
-  - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、2 テーブルと各索引・制約が存在し、拡張未導入でも起動する統合確認が通る
+  - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、3 テーブル（`search_tags`/`search_status_tags`/`search_index_watermark`）と各索引・制約（`search_index_watermark` の単一行 CHECK を含む）が存在し、拡張未導入でも起動する統合確認が通る
   - _Requirements: 8.1, 8.2, 8.3_
   - _Boundary: Migration_
 - [ ] 1.2 (P) 検索ドメイン型を定義する
@@ -29,13 +30,14 @@
 - [ ] 2. データ層: ハッシュタグ読み取りインデックス
 - [ ] 2.1 ハッシュタグインデックスリポジトリを実装する
   - `src/search/hashtag_repository.rs` に `match_hashtags`（名前の前方/部分一致で `TagView` を返す）と `upsert_tag_usage`（`search_tags`/`search_status_tags` の upsert）を実装し、本 spec 所有テーブルのみを参照する
-  - 観測可能な完了条件: 名前一致で `TagView` が返り、`limit`/`offset` が反映され、(tag_id, status_id) 重複が一意化される統合テストが通る
-  - _Requirements: 5.1, 5.2, 5.5_
+  - 同ファイルに `load_watermark`（`search_index_watermark` から最終処理済み `statuses.created_at`/`id` を読む。未保持は `None`）と `save_watermark`（同テーブルへ upsert）を実装する
+  - 観測可能な完了条件: 名前一致で `TagView` が返り、`limit`/`offset` が反映され、(tag_id, status_id) 重複が一意化され、`save_watermark` 後に `load_watermark` が同じ値を返す統合テストが通る
+  - _Requirements: 5.1, 5.2, 5.5, 8.2_
   - _Boundary: HashtagIndexRepository_
   - _Depends: 1.1, 1.2_
-- [ ] 2.2 ハッシュタグインデクサ（導出・バックフィル）を実装する
-  - `src/search/hashtag_indexer.rs` に `backfill_from_statuses` を実装し、statuses-core の投稿保持データ（抽出済みハッシュタグ）を read-only で走査して `search_tags`/`search_status_tags` を導出・upsert する。時刻/ID は `RuntimeContext` を用いる
-  - 観測可能な完了条件: 既存投稿のハッシュタグがインデックスへ導出され、再実行で重複生成されず、upstream テーブルを変更しない統合テストが通る
+- [ ] 2.2 ハッシュタグインデクサ（watermark カーソル方式の導出・キャッチアップ）を実装する
+  - `src/search/hashtag_indexer.rs` に `catch_up_from_watermark` を実装し、`load_watermark` で得た watermark（未保持時は全件走査＝バックフィル相当）より新しい `statuses` 行を statuses-core の投稿保持データから read-only で走査し、抽出済みハッシュタグを `search_tags`/`search_status_tags` へ upsert したのち `save_watermark` で watermark を進める。時刻/ID は `RuntimeContext` を用いる
+  - 観測可能な完了条件: 既存投稿のハッシュタグがインデックスへ導出され、再実行で重複生成されず watermark 以降の新規投稿のみが処理され、upstream テーブルを変更しない統合テストが通る
   - _Requirements: 5.3_
   - _Boundary: HashtagIndexer_
   - _Depends: 2.1_
@@ -48,11 +50,11 @@
   - _Boundary: PgSearchBackend_
   - _Depends: 1.4_
 - [ ] 3.2 PgSearchBackend のハッシュタグ照合を結線する
-  - `pg_backend.rs` の `search_hashtags` を `HashtagIndexRepository::match_hashtags` に結線し、`TagMatch` 群を `limit`/`offset` 付きで返す
-  - 観測可能な完了条件: ハッシュタグ照合が読み取りインデックス経由で `TagMatch` を返す統合テストが通る
-  - _Requirements: 5.1, 5.5_
+  - `pg_backend.rs` の `search_hashtags` で、まず `HashtagIndexer::catch_up_from_watermark` をオンデマンド実行して検索直前までのタグ状態に追いつかせ、続けて `HashtagIndexRepository::match_hashtags` へ結線して `TagMatch` 群を `limit`/`offset` 付きで返す
+  - 観測可能な完了条件: ハッシュタグ照合の直前に watermark 以降の新規投稿が取り込まれたうえで、読み取りインデックス経由の `TagMatch` が返る統合テストが通る
+  - _Requirements: 5.1, 5.3, 5.5_
   - _Boundary: PgSearchBackend_
-  - _Depends: 2.1, 3.1_
+  - _Depends: 2.1, 2.2, 3.1_
 
 - [ ] 4. 具体化・解決・シリアライズ
 - [ ] 4.1 (P) Tag / SearchResults シリアライザを実装する

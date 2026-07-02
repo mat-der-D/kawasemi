@@ -23,16 +23,17 @@
 
 - [ ] 2. コア: ポリシー・遷移・Activity 生成・写像
 - [ ] 2.1 (P) フォロー承認要否ポリシー（同一サーバースキップ特権の単一定義）
-  - 宛先ロック状態と「送信元・宛先がともに同一サーバーのローカルか」から承認要否を返す単一判定を実装し、同一サーバー特権の分岐をこの一箇所のみに置く
-  - 両ローカル同一サーバーはロック済みでも確立、片側リモートのロック済みは承認必要、と単体テストで確認できる状態
+  - 送信元・宛先の生のアカウント識別（ローカル/リモート）と宛先ロック状態を受け取り、同一サーバー判定（両者がローカルか）を本判定の内部でのみ導出して承認要否を返す単一判定を実装する。呼び出し側（フォローサービス・受信ハンドラ）には同一サーバー判定の事前計算値を渡させず、同一サーバー特権の分岐をこの一箇所のみに置く
+  - 両ローカル同一サーバーはロック済みでも確立、片側リモートのロック済みは承認必要となり、同一サーバー判定が本判定の内部でのみ行われる（呼び出し側は判定ロジックを持たない）ことを単体テストで確認できる状態
   - _Requirements: 3.1, 3.2, 3.3, 3.4_
   - _Boundary: FollowApprovalPolicy_
   - _Depends: 1.2_
 
-- [ ] 2.2 (P) 関係状態遷移の共通関数
+- [ ] 2.2 (P) 関係状態遷移の共通関数と通知イベント emit
   - フォロー確立/解消・保留記録/昇格(Accept)/破棄(Reject)・ブロック適用（双方向フォローと両方向保留を単一トランザクションで解消してから確定）/解除・被ブロック設定/解除を、API 経路と受信経路が共有する冪等な遷移関数として実装する
-  - ブロック適用で双方向フォロー・両方向保留が消え、同一遷移の二重適用が状態を壊さないことを単体テストで確認できる状態
-  - _Requirements: 1.1, 1.4, 2.5, 2.6, 3.2, 5.1, 5.2, 7.7_
+  - フォロー確立（establish_follow）と受信保留記録（record_pending, direction=Inbound）のコミット後、この単一の合流点でのみ notifications の `NotificationEventSink`（既定 no-op）へ `follow` / `follow_request` の `NotificationEvent` を冪等に emit する（イベント型/シンク契約は notifications 所有で再定義しない）。呼び出し元（API 経路の FollowService/FollowRequestService、受信経路の InboundHandler）はいずれも emit ロジックを持たず、この関数を呼ぶだけで良い
+  - ブロック適用で双方向フォロー・両方向保留が消え、同一遷移の二重適用が状態を壊さないこと、およびフォロー確立・受信保留記録のコミット後にシンクへ 1 度だけイベントが渡り既定 no-op のため notifications 未配線でも成功することを単体テストで確認できる状態
+  - _Requirements: 1.1, 1.4, 2.5, 2.6, 3.1, 3.2, 5.1, 5.2, 7.2, 7.3, 7.7_
   - _Boundary: Transitions, RelationshipRepository_
   - _Depends: 1.3_
 
@@ -65,13 +66,6 @@
   - _Boundary: FollowRequestService_
   - _Depends: 2.2, 2.3, 2.4_
 
-- [ ] 3.5 (P) 通知イベント（NotificationEvent）を emit する
-  - notifications が所有する `NotificationEventSink`（既定 no-op）へ、フォロー / フォローリクエストの状態遷移コミット後に `follow` / `follow_request` の `NotificationEvent` を冪等に emit する。イベント型/シンク契約は notifications 所有で再定義しない
-  - フォロー確立・フォローリクエスト受信のコミット後にシンクへ 1 度だけイベントが渡り、既定 no-op のため notifications 未配線でも成功する状態
-  - _Requirements: 1.1, 2.2_
-  - _Boundary: FollowService, FollowRequestService_
-  - _Depends: 3.1, 3.2_
-
 - [ ] 3.3 (P) ミュート / アンミュートサービス
   - ミュート/アンミュートを連合 Activity を伴わない DB 状態更新として実装し、通知ミュートと有効期限を反映する
   - ミュートで muting が真、通知ミュート指定で muting_notifications が真、期限指定が記録され、連合配送が発生しない状態
@@ -87,7 +81,7 @@
   - _Depends: 2.2, 2.3, 2.4_
 
 - [ ] 4. コア: 受信処理と委譲実装
-- [ ] 4.1 受信 Activity ハンドラ
+- [ ] 4.1 (P) 受信 Activity ハンドラ
   - Follow/Accept/Reject/Block/Undo の受信を、API 経路と同じ承認ポリシー・遷移関数へ合流させる。受信 Follow は承認要否で確立 + Accept 配送 / 保留記録に分岐し、Accept/Reject/Block/Undo はそれぞれの状態遷移を冪等に行う
   - 受信 Follow がロック有無で確立/保留に分かれ、受信 Accept で送信中リクエストが確立、受信 Block で被ブロック + 関係解消、受信 Undo で逆操作が起こり、再受信で状態が二重変更されない状態
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 2.5, 2.6, 3.2_
@@ -95,8 +89,8 @@
   - _Depends: 2.1, 2.2, 2.3_
 
 - [ ] 4.2 (P) ブロック判定の委譲実装（署名拒否）
-  - federation-core のブロック判定委譲境界に、本 spec のブロック関係に基づく判定を供給する。署名者 URI をアカウントへ解決し、宛先ローカルアクターがブロック中なら真を返し、解除後は偽を返す
-  - ブロック中の署名者についてブロック判定が真を返し、解除後に偽へ戻ることを単体/統合で確認できる状態
+  - federation-core の destination-aware なブロック判定委譲境界に、本 spec のブロック関係に基づく判定を供給する。宛先が個別アクター向け（inbox 宛）の受信文脈では署名者 URI をアカウントへ解決し宛先ローカルアクターがブロック中なら真を返し、宛先を一意に決定できない共有 inbox 文脈では常に偽を返す（一括拒否しない）。ブロック解除後は偽を返す
+  - ブロック中の署名者について個別アクター向け文脈でブロック判定が真を返し、共有 inbox 文脈では常に偽を返し、解除後に偽へ戻ることを単体/統合で確認できる状態
   - _Requirements: 6.1, 6.2, 6.3, 6.4_
   - _Boundary: BlockPolicyImpl_
   - _Depends: 1.3_
@@ -111,7 +105,7 @@
   - accounts-and-instance `AccountCountsProvider` の `followers_count` / `following_count` 部分を follows グラフから算出して供給する（投稿数 / `last_status_at` は本 spec 範囲外で既定 0 / None）。契約は再定義せず bootstrap で既定実装（0）を差し替える
   - 配線後に Account のフォロワー数/フォロー中数が実値になり、未配線時は accounts の既定実装で安全に 0 になる状態
   - _Requirements: 8.2_
-  - _Boundary: AccountCountsContribution_
+  - _Boundary: AccountCountsProviderImpl_
   - _Depends: 1.3_
 
 - [ ] 5. 統合: エンドポイントと配線
@@ -123,18 +117,18 @@
   - _Depends: 3.1, 3.2, 3.3, 3.4_
 
 - [ ] 5.2 モジュール配線（受信ハンドラ・委譲実装・ルータ登録）
-  - SocialGraphModule を組み立て、受信ハンドラを連合ディスパッチャへ登録、関係状態プロバイダを accounts レジストリへ、ブロック判定を federation-core へ既定実装と差し替え登録し、ルータを土台へ装着して AppState へ格納する
-  - 起動後に受信 Activity がハンドラへ届き、accounts の relationships が実値を返し、ブロック判定が連合受信に効く状態
+  - SocialGraphModule を組み立て、受信ハンドラを連合ディスパッチャへ登録、関係状態プロバイダを accounts レジストリへ、ブロック判定を federation-core へ既定実装と差し替え登録し、アカウント数プロバイダ（followers/following 部分）を accounts の `AccountCountsProvider` レジストリへ既定実装と差し替え登録し、notifications の `NotificationEventSink` レジストリからハンドルを取得して Transitions へ注入（notifications 未構築時は既定 `NoopSink` として安全）し、ルータを土台へ装着して AppState へ格納する
+  - 起動後に受信 Activity がハンドラへ届き、accounts の relationships と counts（followers_count/following_count）が実値を返し、ブロック判定が連合受信に効き、フォロー確立/受信保留で notifications へイベントが渡る状態
   - _Requirements: 6.1, 7.1, 8.2, 10.1_
   - _Boundary: SocialGraphModule_
-  - _Depends: 4.1, 4.2, 4.3, 5.1_
+  - _Depends: 4.1, 4.2, 4.3, 4.4, 5.1_
 
 - [ ] 6. 検証: 統合・連合テスト
 - [ ] 6.1 (P) 関係操作の統合テスト
   - follow/unfollow（ローカル/リモート・冪等・自己拒否・オプション反映）、follow_requests（保留・一覧ページネーション・authorize/reject 配送）、同一サーバースキップ、mute/block（通知/期限・関係解消・配送）を統合検証する
   - 上記シナリオがエンドポイント経由で期待どおりの Relationship 応答と状態遷移・配送依頼を起こすことをテストで確認できる状態
   - _Requirements: 1.1, 1.5, 1.6, 1.7, 2.1, 2.2, 2.3, 2.4, 3.1, 3.4, 4.1, 4.2, 4.3, 5.1, 5.2, 5.4_
-  - _Boundary: SocialGraphEndpoints, FollowService, BlockService, MuteService_
+  - _Boundary: SocialGraphEndpoints, FollowService, FollowRequestService, BlockService, MuteService_
   - _Depends: 5.2_
 
 - [ ] 6.2 (P) 受信処理・署名拒否・プロバイダ統合テスト
