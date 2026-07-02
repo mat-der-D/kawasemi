@@ -172,7 +172,7 @@ tests/
 - `src/state.rs`（core-runtime）— `AppState` に `MediaModule`（`MediaService` / `MediaStore` / `ProcessingJobQueue` ハンドル）を追加。
 - `src/bootstrap.rs`（core-runtime）— プール確立後にメディアのリポジトリ/キュー/ストア/プロセッサ/サービスを構築し、`MediaModule` を `AppState` に格納、常駐ワーカーを起動。
 - `src/server.rs`（core-runtime）— ルータにメディアエンドポイントを mount し、api-foundation の横断レイヤー（認証・エラー・レート制限）が適用される装着点に乗せる。
-- `src/config/mod.rs`（core-runtime）— 起動設定にメディア保管ルート・アップロード上限サイズ・サムネイル寸法・対応形式・ワーカー並行度/再試行上限を追加。
+- `src/config/mod.rs`（core-runtime）— 起動設定にメディア保管ルート・アップロード上限サイズ・サムネイル寸法・対応形式・ワーカー並行度/再試行上限・処理ジョブのリース期間（`lease_duration`。クラッシュしたワーカーからジョブを再取得するまでの猶予。既定は想定処理時間を十分に上回る値、例: 5 分）を追加。
 
 > 各ファイルは単一責務。メディア業務（service/repository/queue/serializer）と外部副作用 adapter（local_fs/image_processor）と HTTP 表層（endpoints）とワーカーを分離し、core-runtime の Composition Root へ一方向に配線する。
 
@@ -207,7 +207,7 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Loop[worker poll loop] --> Claim{claim due job for update skip locked}
+    Loop[worker poll loop] --> Claim{claim due queued job or reclaim expired processing job for update skip locked}
     Claim -->|none| Wait[sleep then loop]
     Claim -->|job| Load[load media and original object]
     Load --> Process[process image thumbnail blurhash dims]
@@ -220,7 +220,7 @@ flowchart TD
     Process -->|decode fail| Failed
 ```
 
-ジョブは `FOR UPDATE SKIP LOCKED` で 1 件を排他取得しワーカー競合を防ぐ（4.2）。再試行は `attempts` と指数バックオフ（4.4）、上限到達で失敗状態（4.5, 6.5）。再実行時は既存派生物を上書き/スキップしメディア状態を真実源に冪等化（4.6）。
+ジョブは `FOR UPDATE SKIP LOCKED` で 1 件を排他取得しワーカー競合を防ぐ（4.2）。再試行は `attempts` と指数バックオフ（4.4）、上限到達で失敗状態（4.5, 6.5）。再実行時は既存派生物を上書き/スキップしメディア状態を真実源に冪等化（4.6）。クラッシュ等でロックされたまま完了しないジョブは、`locked_at` がリース期間（`lease_duration`）を超えたとき `claim_due` が `state='processing'` のまま再取得（reclaim）し、reclaim 自体を 1 回の試行として `attempts` を加算する（4.2, 4.4）。上限判定は通常の失敗経路（`fail_or_retry`）に委ねるため、reclaim 直後に再度クラッシュした場合でも次の失敗判定時に上限到達で `failed` 化される（許容するトレードオフ）。
 
 ### 処理状態のポーリング取得
 
@@ -231,10 +231,10 @@ flowchart TD
     Resolve -->|yes| State{media state}
     State -->|processing| Partial[206 with partial metadata url null]
     State -->|ready| Ok[200 with full media attachment]
-    State -->|failed| Err[error response per compat]
+    State -->|failed| Err[422 mastodon error body]
 ```
 
-未存在・非所有は `404`（または権限エラー）で実体を秘匿（2.3, 2.4）。処理中は `206`（`url` 未確定）、完了は `200`（実体/プレビュー URL + 派生メタ）（2.1, 2.2, 8.2）。
+未存在・非所有は `404`（または権限エラー）で実体を秘匿（2.3, 2.4）。処理中は `206`（`url` 未確定）、完了は `200`（実体/プレビュー URL + 派生メタ）（2.1, 2.2, 8.2）。処理失敗（`state=failed`）は `422` で Mastodon 互換のエラー本文（`{"error": "..."}`）を返す（6.5, 9.4）。
 
 ## Requirements Traceability
 
@@ -303,7 +303,7 @@ pub struct Media {
     pub description: Option<String>, pub focus: Focus, pub meta: Option<MediaMeta>,
     pub blurhash: Option<String>, pub created_at: OffsetDateTime,
 }
-pub struct ProcessingJob { pub id: Id, pub media_id: Id, pub attempts: u32, pub run_at: OffsetDateTime, pub state: JobState }
+pub struct ProcessingJob { pub id: Id, pub media_id: Id, pub attempts: u32, pub run_at: OffsetDateTime, pub locked_at: Option<OffsetDateTime>, pub state: JobState }
 ```
 - Invariants: `actor_id` は必須。`Focus` は範囲内。`state=Ready` のとき `meta` と実体 URL が確定。
 
@@ -345,10 +345,11 @@ pub async fn set_failed(pool: &PgPool, media_id: Id) -> Result<(), AppError>;
 | Requirements | 4.1, 4.2, 4.4, 4.5, 4.6 |
 
 **Responsibilities & Constraints**
-- 投入は受理時（1.6）。取得は `FOR UPDATE SKIP LOCKED` で `run_at <= now` の 1 件を排他取得（4.2）。
+- 投入は受理時（1.6）。取得は `FOR UPDATE SKIP LOCKED` で、`state='queued' AND run_at <= now` の新規ジョブ、または `state='processing' AND locked_at < now - lease_duration` のリース期限切れジョブ（ワーカークラッシュ後の再取得＝reclaim）のいずれかを 1 件排他取得（4.2）。
+- reclaim 時は `locked_at` を更新し `attempts++` する（クラッシュによる再取得も 1 試行として消費し、`fail_or_retry` の会計と整合させる）（4.2, 4.4）。
 - 完了でジョブ削除/完了化（4.3）。一時失敗は `attempts++` と指数バックオフで `run_at` 後退（4.4）。
 - 上限到達でジョブ失敗化（4.5）。状態を真実源にして冪等取得を保証（4.6）。
-- 時刻は `Clock` から取得（決定性）。
+- 時刻は `Clock` から取得（決定性）。`lease_duration` は起動設定（想定処理時間を十分に上回る値）。
 
 **Dependencies**
 - Inbound: MediaService（投入）, ProcessingWorker（消費） (P0)
@@ -359,11 +360,11 @@ pub async fn set_failed(pool: &PgPool, media_id: Id) -> Result<(), AppError>;
 ##### Service Interface
 ```rust
 pub async fn enqueue(pool: &PgPool, ids: &dyn IdGenerator, media_id: Id, now: OffsetDateTime) -> Result<(), AppError>;
-pub async fn claim_due(pool: &PgPool, now: OffsetDateTime) -> Result<Option<ProcessingJob>, AppError>; // FOR UPDATE SKIP LOCKED
+pub async fn claim_due(pool: &PgPool, now: OffsetDateTime, lease_duration: Duration) -> Result<Option<ProcessingJob>, AppError>; // FOR UPDATE SKIP LOCKED; queued(run_at<=now) を新規取得、または processing(locked_at<now-lease_duration) を reclaim（attempts++）
 pub async fn complete(pool: &PgPool, job_id: Id) -> Result<(), AppError>;
 pub async fn fail_or_retry(pool: &PgPool, job: &ProcessingJob, max_attempts: u32, now: OffsetDateTime) -> Result<JobOutcome, AppError>; // Retried | Failed
 ```
-- Postconditions: `claim_due` が返したジョブは他ワーカーから同時取得されない（4.2）。
+- Postconditions: `claim_due` が返したジョブは他ワーカーから同時取得されない（4.2）。reclaim されたジョブは `attempts` が加算された状態で返る（4.2, 4.4）。
 
 ### Storage / ストレージ層
 
@@ -468,7 +469,7 @@ pub async fn update_metadata(&self, actor_id: Id, media_id: Id, patch: MetadataP
 - 常駐ループで `claim_due` → 原本取得 → `process_image` → 派生物保管 → `set_ready` → `complete`（4.2, 4.3, 6.1）。
 - 一時失敗は `fail_or_retry`（バックオフ）、上限到達/復号失敗は `set_failed` + ジョブ失敗 + 診断出力（4.4, 4.5, 6.5）。
 - 冪等: メディア状態を真実源に、再実行時は既存派生物を上書き/スキップ（4.6）。
-- graceful shutdown は core-runtime のライフサイクルに従い、処理中ジョブのロックを解放/期限切れ再取得可能にする。
+- graceful shutdown は core-runtime のライフサイクルに従う。ワーカーが応答なく停止（クラッシュ）した場合はロック解放処理を待たず、`claim_due` の reclaim（`locked_at` がリース期間 `lease_duration` を超過した `processing` ジョブの再取得。`attempts++`）で自動的に復旧する（4.2, 4.4）。
 
 **Dependencies**
 - Inbound: MediaModule wiring（起動） (P0)
@@ -480,7 +481,7 @@ pub async fn update_metadata(&self, actor_id: Id, media_id: Id, patch: MetadataP
 - Trigger: 常駐ループ（`run_at <= now` のジョブ出現時）。
 - Input / validation: `media_processing_jobs` の取得済みジョブ + 原本オブジェクト。
 - Output / destination: 派生物（サムネイル）保管 + メディア状態 `ready/failed` 反映。
-- Idempotency & recovery: メディア状態を真実源に冪等。失敗は再試行/失敗状態化、ロックは shutdown/期限で解放。
+- Idempotency & recovery: メディア状態を真実源に冪等。失敗は再試行/失敗状態化、クラッシュ等でロックされたジョブは `lease_duration` 経過後に `claim_due` が reclaim し `attempts` を加算した上で再処理する。
 
 ### Media API / エンドポイント層
 
@@ -492,8 +493,8 @@ pub async fn update_metadata(&self, actor_id: Id, media_id: Id, patch: MetadataP
 | Requirements | 1.1, 2.1, 2.2, 2.3, 3.1, 3.2, 7.2, 7.3, 8.1, 8.2, 8.3, 8.4, 9.1, 9.2, 9.3, 9.4, 9.5 |
 
 **Responsibilities & Constraints**
-- アップロードは `write:media` スコープ要求（Bearer + Scope 再利用）、受理で `202`（9.1, 1.1）。
-- 取得は状態に応じ `206`/`200`、未存在/非所有は `404`（2.1, 2.2, 2.3）。更新は範囲検証後 `200`、範囲外 `422`（3.1, 3.2）。
+- アップロード・取得・更新はいずれも `write:media` スコープ要求（Bearer + Scope 再利用。Mastodon の実挙動では `GET` もアップロードフローに束ねられ読み取り専用スコープを持たないため、取得にも `write:media` を要求する）、受理で `202`（9.1, 1.1）。
+- 取得は状態に応じ `206`/`200`/`422`（処理失敗、`{"error": "..."}`）、未存在/非所有は `404`（2.1, 2.2, 2.3, 6.5）。更新は範囲検証後 `200`、範囲外 `422`（3.1, 3.2）。
 - 失敗は全て api-foundation の Mastodon 互換エラー本文（9.2, 9.3, 9.4）。レート制限ヘッダは横断レイヤーで付与（9.5）。
 - Serializer は `id`/`type`/`url`/`preview_url`/`remote_url`/`meta`/`focus`/`description`/`blurhash` を出力。処理中は `url=null`、`focus` 既定中央（8.1, 8.2, 7.2, 7.3）。`remote_url` は MVP 常に `null`。契約はハーネスにゴールデン登録（8.3, 8.4）。
 
@@ -507,7 +508,7 @@ pub async fn update_metadata(&self, actor_id: Id, media_id: Id, patch: MetadataP
 | Method | Endpoint | Request | Response | Errors |
 |--------|----------|---------|----------|--------|
 | POST | /api/v2/media | multipart: file, 任意 thumbnail/description/focus（`write:media`） | 202 MediaAttachment(url=null) | 401, 403, 422 |
-| GET | /api/v1/media/:id | Bearer（所有アクター） | 206（処理中）/ 200 MediaAttachment | 401, 404 |
+| GET | /api/v1/media/:id | Bearer（所有アクター、`write:media`） | 206（処理中）/ 200 MediaAttachment / 422 `{"error": "..."}`（処理失敗） | 401, 403, 404, 422 |
 | PUT | /api/v1/media/:id | description, focus（`write:media`） | 200 MediaAttachment | 401, 403, 404, 422 |
 
 ## Data Models
@@ -553,17 +554,18 @@ CREATE TABLE media_processing_jobs (
     last_error    TEXT,
     created_at    TIMESTAMPTZ NOT NULL
 );
-CREATE INDEX media_jobs_due_idx ON media_processing_jobs(run_at) WHERE state IN ('queued');
+CREATE INDEX media_jobs_due_idx ON media_processing_jobs(state, run_at)
+    WHERE state IN ('queued', 'processing');     -- 新規 queued(run_at<=now) と reclaim 対象 processing(locked_at<now-lease_duration) の双方を1本の部分インデックスでカバーする。locked_at 側の条件は now() 依存で部分インデックス述語にできないため、state='processing' に絞り込んだ後 locked_at を残余フィルタとして評価する（選択性はやや低下するが、単一鯖規模のテーブルサイズでは許容範囲）。
 ```
 
-- Consistency: ジョブ取得は `SELECT ... FOR UPDATE SKIP LOCKED` + 同一トランザクションで `locked_at`/`state` を更新し排他化（4.2）。
+- Consistency: ジョブ取得は `SELECT ... FOR UPDATE SKIP LOCKED` + 同一トランザクションで `locked_at`/`state`/`attempts` を更新し排他化（4.2）。reclaim（`state='processing' AND locked_at < now - lease_duration`）も同一クエリ内で `attempts++` する。
 - Temporal: `run_at`/`created_at`/`updated_at` は `Clock` 由来（決定性、6.4 と整合）。
 
 ### Data Contracts & Integration
 
 - MediaAttachment JSON は Mastodon 互換（`id`/`type`/`url`/`preview_url`/`remote_url`/`meta`(`original`,`small`,`focus`)/`description`/`blurhash`）。処理中は `url=null`。
 - エラー応答は api-foundation の `{"error": ...}`（+ `error_description`）に統一。
-- 起動設定追加: メディア保管ルート・アップロード上限サイズ・サムネイル寸法・対応形式・ワーカー並行度/再試行上限を core-runtime config へ。
+- 起動設定追加: メディア保管ルート・アップロード上限サイズ・サムネイル寸法・対応形式・ワーカー並行度/再試行上限・処理ジョブのリース期間（`lease_duration`）を core-runtime config へ。
 
 ## Error Handling
 

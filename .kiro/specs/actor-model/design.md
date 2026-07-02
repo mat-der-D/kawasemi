@@ -50,6 +50,7 @@
 
 - core-runtime: `RuntimeContext`（`IdGenerator` / `Rng` / `Clock` / `SigningKeyProvider`）、`PgPool`、`AppError`、起動設定（`Secret<T>` を含む）、マイグレーション基盤、テストハーネス（`spawn_test_app`）。
 - core-runtime の `SigningKeyProvider` trait は本 spec が**実装する**対象であり、シグネチャは変更しない。
+- core-runtime の `KeyRef(pub Id)`（対象アクターの `Id` を直接ラップする single-key-per-actor 参照型、`Hash + Eq` 導出済み）は本 spec が**そのまま消費する**対象であり、独自の別名型（`ActorKeyRef` 等）を重ねて定義しない。
 - 暗号ライブラリ: RSA 鍵生成（注入 `Rng` を受ける形）と AEAD（秘密鍵封緘）。標準的な Rust 暗号クレートに閉じる。
 - 下流仕様（JSON 契約・アクター URL 形・OAuth 詳細）を本 spec に持ち込んではならない。
 
@@ -57,10 +58,11 @@
 
 - `LocalActor` / `Owner` / `ActorSigningKey` の公開フィールドやドメイン型の変更。
 - 下流向け参照 API（`ActorDirectory` の `list_actors_for_owner` / `resolve_actor_by_handle` / `actor_public_key`）の契約変更。
-- 署名鍵供給の `KeyRef` 解釈・`DbSigningKeyProvider` の鍵キャッシュ更新規約の変更。
+- 署名鍵供給の `KeyRef`（core-runtime 定義の `KeyRef(pub Id)`、対象アクターの `Id` を直接ラップする single-key-per-actor 参照）の解釈・`DbSigningKeyProvider` の鍵キャッシュ更新規約の変更。
 - ハンドル一意制約・有効鍵一意制約・アクター状態モデルの変更。
 - 秘密鍵保管形式（暗号化方式・カラム構成）の変更。
 - core-runtime 側の `SigningKeyProvider` シグネチャや `KeyRef` 形が変わった場合（上流発の再検証）。
+- core-runtime の本番 `Rng` 実装が CSPRNG でなくなった場合（`KeyMaterial` の `RngAdapter` が置く `CryptoRng` 前提が崩れる）。
 
 ## Architecture
 
@@ -238,7 +240,7 @@ sequenceDiagram
 | ActorSigningKeyRepository | Data | 鍵の作成・有効鍵取得・失効・全件ロード | 4,5,6 | PgPool (P0) | Service, State |
 | KeyMaterial | Crypto | 注入 Rng による鍵ペア生成・PEM エンコード | 4 | RuntimeContext.rng (P0) | Service |
 | KeyCipher | Crypto | 秘密鍵の AEAD 封緘/開封 | 4 | KEK(config), RuntimeContext.rng (P0) | Service |
-| KeyCache | Runtime | KeyRef→SigningKey のメモリ保持 | 6 | model (P0) | State |
+| KeyCache | Runtime | KeyRef→SigningKey のメモリ保持 | 6 | core-runtime KeyRef/Id (P0) | State |
 | SigningKeyService | Service | 生成・ローテーション・有効鍵一意・キャッシュ更新 | 4,5,6 | KeyMaterial, KeyCipher, KeyRepo, KeyCache (P0) | Service |
 | DbSigningKeyProvider | Runtime | core-runtime SigningKeyProvider 本番実装 | 6 | KeyCache (P0) | Service |
 | ActorService | Service | アクター作成（鍵連動）・ライフサイクル | 1,2,7 | ActorRepo, OwnerRepo, SigningKeyService (P0) | Service |
@@ -378,6 +380,7 @@ pub async fn load_all_active(pool: &PgPool) -> Result<Vec<StoredSigningKey>, App
 **Responsibilities & Constraints**
 - `RuntimeContext.rng` を受けて RSA-2048 を生成（4.2）。同一決定的乱数で同一鍵を再現（4.3）。
 - 公開鍵 SPKI/PEM、秘密鍵 PKCS#8/PEM を出力（4.6）。
+- RSA 鍵生成クレート（`rsa` クレート等）は `rand_core::RngCore + CryptoRng` を要求するのに対し、core-runtime の `Rng` trait は `fill_bytes` のみを公開する。両者を橋渡しする `RngAdapter`（後述）を本コンポーネント内部に閉じて保持し、境界の外には出さない。
 
 **Contracts**: Service [x]
 
@@ -385,8 +388,24 @@ pub async fn load_all_active(pool: &PgPool) -> Result<Vec<StoredSigningKey>, App
 ```rust
 pub struct GeneratedKeyPair { pub algorithm: KeyAlgorithm, pub public_key_pem: String, pub private_key_pem: SecretString }
 pub fn generate_keypair(rng: &dyn Rng) -> Result<GeneratedKeyPair, AppError>;
+
+/// core-runtime の `&dyn Rng`（fill_bytes のみ）を、RSA 鍵生成クレートが要求する
+/// `rand_core::RngCore + CryptoRng` へ橋渡しするアダプタ。
+struct RngAdapter<'a>(&'a dyn Rng);
+
+impl<'a> rand_core::RngCore for RngAdapter<'a> {
+    fn next_u32(&mut self) -> u32 { /* fill_bytes から導出（rand_core 標準実装に準拠） */ }
+    fn next_u64(&mut self) -> u64 { /* fill_bytes から導出（rand_core 標準実装に準拠） */ }
+    fn fill_bytes(&mut self, dest: &mut [u8]) { self.0.fill_bytes(dest) }
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> { self.fill_bytes(dest); Ok(()) }
+}
+impl<'a> rand_core::CryptoRng for RngAdapter<'a> {} // マーカートレイト。下記 Assumptions 参照
 ```
 - Invariants: `private_key_pem` は `Secret` ラッパで保持し Debug/ログに露出しない（4.4）。
+
+**Assumptions**
+- `RngAdapter` への `CryptoRng` マーカー実装は、注入される `Rng` の実体が暗号学的疑似乱数生成器（CSPRNG）であることを前提に置く。`Rng` trait 自体は core-runtime 所有でこの前提を型で強制しないが、本 spec は同じ `Rng` を鍵生成・`KeyCipher` の nonce 生成という暗号用途にのみ用いる設計であり、本番実装が CSPRNG であることは妥当な前提として明示する（本番で決定的乱数を使う事故を防ぐ運用規律とは別軸の前提）。この前提が崩れた場合は Revalidation Triggers の対象とする。
+- 決定的乱数からの鍵再現（4.3）は、RSA 鍵生成クレートが RNG ストリームを固定かつ再現可能な順序で消費することに依存する。この挙動はクレートの内部実装詳細であり、本 design ではクレート選定時点で確定していないため、実装時に採用クレートの実際の挙動を検証すべき仮定として明記する。違反があれば Testing Strategy の決定的再現性ユニットテスト（`generate_keypair` が同一決定的乱数で同一鍵を再現するテスト）で検出される。
 
 #### KeyCipher
 
@@ -421,7 +440,7 @@ pub trait KeyCipher: Send + Sync {
 **Contracts**: State [x]
 
 ##### State Management
-- State model: `Arc<RwLock<HashMap<ActorKeyRef, SigningKey>>>`（内部可変性）。
+- State model: `Arc<RwLock<HashMap<KeyRef, SigningKey>>>`（内部可変性）。`KeyRef` は core-runtime 定義の `KeyRef(pub Id)`（対象アクターの `Id` を直接ラップ）をそのままキーに用いる。`Id` は `Copy + Hash + Eq` のため `KeyRef` も `Hash + Eq` を導出済みで、独自ラッパを介さず `HashMap` キーとして直接使える。
 - Persistence & consistency: 起動時に DB から温め、作成／ローテーションで `SigningKeyService` のみが更新（単一書込経路で整合）。
 - Concurrency strategy: 読み多数・書き少数。`RwLock` で保護。
 
@@ -433,7 +452,7 @@ pub trait KeyCipher: Send + Sync {
 | Requirements | 6.1, 6.2, 6.3 |
 
 **Responsibilities & Constraints**
-- `KeyRef` を「どのアクターの有効鍵か」を指す参照として解釈し、`KeyCache` から取得（6.2）。
+- `KeyRef(pub Id)`（core-runtime 定義）の `Id` を対象アクターの `Id` そのものとして解釈し、`KeyRef` をそのまま `KeyCache` のキーとして有効鍵を取得する（6.2）。鍵バージョン/世代は区別しない single-key-per-actor 前提に従う。
 - 該当鍵が無ければ `KeyError`（未検出）を返す（6.3）。
 
 **Contracts**: Service [x]
@@ -560,7 +579,7 @@ CREATE UNIQUE INDEX actor_signing_keys_active_unique
 ### Data Contracts & Integration
 
 - 下流提供型: `ActorSummary`（管理層）、`ResolvedActor`・`ActorPublicKey`（プロトコル層）。後者2型は owner を含まない（境界契約、3 / 8.4）。
-- core-runtime 連携: `DbSigningKeyProvider` が `SigningKeyProvider` を実装し、bootstrap が `RuntimeContext` へ注入。`KeyRef` は core-runtime 型で、actor 参照として解釈（不足時は再検証トリガ）。
+- core-runtime 連携: `DbSigningKeyProvider` が `SigningKeyProvider` を実装し、bootstrap が `RuntimeContext` へ注入。`KeyRef(pub Id)` は core-runtime が正準定義する型で、対象アクターの `Id` を直接ラップする single-key-per-actor 参照として解釈する。本 spec はこの定義をそのまま消費し、独自の別名型は持たない（定義変更時は Revalidation Triggers 参照）。
 - 起動設定: KEK（`Secret<T>`）を core-runtime config に1項目追加。
 
 ## Error Handling

@@ -65,6 +65,7 @@
 - マイグレーション番号規約・本 spec 所有テーブルのスキーマ変更。
 - 上流契約の変更（api-foundation の Bearer/Scope/MastodonError/Pagination/Harness、accounts-and-instance の Account シリアライズ/`RemoteAccountFetcher`/`AccountRef`、statuses-core の Status シリアライズ/`VisibilityPolicy`/可視投稿解決、federation-core の `FederationHttpClient`/JSON-LD/`ActorUrls`、actor-model の `ActorDirectory`、core-runtime の `AppState`/`RuntimeContext`）。
 - statuses-core が第一級の tags 問い合わせ境界を公開した場合（本 spec の読み取りインデックスを置換）/ federation-core がアウトバウンド WebFinger リゾルバを公開した場合（本 spec の薄い照会を置換）。
+- `PgSearchBackend` が生 SQL で直接参照する upstream カラム（`account_profiles.display_name`、`remote_accounts.username`/`domain`/`display_name`、`statuses.content`/`created_at`/`id`。Logical Data Model の「`PgSearchBackend` が依存する upstream カラム」参照）のカラム名・型を accounts-and-instance / statuses-core が変更した場合、本 spec の SQL の再検証が必要。
 
 ## Architecture
 
@@ -83,6 +84,7 @@ graph LR
     SearchService --> Hydrator[search hydrator]
     SearchService --> ResultSerializer[search result serializer]
     Backend --> PgBackend[pg search backend default]
+    PgBackend --> TagIndexer
     PgBackend --> TagRepo[hashtag index repository]
     PgBackend --> Pool[pg pool]
     TagRepo --> Pool
@@ -170,7 +172,7 @@ src/
 tests/
 ├── search_contract_it.rs        # SearchResults / Tag ゴールデン（決定的・空配列規律・Account/Status 埋め込み形）（契約）
 ├── search_accounts_it.rs        # アカウント検索（ローカル/既知リモート一致・following 絞り・一意化・limit/offset）（統合, SearchBackend 実体）
-├── search_statuses_it.rs        # 投稿検索（可視性に閉じる・account_id 絞り・不可視除外・limit/offset）（統合）
+├── search_statuses_it.rs        # 投稿検索（可視性に閉じる・account_id 絞り・不可視除外・limit/offset・オーバーフェッチ後の limit 切り詰め）（統合）
 ├── search_hashtags_it.rs        # ハッシュタグ検索（名前一致・インデックス導出・exclude_unreviewed 受理）（統合）
 ├── search_resolve_it.rs         # acct:/URL リモート解決（resolve=true 認証時のみ・WebFinger モック・取得失敗除外）（統合, FederationHttpClient モック）
 ├── search_type_scope_it.rs      # type 絞り込み・空クエリ拒否・read:search 認証/スコープ・空配列規律（統合）
@@ -205,7 +207,7 @@ flowchart TD
     Assemble --> Resp[200 search results]
 ```
 
-`type` 指定時は対象種別のみ照合し他種別は空配列（2.2）。空クエリは拒否（2.3）。`resolve=true` かつ認証時のみリモート解決（6.1, 6.5）。照合は `SearchBackend`、具体化は上流シリアライザ消費（7.1, 7.2, 1.2）。
+`type` 指定時は対象種別のみ照合し他種別は空配列（2.2）。空クエリは拒否（2.3）。`resolve=true` かつ認証時のみリモート解決（6.1, 6.5）。照合は `SearchBackend`、具体化は上流シリアライザ消費（7.1, 7.2, 1.2）。投稿検索は `PgSearchBackend` が事後可視性フィルタを見込んでオーバーフェッチし、`Hydrator` が可視性適用後に要求 `limit` へ切り詰める（4.6、ベストエフォートの緩和策でありページが稀に `limit` 未満になり得ることを許容する）。
 
 ### `acct:` / URL リモート解決（オーケストレーション委譲）
 
@@ -229,17 +231,19 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Q[hashtag query] --> Idx[hashtag index repository name match]
+    Q[hashtag query] --> CatchUp[on demand catch up scan from watermark]
+    CatchUp --> Idx[hashtag index repository name match]
     Idx --> Tags[tag matches name and aggregate]
     Tags --> TagSer[tag serializer build tag json history]
     subgraph Derivation
-      Up[upstream status persisted tags read only] --> Indexer[hashtag indexer derive]
-      Indexer --> Store[upsert search_tags and search_status_tags]
+      Up[upstream statuses newer than watermark read only] --> Indexer[hashtag indexer derive]
+      Indexer --> Store[upsert search_tags and search_status_tags and advance watermark]
     end
+    CatchUp -. triggers .-> Indexer
     Store -. feeds .-> Idx
 ```
 
-照合は本 spec 所有の `search_tags`/`search_status_tags` に対して行う（5.1）。インデックスは upstream 投稿の保持タグから read-only 導出（5.3）。`history` は最小集計で開始（1.3）。
+照合は本 spec 所有の `search_tags`/`search_status_tags` に対して行う（5.1）。インデックスは upstream 投稿の保持タグから read-only 導出し、ハッシュタグ検索リクエストの先頭で watermark（最終処理済み `statuses.created_at`/`id`）以降の新規投稿をオンデマンドでキャッチアップスキャンして更新する（新規投稿取り込み時のフック/通知には依存しない、5.3）。`history` は最小集計で開始（1.3）。
 
 ## Requirements Traceability
 
@@ -326,9 +330,9 @@ pub fn parse_query(q: &str) -> Result<ParsedQuery, AppError>; // 空/空白は A
 - `SearchBackend` は種別ごとに照合し**識別子のみ**返す（7.2）。エンティティ JSON 構築・可視性適用はポート外（7.1）。本 spec は port の定義と既定/モック実装を所有、将来エンジンは新実装で差し替え（7.3, 7.4, 7.5）。
 - `PgSearchBackend`（既定）:
   - `search_accounts`: ローカルアクター（`ActorDirectory`/`account_profiles`）と既知リモート（`remote_accounts`）に対し display_name/username/acct の部分一致（標準 SQL、`ILIKE`）で `AccountRef` 群を返す。`following` は照合段では候補抽出に留め、フォロー限定は Hydrator/上流関係に委譲（3.1, 3.3）。
-  - `search_statuses`: 閲覧者可視候補の投稿 `Id` 群を標準 SQL で抽出（本文部分一致）。`account_id` 指定時は当該アカウントに限定。最終可視性は Hydrator が `VisibilityPolicy` で再適用（4.1, 4.2, 4.3, 4.4, 4.5）。
+  - `search_statuses`: 閲覧者可視候補の投稿 `Id` 群を標準 SQL で抽出（本文部分一致）。`account_id` 指定時は当該アカウントに限定。最終可視性は Hydrator が `VisibilityPolicy` で再適用（4.1, 4.2, 4.3, 4.4, 4.5）。**オーバーフェッチ規約**: `search_statuses` は Hydrator の事後可視性フィルタで縮む分を吸収するため、SQL 上の `LIMIT` に要求 `limit` そのものではなく `limit` に固定マージンまたは倍率を加えたオーバーフェッチ件数（実装定数、例: `limit * 2` または `limit + 固定マージン` のいずれか大きい方）を用いる。`OFFSET` は要求 `offset` をそのまま用いる（オーバーフェッチはページ境界=`offset` を動かさない）。返却件数はオーバーフェッチ件数以下で `limit` を超えうる（切り詰めは Hydrator 側の責務）。
   - `search_hashtags`: `HashtagIndexRepository` の名前一致で `TagMatch` を返す（5.1）。
-  - すべて `limit`/`offset` を SQL に反映（3.4, 4.6, 5.5）。外部エンジン・必須拡張に依存しない（4.4, 8.1）。
+  - すべて `limit`/`offset` を SQL に反映（3.4, 4.6, 5.5）。ただし `search_statuses` は上記オーバーフェッチ規約に従い SQL `LIMIT` に要求 `limit` を超える値を用いる。外部エンジン・必須拡張に依存しない（4.4, 8.1）。
 - 日本語本文の縮退は許容し、将来差し替えで拡張可能に保つ（4.5）。
 
 **Dependencies**
@@ -350,7 +354,7 @@ pub trait SearchBackend: Send + Sync {
 }
 // 既定: PgSearchBackend（標準 PostgreSQL） / テスト: StubSearchBackend
 ```
-- Postconditions: 返却は識別子のみ。`search_statuses` は可視候補に限定（最終可視は Hydrator が再適用）。同一実装差し替えで `SearchService` を変更不要（7.4）。
+- Postconditions: 返却は識別子のみ。`search_statuses` は可視候補に限定（最終可視は Hydrator が再適用）。`search_statuses` の返却件数は要求 `limit` ちょうどではなく、上記オーバーフェッチ規約により `limit` を上回りうる（Hydrator が事後フィルタ後に `limit` へ切り詰める前提、4.6）。これは事後の可視性除外を吸収するためのベストエフォートの緩和策であり、除外件数がオーバーフェッチ分を上回る場合はページが `limit` 件に満たないことを許容する（4.5 の標準 PG 縮退許容と同じリスク許容に整合、ハードな保証ではない）。同一実装差し替えで `SearchService` を変更不要（7.4）。
 
 ### Data / データ層
 
@@ -362,9 +366,11 @@ pub trait SearchBackend: Send + Sync {
 | Requirements | 5.1, 5.2, 5.3, 8.2 |
 
 **Responsibilities & Constraints**
-- `HashtagIndexRepository`: `search_tags`（正規化名・url 構築元・使用集計）と `search_status_tags`（status_id↔tag）に対し、名前の前方/部分一致で `TagMatch` を返し、`TagView` の `history` 用の最小集計を提供（5.1, 5.2）。read/upsert のみ。
-- `HashtagIndexer`: statuses-core の投稿保持データ（抽出済みハッシュタグ）から read-only で `search_tags`/`search_status_tags` を導出・upsert する。バックフィル（既存投稿）と差分更新（新規投稿取り込み時の参照点）を提供（5.3）。時刻/ID は `RuntimeContext`。
-- upstream→downstream の通知に依存しない（read-only 導出）。statuses-core が第一級 tags を公開したら置換（Revalidation Trigger）。
+- `HashtagIndexRepository`: `search_tags`（正規化名・url 構築元・使用集計）と `search_status_tags`（status_id↔tag）に対し、名前の前方/部分一致で `TagMatch` を返し、`TagView` の `history` 用の最小集計を提供（5.1, 5.2）。read/upsert に加え、導出カーソル（最終処理済み `statuses.created_at`/`id` の watermark）の read/upsert を提供する。
+- `HashtagIndexer`: statuses-core の投稿保持データ（抽出済みハッシュタグ）から read-only で `search_tags`/`search_status_tags` を導出・upsert する。差分更新のトリガーは upstream からの通知/フック（statuses-core は投稿取り込みイベントを公開しない）に依存せず、**watermark カーソル方式のオンデマンドキャッチアップスキャン**で行う: 保持している watermark（最終処理済み `statuses.created_at`/`id`）より新しい `statuses` 行を read-only で走査し、抽出済みタグを `search_tags`/`search_status_tags` へ upsert したのち watermark を進める。watermark 未保持時（初回）は全件走査となり、これがバックフィルを兼ねる（5.3）。
+  - 実行タイミング: ハッシュタグ検索リクエストの先頭で本キャッチアップスキャンをオンデマンド実行し、常に検索直前までのタグ状態で照合する。追加のスケジューラ/バックグラウンドジョブ基盤を新設しない最小実装とする。将来、運用上の要求があれば同一手続きを周期実行するバックグラウンドスキャンとして追加してもよいが、本 spec の必須要件ではない。
+  - 時刻/ID は `RuntimeContext`。
+- upstream→downstream の通知（イベント/フック）に依存しない（read-only 導出、watermark カーソルによる自己完結的なキャッチアップ）。statuses-core が第一級 tags 問い合わせ境界を公開したら本導出機構を置換（Revalidation Trigger）。
 
 **Contracts**: Service [x] / State [x] / Batch [x]
 
@@ -372,9 +378,11 @@ pub trait SearchBackend: Send + Sync {
 ```rust
 pub async fn match_hashtags(pool: &PgPool, term: &str, limit: u32, offset: u32) -> Result<Vec<TagView>, AppError>;
 pub async fn upsert_tag_usage(pool: &PgPool, name: &str, status_id: Id, now: OffsetDateTime) -> Result<(), AppError>;
-pub async fn backfill_from_statuses(pool: &PgPool, now: OffsetDateTime) -> Result<u64, AppError>; // upstream 投稿タグを read-only 走査
+pub async fn load_watermark(pool: &PgPool) -> Result<Option<(OffsetDateTime, Id)>, AppError>; // 最終処理済み statuses.created_at/id（未保持ならバックフィル扱い）
+pub async fn save_watermark(pool: &PgPool, created_at: OffsetDateTime, status_id: Id) -> Result<(), AppError>;
+pub async fn catch_up_from_watermark(pool: &PgPool, now: OffsetDateTime) -> Result<u64, AppError>; // watermark より新しい statuses を read-only 走査し導出・upsert・watermark 更新（初回は全走査＝バックフィル相当）
 ```
-- Postconditions: `match_hashtags` は本 spec 所有テーブルのみ参照。`backfill_*` は upstream を変更しない（read-only）。
+- Postconditions: `match_hashtags` は本 spec 所有テーブルのみ参照。`catch_up_from_watermark` は upstream を変更しない（read-only）。watermark は本 spec 所有テーブルに保持する。ハッシュタグ検索は `catch_up_from_watermark` 実行後に `match_hashtags` を呼ぶ（オンデマンドキャッチアップ、5.3）。
 
 ### Service / サービス層
 
@@ -408,7 +416,7 @@ pub async fn resolve_remote(&self, parsed: &ParsedQuery, viewer: Id) -> Result<R
 
 **Responsibilities & Constraints**
 - `AccountRef` 群を accounts-and-instance の Account シリアライズ（複数 ID 一括）で Account JSON 化（1.2, 3.2）。重複 `AccountRef` を一意化（3.5）。
-- Status `Id` 群を statuses-core の可視投稿解決 + Status シリアライズで具体化し、`VisibilityPolicy` で閲覧者不可視を除外（1.2, 4.2）。
+- Status `Id` 群を statuses-core の可視投稿解決 + Status シリアライズで具体化し、`VisibilityPolicy` で閲覧者不可視を除外（1.2, 4.2）。`PgSearchBackend.search_statuses` はオーバーフェッチした候補（`limit` 超過あり）を渡すため、可視性フィルタ適用後に要求 `limit` 件まで切り詰めて返す（4.6）。オーバーフェッチはベストエフォートの緩和策であり、除外件数が多い場合は切り詰め前の件数が `limit` に満たないことがある（その場合はそのまま返す。ハードな保証ではない）。
 - `TagMatch` を `HashtagIndexRepository` の `TagView` 経由で `TagSerializer` により Tag JSON 化（5.2）。
 - `following=true` の最終フィルタはフォロー関係（social-graph 供給、accounts-and-instance 経由）に委ね、Hydrator で適用（3.3）。
 
@@ -417,10 +425,10 @@ pub async fn resolve_remote(&self, parsed: &ParsedQuery, viewer: Id) -> Result<R
 ##### Service Interface
 ```rust
 pub async fn hydrate_accounts(&self, refs: &[AccountRef], viewer: Id, following_only: bool) -> Result<Vec<serde_json::Value>, AppError>;
-pub async fn hydrate_statuses(&self, ids: &[Id], viewer: Id) -> Result<Vec<serde_json::Value>, AppError>; // 不可視除外
+pub async fn hydrate_statuses(&self, ids: &[Id], viewer: Id, limit: u32) -> Result<Vec<serde_json::Value>, AppError>; // 不可視除外 + limit へ切り詰め
 pub async fn hydrate_hashtags(&self, tags: &[TagMatch]) -> Result<Vec<serde_json::Value>, AppError>;
 ```
-- Invariants: `hydrate_statuses` は viewer から不可視の投稿を返さない（4.2）。出力は決定的（ゴールデン再現）。
+- Invariants: `hydrate_statuses` は viewer から不可視の投稿を返さない（4.2）。返却件数は `limit` を超えない（`PgSearchBackend` のオーバーフェッチ規約に対応する切り詰め、4.6。ベストエフォートのため `limit` 未満になることは許容する）。出力は決定的（ゴールデン再現）。
 
 #### SearchService
 
@@ -430,7 +438,7 @@ pub async fn hydrate_hashtags(&self, tags: &[TagMatch]) -> Result<Vec<serde_json
 | Requirements | 2.1, 2.2, 2.3, 2.5, 3.1, 3.3, 3.4, 4.1, 4.3, 4.6, 5.1, 5.4, 5.5, 6.1, 6.3, 7.1 |
 
 **Responsibilities & Constraints**
-- `QueryParser` で解析し空クエリは 422（2.3）。`type` 指定時は対象種別のみ照合、他種別は空配列（2.2）。`limit`/`offset` を各 `*Query` に渡す（2.5, 3.4, 4.6, 5.5）。
+- `QueryParser` で解析し空クエリは 422（2.3）。`type` 指定時は対象種別のみ照合、他種別は空配列（2.2）。`limit`/`offset` を各 `*Query` に渡す（2.5, 3.4, 4.6, 5.5）。投稿検索では `PgSearchBackend` がオーバーフェッチした候補を受け取り、`Hydrator.hydrate_statuses` へ要求 `limit` を渡して事後可視性フィルタ後に切り詰めさせる（4.6、オーバーフェッチ規約は PgSearchBackend/SearchHydrator 参照）。
 - `resolve=true` かつ認証時、`Acct`/`Url` は `RemoteResolver` を先に呼び解決結果を該当配列へ加える（6.1, 6.3）。`resolve=false` はローカル既知のみ（6.3）。
 - 照合は `SearchBackend` 経由（呼び出し側はエンジン非依存、7.1）。具体化は `SearchHydrator`、組み立ては `SearchResultSerializer`。
 - `exclude_unreviewed` は受理し最小実装に整合（5.4）。ID/時刻は `RuntimeContext`（決定性）。
@@ -511,6 +519,22 @@ pub fn build_search_results(&self, accounts: Vec<serde_json::Value>, statuses: V
 - アカウント/投稿の照合は upstream の `account_profiles`/`remote_accounts`/`statuses` を read-only 参照（本 spec はテーブルを所有しない）。
 - 可視性・関係状態・Account/Status JSON は上流所有（委譲/消費）。
 
+#### `PgSearchBackend` が依存する upstream カラム（生 SQL 直接参照）
+
+`PgSearchBackend` は以下の upstream カラムを生 SQL で直接参照する。これらはテーブル所有元（accounts-and-instance / statuses-core）のスキーマ変更の影響を直接受けるため、カラム名・型の変更時は本 spec の SQL 再検証が必要（下記 Revalidation Triggers 参照）。
+
+| Upstream Table | Column | Owner Spec | 用途 |
+|-----------------|--------|------------|------|
+| `account_profiles` | `display_name` | accounts-and-instance | ローカルアカウント名の部分一致照合 |
+| `remote_accounts` | `username` | accounts-and-instance | 既知リモートアカウントのハンドル部分一致照合 |
+| `remote_accounts` | `domain` | accounts-and-instance | 既知リモートアカウントの `acct`（`username@domain`）部分一致照合 |
+| `remote_accounts` | `display_name` | accounts-and-instance | 既知リモートアカウント名の部分一致照合 |
+| `statuses` | `content` | statuses-core | 投稿本文の部分一致照合（`search_statuses`） |
+| `statuses` | `created_at` / `id` | statuses-core | ハッシュタグ導出の watermark カーソル基準（`HashtagIndexer.catch_up_from_watermark`） |
+
+- `remote_accounts` に `acct` という単一カラムは存在しない（`username`/`domain` から合成）ため、`PgSearchBackend` は両カラムを直接参照する。
+- 上記以外のカラム（`account_profiles.note` 等）は `PgSearchBackend` の SQL 照合が参照しない（Account/Status の具体化は上流シリアライザに委譲、7.1）。
+
 ### Physical Data Model
 
 ```sql
@@ -573,7 +597,7 @@ CREATE INDEX search_status_tags_status_idx ON search_status_tags(status_id);
 
 ### Integration Tests（`spawn_test_app` 上）
 - アカウント検索: ローカル/既知リモートの一致、`following` 絞り、重複の一意化、`limit`/`offset`（3.1, 3.3, 3.4, 3.5）。
-- 投稿検索: 可視範囲に閉じる（不可視除外）、`account_id` 絞り、標準 PG 縮退の範囲、`limit`/`offset`（4.1, 4.2, 4.3, 4.6）。
+- 投稿検索: 可視範囲に閉じる（不可視除外）、`account_id` 絞り、標準 PG 縮退の範囲、`limit`/`offset`、オーバーフェッチ後に `limit` へ切り詰められること（ページが稀に `limit` 未満でも許容）（4.1, 4.2, 4.3, 4.6）。
 - ハッシュタグ検索: 名前一致、インデックス導出（バックフィル）反映、`exclude_unreviewed` 受理（5.1, 5.3, 5.4）。
 - リモート解決: `resolve=true` 認証時に WebFinger（`FederationHttpClient` モック）→正規化→Account、URL→Status、取得失敗は除外し 200、未認証/`resolve=false` はローカル既知のみ（6.1, 6.2, 6.3, 6.4, 6.5）。
 - type/スコープ: `type` 絞りで他種別が空配列、空クエリ 422、`read:search` 欠落で 403/未認証で 401（2.2, 2.3, 2.4）。

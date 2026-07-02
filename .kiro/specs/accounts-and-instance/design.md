@@ -32,7 +32,7 @@
 
 - Account / CredentialAccount / Relationship / Instance(v2) / CustomEmoji エンティティの JSON 契約とシリアライズ、および api-foundation 契約ハーネスへのゴールデン登録。
 - `accounts` 系エンドポイント（verify_credentials / :id / :id/statuses / relationships / update_credentials）、`instance`(v2)、`custom_emojis`(read) の HTTP 表層と応答コード規律。
-- ローカルアカウントのプロフィール拡張（アバター/ヘッダのメディア参照・プロフィールフィールド・locked/bot/discoverable・source 既定 = privacy/sensitive/language）の永続モデルと更新。
+- ローカルアカウントのプロフィール拡張（`display_name`/`note`・アバター/ヘッダのメディア参照・プロフィールフィールド・locked/bot/discoverable・source 既定 = privacy/sensitive/language）の永続モデルと更新。
 - リモートアカウントの正規化キャッシュ（ActivityPub アクター文書 → Account フィールドへの正規化結果の保持）。
 - カスタム絵文字の**読み取りモデル**（`custom_emojis` テーブルの read）と CustomEmoji 表現。
 - instance v2 のための運用設定読み取りモデル（`instance_settings`）と初期既定。
@@ -50,7 +50,7 @@
 
 ### Allowed Dependencies
 
-- core-runtime: `AppState` / `RuntimeContext`（`Clock` / `IdGenerator`）/ `PgPool` / `AppError` / 起動設定（サーバードメイン等）/ 構造化ログ / マイグレーション基盤 / テストハーネス（`spawn_test_app`）/ domain-primitives の正準共有型（`AccountRef` / `Visibility`。本 spec は定義せず import）。
+- core-runtime: `AppState` / `RuntimeContext`（`Clock` / `IdGenerator`）/ `PgPool` / `AppError` / 起動設定（サーバードメイン等）/ 構造化ログ / マイグレーション基盤 / テストハーネス（`spawn_test_app`）/ `domain` モジュールが所有する正準共有型（`AccountRef` / `Visibility`。本 spec は定義せず import）。
 - api-foundation: Bearer 認証ミドルウェア（`RequestActorContext`）/ `Scope`（`read:accounts` / `read:follows` / `write:accounts` 等の内包判定）/ `MastodonError` / `Pagination`（`PageParams` / `Cursor` / `build_link_header`）/ プロキシ尊重 URL / `X-RateLimit-*` レイヤー / 契約ハーネス（`assert_golden` / `register_fixture`）。
 - federation-core: `ActorUrls`（アクター/プロフィール URL 構築）/ `FederationHttpClient.fetch`（リモートアクター文書取得）/ `ActorDirectory` 経由のローカルアクター解決 / JSON-LD 安全展開ユーティリティ（リモート正規化）。
 - media-pipeline: MediaAttachment 契約 / `MediaStore`（公開 URL 生成）/ メディア所有確認（アバター/ヘッダ取り込み）。
@@ -61,7 +61,7 @@
 
 - Account / CredentialAccount / Relationship / Instance(v2) / CustomEmoji の JSON 契約（フィールド・型・null 規律）の変更。
 - 委譲境界（`AccountStatusesProvider` / `RelationshipStateProvider` / `AccountCountsProvider`）のシグネチャ・登録規約・既定挙動の変更。これらの port は下流に相互義務として確立済み（`RelationshipStateProvider` および `AccountCountsProvider` の followers/following → social-graph、`AccountStatusesProvider` および `AccountCountsProvider` の statuses_count → statuses-core）。port 契約を変更する場合は、これら下流 spec（social-graph / statuses-core）の実装登録側にも再検証を波及させる。
-- 正準共有型（core-runtime の domain-primitives が所有する `AccountRef` / `Visibility`）の定義変更。本 spec はこれらを import して使用するため、上流の型変更は本 spec の再検証トリガーとなる。
+- 正準共有型（core-runtime の `domain` モジュールが所有する `AccountRef` / `Visibility`）の定義変更。本 spec はこれらを import して使用するため、上流の型変更は本 spec の再検証トリガーとなる。
 - ローカルプロフィール拡張・リモート正規化・カスタム絵文字読み取りモデルのスキーマ変更。
 - 運用設定読み取りモデル（`instance_settings`）の項目・既定値の変更。
 - マイグレーション番号規約・本 spec 所有テーブルのスキーマ変更。
@@ -169,7 +169,7 @@ migrations/
 src/
 └── accounts/
     ├── mod.rs                    # AccountsModule 組み立て（サービス/リポジトリ/シリアライザ/port のハンドル束ね）と公開・ルータ装着点
-    ├── model.rs                  # AccountView, CredentialSource, AccountProfile, RemoteAccount, ProfileField, CustomEmojiView, RelationshipView, InstanceSettings 等のドメイン型
+    ├── model.rs                  # AccountView, CredentialSource, AccountProfile, ProfilePatch, RemoteAccount, ProfileField, CustomEmojiView, RelationshipView, InstanceSettings 等のドメイン型
     ├── ports.rs                  # AccountStatusesProvider / RelationshipStateProvider / AccountCountsProvider trait + 既定実装（空/関係なし/0）+ 登録レジストリ
     ├── profile_repository.rs     # AccountProfileRepository（ローカルプロフィール拡張の取得・upsert）
     ├── remote_repository.rs      # RemoteAccountRepository（正規化リモートの取得・upsert・陳腐化判定）
@@ -331,28 +331,31 @@ flowchart TD
 
 **Responsibilities & Constraints**
 - `AccountView` は Account 契約の論理表現（ローカル/リモート両入力の正規化先）。`acct` 規律（ローカル=ハンドル、リモート=`user@domain`）を型で区別可能にする（1.2, 1.3）。
-- `AccountProfile` はローカルアクターのプロフィール拡張（avatar/header メディア参照・`fields`・`locked`/`bot`/`discoverable`・`CredentialSource`）を保持（2.2, 6.1）。
+- `AccountProfile` はローカルアクターのプロフィール拡張（`display_name`・`note`・avatar/header メディア参照・`fields`・`locked`/`bot`/`discoverable`・`CredentialSource`）を保持（1.1, 2.2, 6.1）。`display_name`/`note` は Account/CredentialAccount の同名フィールドの供給元（1.1, 2.2）。
+- `ProfilePatch` は `update_credentials` の項目別部分更新の入力（各フィールド `Option`、`None` は変更なしを表す）。Requirement 6.1 が列挙する項目（`display_name`/`note`/`locked`/`bot`/`discoverable`/`fields`/avatar・header メディア参照/source の privacy・sensitive・language）に対応する（6.1, 6.5）。
 - `RemoteAccount` は正規化済みリモート（acct/display_name/note/url/uri/avatar/header/fields/bot/locked/fetched_at）（7.2）。
-- `CustomEmojiView` は `shortcode`/`url`/`static_url`/`visible_in_picker`/`category`（9.2）。`RelationshipView` は Req 5.2 の全フラグ。`InstanceSettings` は運用可変項目（8.2）。
+- `CustomEmojiView` は `shortcode`/`url`/`static_url`/`visible_in_picker`/`category`（9.2）。`RelationshipView` は Req 5.2 の全フラグ。`InstanceSettings` は運用可変項目（`title`/`description`/`contact`/`rules`/`registrations`/`thumbnail`/`languages`）（8.1, 8.2）。`version`/`source_url`/`usage` は `InstanceSettings` に含めず、`InstanceSerializer` がビルド時定数・固定値から供給する（後述）。
 
 **Dependencies**
 - Inbound: 全アカウントコンポーネント (P0)
-- Outbound: core-runtime の Id 型・時刻型・domain-primitives の正準共有型（`AccountRef` / `Visibility`） (P0)
+- Outbound: core-runtime の Id 型・時刻型・`domain` モジュールの正準共有型（`AccountRef` / `Visibility`） (P0)
 
 **Contracts**: State [x]
 
 ##### 型定義（抜粋）
 ```rust
-use core_runtime::domain_primitives::{AccountRef, Visibility}; // 正準共有型: core-runtime が所有（本 spec では定義せず import）
-// AccountRef（内部識別）と Visibility（投稿公開範囲）は core-runtime の domain-primitives モジュールが正準所有する。
+use core_runtime::domain::{AccountRef, Visibility}; // 正準共有型: core-runtime が所有（本 spec では定義せず import）
+// AccountRef（内部識別）と Visibility（投稿公開範囲）は core-runtime の domain モジュール（domain/primitives.rs 起源、domain::mod 経由で再公開）が正準所有する。
 // accounts-and-instance と statuses-core は並行（相互非依存）であり、両者の共通祖先である core-runtime に正準定義を置く。
 pub struct ProfileField { pub name: String, pub value: String, pub verified_at: Option<OffsetDateTime> }
 pub struct CredentialSource { pub privacy: Visibility, pub sensitive: bool, pub language: Option<String>, pub note: String, pub fields: Vec<ProfileField>, pub follow_requests_count: i64 } // privacy は core-runtime の Visibility を使用
-pub struct AccountProfile { pub actor_id: Id, pub avatar_media: Option<Id>, pub header_media: Option<Id>, pub fields: Vec<ProfileField>, pub locked: bool, pub bot: bool, pub discoverable: bool, pub source: CredentialSource }
+pub struct AccountProfile { pub actor_id: Id, pub display_name: String, pub note: String, pub avatar_media: Option<Id>, pub header_media: Option<Id>, pub fields: Vec<ProfileField>, pub locked: bool, pub bot: bool, pub discoverable: bool, pub source: CredentialSource }
+pub struct ProfilePatch { pub display_name: Option<String>, pub note: Option<String>, pub avatar_media: Option<Option<Id>>, pub header_media: Option<Option<Id>>, pub fields: Option<Vec<ProfileField>>, pub locked: Option<bool>, pub bot: Option<bool>, pub discoverable: Option<bool>, pub source_privacy: Option<Visibility>, pub source_sensitive: Option<bool>, pub source_language: Option<Option<String>> } // フィールドが None なら該当項目は変更しない（6.1, 6.5）
 pub struct RemoteAccount { pub id: Id, pub actor_uri: String, pub username: String, pub domain: String, pub display_name: String, pub note: String, pub url: String, pub avatar_url: Option<String>, pub header_url: Option<String>, pub fields: Vec<ProfileField>, pub bot: bool, pub locked: bool, pub fetched_at: OffsetDateTime }
 pub struct CustomEmojiView { pub shortcode: String, pub url: String, pub static_url: String, pub visible_in_picker: bool, pub category: Option<String> }
 pub struct RelationshipView { pub id: Id, pub following: bool, pub showing_reblogs: bool, pub notifying: bool, pub languages: Vec<String>, pub followed_by: bool, pub blocking: bool, pub blocked_by: bool, pub muting: bool, pub muting_notifications: bool, pub requested: bool, pub requested_by: bool, pub domain_blocking: bool, pub endorsed: bool, pub note: String }
 pub struct AccountCounts { pub followers: i64, pub following: i64, pub statuses: i64, pub last_status_at: Option<OffsetDateTime> }
+pub struct InstanceSettings { pub title: String, pub description: String, pub contact_email: String, pub contact_account_id: Option<Id>, pub rules: Vec<String>, pub registrations_enabled: bool, pub registrations_approval_required: bool, pub registrations_message: Option<String>, pub thumbnail: Option<String>, pub languages: Vec<String> } // version/source_url/usage はここに含めない。InstanceSerializer がビルド時定数・固定値から供給する（8.1）
 ```
 - Invariants: ローカル/リモートのどちらでも Account 必須フィールドが欠落しない（欠落は既定化）。`avatar`/`header` は null にしない（1.5）。
 
@@ -407,7 +410,7 @@ pub trait AccountCountsProvider: Send + Sync {
 - `AccountProfileRepository`: actor_id で取得、`update_credentials` の部分 upsert（指定項目のみ）。識別子/時刻は `RuntimeContext`（6.5）。プロフィール未作成のローカルアクターには安全な既定を返す。
 - `RemoteAccountRepository`: actor_uri / 内部 id で取得、正規化結果 upsert、`fetched_at` で陳腐化判定（3.2, 7.2, 7.3）。
 - `CustomEmojiRepository`: `visible_in_picker` を含む一覧取得とショートコード→絵文字解決（read のみ、書き込み API を持たない）（1.4, 9.1）。
-- `InstanceSettingsRepository`: 運用設定行を取得し、未設定項目は既定にマージして返す（8.2, 8.3）。
+- `InstanceSettingsRepository`: 運用設定行を取得し、未設定項目は既定にマージして返す（8.2, 8.3）。`thumbnail`（既定 `null`）・`languages`（既定 `[]`）も同じ既定マージ対象に含める（8.1）。
 
 **Contracts**: Service [x] / State [x]
 
@@ -457,7 +460,7 @@ pub async fn fetch_and_normalize(&self, actor_uri: &str) -> Result<RemoteAccount
 | Requirements | 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.2, 2.4 |
 
 **Responsibilities & Constraints**
-- 共通の Account 必須フィールドを生成（1.1）。`acct`/`url`/`uri` をローカル/リモートで規律分け（1.2, 1.3）。
+- 共通の Account 必須フィールドを生成（1.1）。`acct`/`url`/`uri` をローカル/リモートで規律分け（1.2, 1.3）。`display_name`/`note` はローカルは `AccountProfile.display_name`/`AccountProfile.note`、リモートは `RemoteAccount.display_name`/`RemoteAccount.note` から供給する（1.1, 2.2）。
 - avatar/header はローカルは `MediaStore.public_url`（未設定は既定 URL）、リモートは正規化済み URL（未設定は既定 URL）（1.5）。
 - `emojis` は display_name/note のショートコードを `CustomEmojiRepository::resolve_emojis` で解決し付与（1.4）。
 - CredentialAccount はローカルのみで生成し `source`（privacy/sensitive/language/note/fields/follow_requests_count）と `role` を付与（2.2）。counts は `AccountCountsProvider`（既定 0）。
@@ -482,7 +485,12 @@ pub fn build_credential_account(&self, actor: &ResolvedActor, profile: &AccountP
 
 **Responsibilities & Constraints**
 - `RelationshipSerializer`: `RelationshipView`（既定: 関係なし）から Req 5.2 の全フラグを持つ JSON を生成（5.1, 5.4）。
-- `InstanceSerializer`: 運用設定 + 本サーバー実制約（version/configuration の上限・許容値）を合成（8.1, 8.4）。`configuration` は media-pipeline の上限等と整合させる。
+- `InstanceSerializer`: 運用設定（`InstanceSettings`）+ 本サーバー実制約（`ServerCapabilities`、`configuration` の上限・許容値）+ ビルド時定数を合成（8.1, 8.4）。フィールド出自を以下のとおり定める。
+  - `title`/`description`/`contact`/`rules`/`registrations`/`thumbnail`/`languages`: `InstanceSettings`（DB 保存値、未設定は既定マージ）から供給（8.1, 8.2, 8.3）。
+  - `version`: ビルド時定数 `env!("CARGO_PKG_VERSION")` から供給。DB には保持しない。
+  - `source_url`: ビルド時定数（固定のリポジトリ URL 定数）から供給。DB には保持しない。
+  - `usage.users.active_month`: MVP では固定値（例: `1`）を返すプレースホルダとする。真の集計（アクティブユーザー数の算出）は本 spec の対象外とし、ゴールデン契約（8.5）を決定的に固定できることを優先する。
+  - `configuration` は media-pipeline の上限等と整合させる。
 - `CustomEmojiSerializer`: CustomEmoji JSON（9.2）。Account の `emojis` と同一表現（9.4）。
 - 各契約をハーネスにゴールデン登録（5.6, 8.5, 9.5）。
 
@@ -583,6 +591,8 @@ pub async fn list_custom_emojis(&self) -> Result<serde_json::Value, AppError>; /
 -- 0005_accounts.sql （0001 core-runtime / 0002 actor-model / 0003 federation+oauth / 0004 media と非衝突）
 CREATE TABLE account_profiles (
     actor_id        BIGINT PRIMARY KEY,            -- local_actors(id) 論理参照（1:1）
+    display_name    TEXT   NOT NULL DEFAULT '',    -- Account/CredentialAccount の display_name 供給元
+    note            TEXT   NOT NULL DEFAULT '',    -- Account/CredentialAccount の note 供給元
     avatar_media_id BIGINT,                        -- media(id) 論理参照（任意）
     header_media_id BIGINT,                        -- media(id) 論理参照（任意）
     fields          JSONB  NOT NULL DEFAULT '[]',  -- ProfileField[]
@@ -633,6 +643,8 @@ CREATE TABLE instance_settings (
     registrations_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     registrations_approval_required BOOLEAN NOT NULL DEFAULT FALSE,
     registrations_message TEXT,
+    thumbnail     TEXT,                             -- Instance(v2).thumbnail 供給元（未設定 = null）
+    languages     JSONB  NOT NULL DEFAULT '[]',      -- Instance(v2).languages 供給元（String[]、未設定 = []）
     updated_at    TIMESTAMPTZ NOT NULL,
     CONSTRAINT instance_settings_singleton CHECK (id = 1)
 );
@@ -669,7 +681,7 @@ CREATE TABLE instance_settings (
 ### Unit Tests
 - `AccountSerializer`: ローカル/リモートで `acct`/`url`/`uri` 規律が分かれる、avatar/header 未設定で既定 URL（非 null）、emojis がショートコードから付与される（1.2, 1.3, 1.4, 1.5）。
 - `RelationshipSerializer`: 既定（関係なし）で全フラグ false・件数 0・note 空（5.4）。
-- `InstanceSerializer`: 運用設定反映と未設定既定、`configuration` が実制約と整合（8.2, 8.3, 8.4）。
+- `InstanceSerializer`: 運用設定反映と未設定既定、`configuration` が実制約と整合（8.2, 8.3, 8.4）。`version`/`source_url`（ビルド時定数）と `usage.users.active_month`（固定値）が決定的でゴールデン再現可能である（8.5）。
 - `RemoteAccountFetcher`: 未知プロパティで失敗しない、必須欠落で失敗、有効キャッシュ時に取得しない（7.3, 7.4, 7.5）。
 
 ### Integration Tests（`spawn_test_app` 上）

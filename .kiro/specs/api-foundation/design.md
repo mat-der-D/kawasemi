@@ -49,7 +49,7 @@
 ### Allowed Dependencies
 
 - core-runtime: `AppState`/`RuntimeContext`（`Clock`/`IdGenerator`/`Rng`）、`PgPool`、`AppError`（Mastodon 互換本文への拡張点）、起動設定（`Secret<T>`：オーナー資格情報・トークン署名/ハッシュ用素材）、構造化ログ、マイグレーション基盤、テストハーネス（`spawn_test_app`）、axum/tower(-http) 基盤。
-- actor-model: `ActorDirectory::list_actors_for_owner`（承認画面のアクター候補）、アクター解決（`resolve_*` / id 妥当性）、`Owner` 概念。本 spec はアクター/オーナーを読み取るのみで生成・変更しない。
+- actor-model: `ActorDirectory::list_actors_for_owner`（承認画面のアクター候補）、アクター解決（`resolve_*` / id 妥当性）、`Owner` 概念。本 spec はアクター/オーナーを読み取るのみで生成・変更しない。加えて、OwnerGate が `owner_id` を解決するための単一オーナー取得アクセサ（例: `ActorDirectory::sole_owner()`。一人鯖前提でインスタンスに厳密に1件のみ存在する `owners` 行を返す）を要求する。**現時点で actor-model の設計にこのアクセサは存在しないため、actor-model の Boundary Commitments（下流向け参照 API）へ追加提供を要求する上流依存として明示する**（actor-model 側ファイルは本 spec からは変更しない）。
 - 暗号プリミティブ crate: トークン乱数（注入 `Rng` 経由）・PKCE 検証・定数時間比較。下流仕様（個別エンティティ JSON 形・アクター URL 形）を本 spec に持ち込まない。
 
 ### Revalidation Triggers
@@ -60,7 +60,8 @@
 - Mastodon 互換エラー本文形・ステータス対応表の変更。
 - `X-RateLimit-*` の付与規約・算出基準の変更。
 - 契約テストハーネスの登録 API・ゴールデン比較契約の変更。
-- 上流（core-runtime `AppError` 拡張点シグネチャ / actor-model `list_actors_for_owner` 契約）の変更。
+- OwnerGate によるオーナー解決の契約（actor-model の単一オーナー取得アクセサの追加・シグネチャ）の変更。
+- 上流（core-runtime `AppError` 拡張点シグネチャ / actor-model `list_actors_for_owner` および単一オーナー取得アクセサの契約）の変更。
 
 ## Architecture
 
@@ -86,6 +87,7 @@ graph LR
     Authorize[authorize and consent] --> OauthService
     Authorize --> OwnerGate[owner auth gate]
     Authorize --> ActorDir[actor directory list_actors_for_owner]
+    OwnerGate --> ActorDir
     subgraph CoreRuntime
       RuntimeCtx[runtime context]
       Pool[pg pool]
@@ -267,7 +269,7 @@ flowchart TD
 | OauthAppRepository | Data | アプリ登録・取得・資格情報検証 | 1 | PgPool (P0) | Service, State |
 | AuthorizationCodeRepository | Data | 短命認可コードの挿入・単回消費 | 2,3 | PgPool (P0) | Service, State |
 | AccessTokenRepository | Data | トークン発行・解決・失効 | 3,5 | PgPool (P0) | Service, State |
-| OwnerGate | OAuth Service | 最小オーナー認証ゲート・短命セッション | 2 | config Secret (P0), RuntimeContext (P1) | Service |
+| OwnerGate | OAuth Service | 最小オーナー認証ゲート・短命セッション | 2 | config Secret (P0), RuntimeContext (P1), actor-model ActorDirectory(単一オーナー解決, 要追加提供) (P0) | Service |
 | OauthService | OAuth Service | 登録・コード発行・トークン交換/失効・スコープ確定 | 1,2,3,4 | Repos, Scope, Pkce, RuntimeContext (P0) | Service |
 | AppsEndpoint | OAuth API | apps 登録・資格情報検証エンドポイント | 1 | OauthService (P0) | API |
 | AuthorizeEndpoint | OAuth API | 認可・承認画面・アクター選択 | 2 | OauthService, OwnerGate, ActorDirectory (P0) | API |
@@ -360,7 +362,7 @@ pub fn verify_pkce(challenge: &PkceChallenge, verifier: &str) -> Result<(), AppE
 | Requirements | 1.1, 1.4, 1.5, 2.3, 2.5, 3.1, 3.2, 3.4, 5.1, 5.2 |
 
 **Responsibilities & Constraints**
-- App: 登録時に `client_id`/`client_secret` を採番・保存、リダイレクト URI を完全一致検証用に保持（1.1, 1.4）。資格情報検証は定数時間比較（1.5）。
+- App: 登録時に `client_id`/`client_secret` を採番し、`client_secret` は `oauth_access_tokens`/`oauth_authorization_codes` と同じ規約でハッシュ化して `client_secret_hash` に保存する（平文はレスポンスとして一度だけ返却し、以降は永続化・ログ出力しない）。リダイレクト URI を完全一致検証用に保持（1.1, 1.4）。資格情報検証は提示された `client_secret` をハッシュ化した上でハッシュ同士を定数時間比較する（1.5）。
 - Code: 短命コードを挿入し、交換時に「未消費かつ未期限切れ」を原子的に消費（単回）（2.5, 3.1, 3.2）。
 - Token: トークンはハッシュ化して保存、提示トークンのハッシュで解決、失効フラグ更新（3.4, 5.1, 5.2）。トークン平文は保存しない（3.6）。
 
@@ -371,7 +373,7 @@ pub fn verify_pkce(challenge: &PkceChallenge, verifier: &str) -> Result<(), AppE
 // App
 pub async fn register_app(pool: &PgPool, ids: &dyn IdGenerator, rng: &dyn Rng, input: NewApp) -> Result<OauthApp, AppError>;
 pub async fn find_app_by_client_id(pool: &PgPool, client_id: &str) -> Result<Option<OauthApp>, AppError>;
-pub async fn verify_app_credentials(pool: &PgPool, client_id: &str, secret: &str) -> Result<Option<OauthApp>, AppError>;
+pub async fn verify_app_credentials(pool: &PgPool, client_id: &str, secret: &str) -> Result<Option<OauthApp>, AppError>; // secret をハッシュ化し client_secret_hash と定数時間比較
 // Code
 pub async fn insert_code(pool: &PgPool, code: &AuthorizationCode) -> Result<(), AppError>;
 pub async fn consume_code(pool: &PgPool, raw_code: &str, now: OffsetDateTime) -> Result<Option<AuthorizationCode>, AppError>; // 単回・期限
@@ -392,13 +394,16 @@ pub async fn revoke_token(pool: &PgPool, raw_token: &str) -> Result<bool, AppErr
 
 **Responsibilities & Constraints**
 - 起動設定（`Secret<T>`）のオーナー資格情報を定数時間比較で照合（一人鯖の単一オーナー前提）。
+- 認証成功時、`OwnerSession.owner_id` は actor-model の単一オーナー取得アクセサ（`ActorDirectory::sole_owner()` 相当。一人鯖前提でインスタンスに厳密に1件のみ存在する `owners` 行を返す）を呼び出して解決する。複数オーナーの選択・突合ロジックは持たない（Allowed Dependencies 参照。actor-model への追加提供要求）。
 - 認証成功で短命 `OwnerSession` を発行。資格情報の本格管理（ローテーション等）は範囲外。
+- 発行した `OwnerSession` は署名付き HttpOnly Cookie（`SameSite=Lax` または `Strict`、TLS 配信時は `Secure`）として運搬する（Security Considerations 参照）。
 
 **Contracts**: Service [x]
 
 ##### Service Interface
 ```rust
-pub fn authenticate_owner(cfg: &OwnerCredential, presented: &OwnerLogin, now: OffsetDateTime) -> Result<OwnerSession, AppError>;
+pub async fn authenticate_owner(cfg: &OwnerCredential, presented: &OwnerLogin, directory: &ActorDirectory, now: OffsetDateTime) -> Result<OwnerSession, AppError>;
+// owner_id は directory 経由の単一オーナー取得アクセサ（例: sole_owner()）で解決する
 ```
 
 #### OauthService
@@ -434,6 +439,7 @@ pub async fn revoke_token(&self, raw_token: &str) -> Result<(), AppError>;
 
 **Responsibilities & Constraints**
 - AuthorizeEndpoint: GET でオーナー認証 → `list_actors_for_owner` の候補を承認画面に提示、POST で選択/承認を受けてコード発行・リダイレクト（2.1–2.4）。
+- 承認画面（`templates.rs`）は `OwnerSession` に紐づく CSRF トークンをフォームへ埋め込んで描画する。状態変更を伴う `POST /oauth/authorize`（`selected_actor`/`approved_scopes`/`decision` を送信）はこの CSRF トークンの一致を検証してから処理し、不一致は認可コードを発行せず 403 相当の Mastodon 互換エラーで拒否する。
 - 失敗は全て Mastodon 互換エラー応答（OAuth リダイレクトエラー含む）。
 
 **Contracts**: API [x]
@@ -444,7 +450,7 @@ pub async fn revoke_token(&self, raw_token: &str) -> Result<(), AppError>;
 | POST | /api/v1/apps | client_name, redirect_uris, scopes | application(+credentials) | 422 |
 | GET | /api/v1/apps/verify_credentials | Bearer | application | 401 |
 | GET | /oauth/authorize | client_id, redirect_uri, scope, response_type | consent HTML / login HTML | 400, 401 |
-| POST | /oauth/authorize | selected_actor, approved_scopes, decision | redirect(code) / redirect(access_denied) | 400, 401 |
+| POST | /oauth/authorize | selected_actor, approved_scopes, decision, csrf_token | redirect(code) / redirect(access_denied) | 400, 401, 403 |
 | POST | /oauth/token | grant, code, client creds, redirect_uri, pkce verifier | token JSON | 400, 401 |
 | POST | /oauth/revoke | token, client creds | empty 200 | 401 |
 
@@ -566,13 +572,13 @@ pub fn register_fixture(name: &str, captured: CapturedExchange);          // 実
 ```sql
 -- 0003_oauth.sql
 CREATE TABLE oauth_applications (
-    id              BIGINT PRIMARY KEY,           -- core-runtime IdGenerator 採番
-    client_id       TEXT   NOT NULL UNIQUE,
-    client_secret   TEXT   NOT NULL,              -- 照合は定数時間比較（平文保存は最小化方針、必要に応じハッシュ）
-    name            TEXT   NOT NULL,
-    redirect_uris   TEXT   NOT NULL,              -- 登録 URI（完全一致検証用）
-    scopes          TEXT   NOT NULL,              -- 要求スコープ
-    created_at      TIMESTAMPTZ NOT NULL
+    id                  BIGINT PRIMARY KEY,           -- core-runtime IdGenerator 採番
+    client_id           TEXT   NOT NULL UNIQUE,
+    client_secret_hash  BYTEA  NOT NULL,              -- oauth_access_tokens.token_hash / oauth_authorization_codes.code_hash と同じ規約でハッシュ保存（平文は登録応答時に一度だけ返却し永続化しない）。照合はハッシュ同士の定数時間比較
+    name                TEXT   NOT NULL,
+    redirect_uris       TEXT   NOT NULL,              -- 登録 URI（完全一致検証用）
+    scopes              TEXT   NOT NULL,              -- 要求スコープ
+    created_at          TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE oauth_authorization_codes (
@@ -608,6 +614,7 @@ CREATE INDEX oauth_access_tokens_actor_idx ON oauth_access_tokens(actor_id);
 - エラー応答は `{"error": ...}`（+ `error_description`）に統一（7.x）。
 - ページネーション応答は `Link` ヘッダ（本文は各カテゴリ spec の配列）。
 - 起動設定追加: オーナー資格情報（`Secret<T>`）とトークンハッシュ用素材（`Secret<T>`）を core-runtime config へ。
+- OwnerGate は `OwnerSession.owner_id` の解決のため actor-model の単一オーナー取得アクセサ（`ActorDirectory::sole_owner()` 相当）を呼び出す。actor-model 側に本アクセサは未提供のため、actor-model の Boundary Commitments へ追加提供を要求する上流依存として扱う。
 
 ## Error Handling
 
@@ -642,8 +649,10 @@ CREATE INDEX oauth_access_tokens_actor_idx ON oauth_access_tokens(actor_id);
 - 決定的 `RuntimeContext` で同一ゴールデンが再現される、差分が箇所特定で報告される、フィクスチャ登録が受け入れ基準として機能する（9.1–9.5）。
 
 ## Security Considerations
-- アクセストークン/認可コードはハッシュ保存し平文を永続化・ログ出力しない（3.6）。資格情報・トークン照合は定数時間比較。
+- アクセストークン/認可コード/`client_secret` はいずれも同一規約でハッシュ保存し平文を永続化・ログ出力しない（3.6、1.5）。資格情報・トークン照合はハッシュ化した値同士の定数時間比較。
 - オーナー資格情報は起動設定 `Secret<T>` で供給しマスク（core-runtime の規律継承）。
+- `OwnerSession` は署名付き HttpOnly Cookie（`SameSite=Lax` または `Strict`、TLS 配信時は `Secure`）で運搬し、JavaScript からの読み取りと第三者サイト起点の送信を防ぐ。
+- 状態変更を伴う `POST /oauth/authorize` は `OwnerSession` に紐づく CSRF トークン（承認画面フォームへ埋め込み、送信時に一致検証）を要求し、CSRF による無断承認・スコープ付与を防ぐ。
 - PKCE をサポートしコード横取りに対処（2.6, 3.3）。リダイレクト URI は登録完全一致のみ許可（1.4, 2.1）。
 - 認可コードは短命・単回消費で再生攻撃を防ぐ（2.5, 3.2）。
 - トークンは単一アクターに不可分に結びつき、1 トークンでの複数アクター越境を構造的に不能化（5.3）。

@@ -57,6 +57,7 @@
 - api-foundation の Bearer / `read:statuses` Scope / Pagination（`Link`・カーソル）・`MastodonError` 契約の変更。
 - `TimelineMatcher`（membership 判定点）の公開シーム形・タイムライン種別条件の変更（下流 streaming の再検証を誘発）。
 - タイムライン種別ごとの集約規約（home のブースト/direct 規律、public/local/tag のブースト除外・public 限定規律）の変更。
+- home 候補クエリのフォロー集合受け渡し方式（`FilterQuery.following_set` 由来の配列パラメータ `= ANY($n)`、MVP 方針）が、フォロー数の増大によりクエリパラメータ数・性能上の限界に達した場合。join ベースの候補クエリへ切り替えるには social-graph 側に共有可能な問い合わせ能力（例: フォロー関係テーブルへの join 手段）の追加が必要となるため、social-graph の再検証を誘発する。
 
 ## Architecture
 
@@ -182,7 +183,7 @@ sequenceDiagram
     Auth-->>Ep: actor context or none or 401 403
     Ep->>Svc: fetch timeline kind viewer params page
     Svc->>Rel: load relationship sets blocked muted following showreblogs
-    loop until page filled or candidates exhausted
+    loop until page filled or candidates exhausted or fill cap reached
         Svc->>Repo: fetch candidate batch by kind and cursor
         Repo-->>Svc: candidate statuses read only
         Svc->>Filter: apply visibility and relation filters
@@ -196,7 +197,7 @@ sequenceDiagram
     Ep-->>Client: 200 status array with Link header
 ```
 
-候補は種別ごとの条件（`TimelineKindRules`）で取得し、可視性（statuses-core）・関係（social-graph）を適用してから `limit` 件へ充填する（7.4）。フィルタ後不足時は次バッチを取得して安定カーソル順で充填（欠落・重複・無限ループ無し）。具体化は statuses-core `StatusSerializer` に委譲（10.x）。
+候補は種別ごとの条件（`TimelineKindRules`）で取得し、可視性（statuses-core）・関係（social-graph）を適用してから `limit` 件へ充填する（7.4）。フィルタ後不足時は次バッチを取得して安定カーソル順で充填するが、この充填ループは `TimelineService` の設計定数 `MAX_FILL_ITERATIONS`（反復回数の上限、詳細は Components and Interfaces > TimelineService を参照）で打ち切られ、無制限のスキャンにはならない（欠落・重複・無限ループ無し、上限到達時は部分結果 + 継続カーソルを返す、7.4）。具体化は statuses-core `StatusSerializer` に委譲（10.x）。
 
 ### タイムライン種別条件と単一生成点
 
@@ -286,7 +287,7 @@ pub struct FilterContext { pub viewer: Option<Id>, pub blocked: HashSet<Id>, pub
 | Requirements | 1.1, 2.1, 2.3, 2.4, 2.5, 3.1, 3.4, 4.1, 4.4, 4.5, 7.1, 7.4 |
 
 **Responsibilities & Constraints**
-- home: 投稿者が `following ∪ self` の投稿（ブースト含む）をカーソル範囲・新しい順で取得（1.1）。public: `visibility=public` かつ非ブースト（2.1, 2.2）。local: 加えてローカル投稿者（3.1）。remote/local/only_media は WHERE で絞る（2.3, 2.4, 2.5, 3.4）。
+- home: 投稿者が `following ∪ self` の投稿（ブースト含む）をカーソル範囲・新しい順で取得（1.1）。**フォロー集合の受け渡し（MVP 方針）**: `following ∪ self` の判定は social-graph のテーブルを直接 JOIN せず、`FilterQuery` の関係データ（`following_set`）から得た ID 配列を候補 SQL へ `author_id = ANY($n)`（自分自身の id を含めた配列）のバインドパラメータとして渡すことで表現する（Data Contracts & Integration 参照）。フォロー数が非常に多い閲覧者ではこの配列パラメータの件数・クエリ性能上の限界に達する可能性がある（Revalidation Triggers 参照）。public: `visibility=public` かつ非ブースト（2.1, 2.2）。local: 加えてローカル投稿者（3.1）。remote/local/only_media は WHERE で絞る（2.3, 2.4, 2.5, 3.4）。
 - tag: 正規化タグ名で status↔tag 関連を read-only 照会し `public` 非ブーストに限定。`any`/`all`/`none` を関連結合で適用（4.1, 4.4, 4.5）。
 - カーソルは投稿 id（時系列）で `max_id`/`since_id`/`min_id` 範囲を解釈（api-foundation `Cursor` 規約）。フィルタ後充填のため `limit` より多めのバッチを取得可能（7.4）。
 - **read-only**：本 spec は `statuses` 等を書き換えない。新規テーブルを持たない。
@@ -378,7 +379,8 @@ pub fn hydrate(&self, statuses: &[Status], viewer: Option<Id>, now: OffsetDateTi
 **Responsibilities & Constraints**
 - 閲覧者の関係集合（`FilterQuery.blocked_set` / `following_set` / `reblogs_hidden`）を 1 回ロードし `FilterContext` を作る（6.1）。
 - `TimelineMatcher.candidate_spec` → `CandidateRepository.fetch_candidates` → `TimelineFilter.keep` を回し、フィルタ後に `limit` 件へ充填する（不足時は次カーソルバッチを取得、欠落・重複・無限ループ無し、7.4）。
-- 充填後の集合を `StatusHydrator` で具体化し、前後カーソルを付けて `Page<T>` を返す（7.1, 7.2）。時刻は `RuntimeContext`（決定性）。
+- **充填ループの上限**: フィルタ後充填ループは設計定数 `MAX_FILL_ITERATIONS`（小さな固定値、目安 5 反復。1 反復あたりのバッチ件数は `CandidateRepository` の `batch_limit` に従うため、1 リクエストで走査する候補行数の実質上限は `MAX_FILL_ITERATIONS × batch_limit` に収まる）で打ち切る。ブロック/ミュートが多い閲覧者やタグが疎な照会でも、ほぼ全件走査（near-full-table scan）に陥らないことを保証する（7.4）。
+- 上限に達した場合はブロック・エラーとせず、その時点までに蓄積済みの結果と、続きから再開可能な有効なページネーションカーソルを返す（`limit` 未満の部分ページとなり得る）。
 
 **Contracts**: Service [x]
 
@@ -386,7 +388,7 @@ pub fn hydrate(&self, statuses: &[Status], viewer: Option<Id>, now: OffsetDateTi
 ```rust
 pub async fn timeline(&self, kind: TimelineKind, viewer: Option<&RequestActorContext>, params: TimelineParams) -> Result<Page<serde_json::Value>, AppError>;
 ```
-- Postconditions: 返す各要素は当該閲覧者にとって membership を満たす可視投稿の Status JSON で、id 降順・`limit` 件以内・安定カーソル。
+- Postconditions: 返す各要素は当該閲覧者にとって membership を満たす可視投稿の Status JSON で、id 降順・`limit` 件以内・安定カーソル。充填ループが `MAX_FILL_ITERATIONS` に達した場合は `limit` 件に満たない部分ページを返すことがあるが、その場合も継続取得可能な有効なカーソルを伴う（無限ループ・ブロッキング・エラー化はしない、7.4）。
 
 ### API / エンドポイント層
 
@@ -444,7 +446,8 @@ pub async fn timeline(&self, kind: TimelineKind, viewer: Option<&RequestActorCon
 ### Data Contracts & Integration
 
 - タイムライン応答は Status JSON の配列（statuses-core `StatusSerializer` で具体化、契約は statuses-core 所有）。ページネーションは `Link` + 投稿 id カーソル（api-foundation 規約）。
-- 可視性は statuses-core `VisibilityPolicy::is_visible`、関係は social-graph `FilterQuery`（`blocked_set` / `following_set` / `show_reblogs` 由来集合）を消費。
+- 可視性は statuses-core `VisibilityPolicy::is_visible`、関係は social-graph `FilterQuery`（`blocked_set` / `following_set` / `show_reblogs` 由来集合）を消費。関係データは常に `FilterQuery` 経由でのみ取得し、social-graph のテーブルを直接読み取らない。
+- home タイムラインの候補クエリが必要とする `author ∈ following ∪ self` は、`FilterQuery.following_set` から取得したフォロー中アカウント ID の配列を候補 SQL の `= ANY($n)` バインドパラメータとして渡すことで表現する（MVP 方針。social-graph テーブルへの直接 JOIN は行わない）。フォロー数が極めて多い閲覧者ではこの配列パラメータの件数・クエリ性能に限界が生じ得る点に留意する。
 - エラー応答は api-foundation の `{"error": ...}`（+ `error_description`）。`X-RateLimit-*` は横断レイヤー。
 - 下流供給: `TimelineMatcher`（streaming が membership 判定を再利用する公開シーム）。
 
@@ -464,7 +467,7 @@ pub async fn timeline(&self, kind: TimelineKind, viewer: Option<&RequestActorCon
 - **システム起因（5xx）**: 内部詳細を本文に出さず互換本文のみ。診断は core-runtime ログへ。
 
 ### Monitoring
-- タイムライン種別・閲覧者・フィルタ除外件数・ページ充填の反復回数を相関 ID 付き構造化ログに出力。可視性/関係フィルタの不一致や充填の異常反復を診断対象にする。
+- タイムライン種別・閲覧者・フィルタ除外件数・ページ充填の反復回数を相関 ID 付き構造化ログに出力。可視性/関係フィルタの不一致や充填の異常反復を診断対象にする。充填ループが `MAX_FILL_ITERATIONS` 上限に到達したケース（部分ページ返却）も専用ログイベントとして記録し、ブロック/ミュートが多い閲覧者やタグが疎な照会の傾向を追跡できるようにする。
 
 ## Testing Strategy
 
@@ -478,7 +481,7 @@ pub async fn timeline(&self, kind: TimelineKind, viewer: Option<&RequestActorCon
 - public/local: public 限定・ブースト除外・`local`/`remote`/`only_media`・未認証は公開のみ（2.x, 3.x, 5.2）。
 - tag: 正規化タグ照合・`any`/`all`/`none`・`local`/`only_media`・public 限定・ブロック/ミュート除外（4.x, 6.x）。
 - 可視性: private のフォロー反映・ローカル/リモート同一判定（5.1, 5.3, 5.4）。
-- pagination: `max_id`/`since_id`/`min_id`/`limit`・`Link` next/prev・フィルタ後充填で欠落/重複/無限ループ無し（7.x）。
+- pagination: `max_id`/`since_id`/`min_id`/`limit`・`Link` next/prev・フィルタ後充填で欠落/重複/無限ループ無し・充填ループが `MAX_FILL_ITERATIONS` 上限に到達した場合の部分ページ + 有効な継続カーソル返却（7.x）。
 - 単一生成点: REST 取得と `TimelineMatcher.matches` の一致（8.1, 8.2）。
 
 ### Contract Tests（api-foundation ハーネス上）

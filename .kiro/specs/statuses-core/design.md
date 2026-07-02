@@ -24,6 +24,7 @@
 - フォロー/ブロック/ミュートの関係操作（social-graph）。Account / Instance エンティティ契約そのもの（accounts-and-instance。本 spec は埋め込み参照のみ）。
 - OAuth・ページネーション・エラー・契約ハーネス基盤（api-foundation）。HTTP Signatures・配送キュー・受信パイプライン配管（federation-core）。メディアの非同期処理・MediaAttachment 契約そのもの（media-pipeline）。
 - pin の featured collection 連合（MVP では pin はローカル状態のみ）。
+- 投票締切到達（poll-end）検知に基づく通知 emit の能動トリガ: 締切到達を検知するスケジュール/遅延ジョブ機構が本 spec・現行 federation-core に存在しないため MVP では対象外とする（詳細は Boundary Commitments 42 行目付近および StatusActivityBuilder 参照）。`expires_at` 到来は `PollSerializer` の `expired` 判定（2.3）で読み取り時に反映されるのみで、締切到達時点を能動的に検知して通知する仕組みは持たない。将来 media-pipeline の `ProcessingJobQueue`（DB キュー・`FOR UPDATE SKIP LOCKED`・再試行/バックオフ）と同様の汎用遅延ジョブ機構が導入された場合、poll-end 通知はその上に乗せる形で追加できる。
 
 ## Boundary Commitments
 
@@ -34,7 +35,7 @@
 - 投票 API: Poll 取得（`GET /api/v1/polls/:id`）・投票（`POST /api/v1/polls/:id/votes`）と、投稿作成時の Poll 作成。
 - 投稿の永続モデル（投稿・編集履歴・お気に入り・ブースト・ブックマーク・ピン・投票・投票選択・投票回答）と、その状態遷移・カウンタ。
 - 可視性判定（`VisibilityPolicy`）と addressing 導出（`Addressing`：`to`/`cc`/recipient 集合）の単一ロジック（ローカル/リモート共通）。
-- 正規 Activity の生成（`StatusActivityBuilder`：Create/Announce/Like/Delete/Update + Undo + Vote）と、federation-core 配送共通パスへの依頼。
+- 正規 Activity の生成（`StatusActivityBuilder`：Create/Announce/Like/Delete/Update + Undo。投票は Mastodon 互換の `Create{Note, name=<選択肢テキスト>}` ワイヤ形として生成し、`Vote` という独自 Activity type は用いない）と、federation-core 配送共通パスへの依頼。
 - 投稿関連受信 Activity の意味論処理（`InboundActivityHandler` 実装群）と、federation-core ディスパッチ境界への登録。
 - 投稿時の冪等性（`Idempotency-Key` の記録と再送時の同一応答）。
 - Status / Poll エンティティ JSON 契約（シリアライズ）と、api-foundation 契約ハーネスへのゴールデン登録。
@@ -42,6 +43,7 @@
 - notifications が定義する `NotificationEventSink`（既定 no-op）への `NotificationEvent` の emit: favourite / reblog(Announce) / mention / poll-end / （任意で）edit の状態遷移コミット後に、冪等に通知イベントを emit する。`NotificationEvent` / シンク契約は notifications が所有し、本 spec は emit のみ。
 - ハッシュタグの永続化（`tags` / `status_tags` 関連テーブル）と、タグ関連付けの照会可能な読み取り境界（タグ→投稿関連付け / 投稿→タグの取得）。下流（timelines のタグタイムライン・search のハッシュタグインデックス）が永続化済みタグ関連付けを消費できるようにする。
 - リモート投稿取り込みエントリポイント `StatusIngestService`（ドキュメント/URL → Status）: 既存の受信 Create(Note) 正規化パスを再利用し、受信 Activity ディスパッチの外（search の `RemoteResolver` 等）からも呼び出せる形で公開する。
+- 可視性判定（`VisibilityPolicy::is_visible`）と宛先導出（`Addressing::derive_recipients`）が必要とする関係シーム `RelationshipQuery` の**ポート契約定義と既定実装**: viewer とのフォロー関係（`ViewerRelation`）解決、および `private`/`unlisted` 配送先となるフォロワー受信者集合（`followers_of`）解決を担う。ポートの契約定義と既定実装（`ViewerRelation::none()` 相当・空フォロワー集合）は本 spec が所有し、social-graph 未配線でも本 spec は単独で（フォロー関係を考慮しない安全側の結果で）成立する。実装供給は social-graph（関係状態の単一の真実源。social-graph の Boundary Commitments 参照）。
 
 ### Out of Boundary
 
@@ -62,6 +64,7 @@
 - media-pipeline: MediaAttachment シリアライズと `find_owned(media_id, actor_id)`（所有スコープ取得）。
 - accounts-and-instance: Account シリアライズ点（埋め込み用）。並行生成のため抽象参照で受け、契約確定後に結線。加えて委譲ポート契約 `AccountStatusesProvider`（`StatusesQuery` → `Page<serde_json::Value>`）/ `AccountCountsProvider`（`AccountCounts`：`statuses_count` / `last_status_at` 等）を消費し、本 spec が実装供給する（契約は accounts-and-instance 所有）。既定実装（空ページ / 0）は accounts-and-instance が保持し、本 spec の実装が bootstrap で差し替える。
 - notifications: 通知生成シーム `NotificationEventSink`（trait・既定 no-op）と `NotificationEvent` 型（`recipient` / `origin`（`AccountRef`）/ `kind`（`NotificationType`）/ `target_status_id` / `occurred_at`）を消費し、状態遷移コミット後に emit する。契約は notifications 所有。既定 no-op のため notifications 未配線でも本 spec は成功する。
+- social-graph: 本 spec が定義・所有する委譲ポート契約 `RelationshipQuery`（`viewer_relation()` / `followers_of()`）の**実装供給**を受ける。ポート契約と既定実装（関係なし・空フォロワー）は本 spec が保持し、social-graph が bootstrap で本実装に差し替える（accounts-and-instance の `AccountStatusesProvider` と対称の委譲方向）。social-graph 未配線の間は既定が使われ、可視性判定は「フォロー関係なし」、配送先フォロワーは空集合として扱われる（安全側だが機能的には縮退）。
 - 下流仕様（タイムライン集約・通知生成本体・方言正規化・検索）の業務ロジックを本 spec に持ち込まない（通知は emit のみ、タグは永続化と読み取り境界のみ）。
 
 ### Revalidation Triggers
@@ -69,7 +72,8 @@
 - Status / Poll JSON 契約の形（フィールド・型・null 規律・reblog ネスト・編集表現）の変更。
 - 投稿状態モデル（投稿・お気に入り・ブースト・ブックマーク・ピン・投票）のスキーマ・カウンタ規約の変更。
 - 可視性判定（`VisibilityPolicy`）・addressing 導出（`Addressing`）のロジック・出力 recipient 契約の変更。
-- 正規 Activity 生成（`StatusActivityBuilder`）の Activity 形・配送依頼契約の変更。
+- `RelationshipQuery` ポート契約（`viewer_relation()` / `followers_of()`）のシグネチャ・既定挙動の変更。social-graph 側の実装差し替え・未配線状態の扱いが変わる場合も含む。
+- 正規 Activity 生成（`StatusActivityBuilder`）の Activity 形（投票の `Create{Note, name=...}` ワイヤ形を含む）・配送依頼契約の変更。
 - 受信ハンドラが処理する Activity 種別集合・状態反映規約の変更。
 - 冪等キーの一意化規約・再送応答契約の変更。
 - 上流（core-runtime / api-foundation / federation-core / media-pipeline / accounts-and-instance）の消費契約変更（上流発の再検証）。
@@ -177,22 +181,22 @@ src/
     ├── interaction_repository.rs # InteractionRepository（favourite/reblog/bookmark/pin の記録・取消・存在判定・一覧）
     ├── poll_repository.rs       # PollRepository（poll/option/vote の挿入・投票記録・集計取得）
     ├── idempotency.rs           # IdempotencyStore（(actor_id, key) 一意記録・再送時の status 解決）
-    ├── visibility.rs            # VisibilityPolicy（可視性判定・可視フィルタ。ローカル/リモート共通）
-    ├── addressing.rs            # Addressing（可視性→to/cc/recipient 集合の導出）
-    ├── activity_builder.rs      # StatusActivityBuilder（Create/Announce/Like/Delete/Update/Undo/Vote の正規 Activity 生成＋配送依頼）
+    ├── visibility.rs            # VisibilityPolicy（可視性判定・可視フィルタ。ローカル/リモート共通）+ `RelationshipQuery` 委譲ポート trait 定義・既定実装（関係なし・空フォロワー）
+    ├── addressing.rs            # Addressing（可視性→to/cc/recipient 集合の導出。private/unlisted は `RelationshipQuery::followers_of` の解決結果を recipient に含める）
+    ├── activity_builder.rs      # StatusActivityBuilder（Create/Announce/Like/Delete/Update/Undo の正規 Activity 生成＋配送依頼。投票は Mastodon 互換ワイヤ形 `Create{Note, name=<選択肢テキスト>}` として生成し独自 `Vote` type は用いない）
     ├── serializer.rs            # StatusSerializer / PollSerializer（Mastodon 互換 JSON。Account/Media は上流委譲・契約ハーネス登録）
     ├── status_service.rs        # StatusService（作成・取得・削除・編集・履歴・source・context、冪等性、可視性/配送結線）
     ├── interaction_service.rs   # InteractionService（reblog/fav/bookmark/pin と連合配送・カウンタ）
     ├── poll_service.rs          # PollService（poll 取得・投票・連合配送）
-    ├── inbound.rs               # 受信ハンドラ群（CreateNoteHandler/AnnounceHandler/LikeHandler/DeleteHandler/UpdateHandler/UndoHandler）と種別登録
+    ├── inbound.rs               # 受信ハンドラ群（CreateNoteHandler/AnnounceHandler/LikeHandler/DeleteHandler/UpdateHandler/UndoHandler）と種別登録。CreateNoteHandler は投票ワイヤ形（`Create{Note, name=...}` が自ローカル Poll 宛）の識別・分岐を含む
     └── endpoints.rs             # statuses/polls/bookmarks の HTTP ハンドラと応答コード規律
 
 tests/
 ├── status_contract_it.rs       # Status / Poll ゴールデン（決定的・null 規律・reblog ネスト・編集表現）（契約）
-├── status_crud_it.rs           # 作成/取得/削除/編集/履歴/source・冪等性・スコープ・空投稿拒否（統合）
+├── status_crud_it.rs           # 作成/取得/削除（ブースト行カスケード削除・親投稿 replies_count 減算含む）/編集/履歴/source・冪等性・スコープ・空投稿拒否（統合）
 ├── status_context_it.rs        # context 祖先/子孫・可視フィルタ・未認証公開のみ（統合）
 ├── interactions_it.rs          # reblog/fav/bookmark/pin 登録/解除・重複防止・カウンタ・スコープ・ブックマーク一覧（統合）
-├── polls_it.rs                 # poll 作成/投票・締切/範囲/重複拒否・集計・メディア排他（統合）
+├── polls_it.rs                 # poll 作成/投票・締切/範囲/重複拒否・集計・メディア排他・投票 Activity ワイヤ形（`Create{Note,name=...}` 宛先=投票対象アクター）の配送/受信認識（統合）
 ├── visibility_addressing_it.rs # 可視性→addressing 導出・可視フィルタ・direct/private/unlisted/public（統合）
 └── statuses_federation_pair_it.rs # 2 インスタンス往復：投稿/ブースト/お気に入り/削除/編集のローカルとHTTPで結果同値（連合）
 ```
@@ -281,7 +285,7 @@ flowchart TD
     UndoH --> SameLogic
 ```
 
-federation-core が署名検証・重複排除・ブロック判定を終えた `ParsedActivity` をハンドラへ委譲する（14.1）。各ハンドラはローカル発生時と同一の状態遷移ロジックを呼ぶ（14.5）。未知方言プロパティは解釈せず継続（15.2）。
+federation-core が署名検証・重複排除・ブロック判定を終えた `ParsedActivity` をハンドラへ委譲する（14.1）。各ハンドラはローカル発生時と同一の状態遷移ロジックを呼ぶ（14.5）。未知方言プロパティは解釈せず継続（15.2）。Create(Note) 受信時、`name` 属性と宛先が自ローカル Poll の投票ワイヤ形（`Create{Note, name=<選択肢テキスト>}`、宛先＝投票対象アクター）と一致する場合、`CreateNoteHandler` は通常の投稿取り込みではなく `PollService` の投票記録へ分岐する（13.6）。
 
 ## Requirements Traceability
 
@@ -312,8 +316,9 @@ federation-core が署名検証・重複排除・ブロック判定を終えた 
 | InteractionRepository | Data | fav/reblog/bookmark/pin の記録・取消・判定・一覧 | 9,10,11,12 | PgPool (P0) | Service, State |
 | PollRepository | Data | poll/option/vote の挿入・投票・集計 | 13 | PgPool (P0) | Service, State |
 | IdempotencyStore | Data | (actor,key) 一意記録・再送解決 | 5 | PgPool (P0) | Service, State |
-| VisibilityPolicy | Visibility | 可視性判定・可視フィルタ（共通） | 4,6,9,10,12 | model (P0) | Service |
-| Addressing | Visibility | 可視性→to/cc/recipient 導出（共通） | 4 | VisibilityPolicy (P0), ActorUrls (P1) | Service |
+| RelationshipQuery(port) | Delegation Port | viewer relation・followers 集合の委譲ポート契約 + 既定実装（関係なし・空フォロワー） | 4,6 | model (P0) | Service |
+| VisibilityPolicy | Visibility | 可視性判定・可視フィルタ（共通） | 4,6,9,10,12 | model (P0), RelationshipQuery (P1) | Service |
+| Addressing | Visibility | 可視性→to/cc/recipient 導出（共通） | 4 | VisibilityPolicy (P0), ActorUrls (P1), RelationshipQuery (P1) | Service |
 | StatusActivityBuilder | Federation Bridge | 正規 Activity 生成＋配送依頼 | 4,7,8,9,10,13 | DeliveryService, ActorUrls, JsonLdCodec, Addressing (P0) | Service |
 | StatusSerializer | API/Serialize | Status JSON 契約・操作状態・reblog ネスト | 1 | MediaSerializer, AccountSerializer(上流), 契約ハーネス (P0/P1) | Service |
 | PollSerializer | API/Serialize | Poll JSON 契約・投票状態・expired | 2 | 契約ハーネス (P1) | Service |
@@ -324,7 +329,7 @@ federation-core が署名検証・重複排除・ブロック判定を終えた 
 | StatusEndpoints | API | statuses/polls/bookmarks の HTTP 表層・応答コード | 3,6,7,8,9,10,11,12,13 | 各 Service, Bearer, Scope, MastodonError, Pagination (P0) | API |
 | StatusesModule(wiring) | Runtime | 配線・ルータ装着・受信ハンドラ登録・AppState 格納 | 4,14 | core-runtime bootstrap, Dispatcher (P0) | Service |
 
-依存方向（左→右、上位は下位のみ参照）: `model → StatusRepository / InteractionRepository / PollRepository / IdempotencyStore / VisibilityPolicy → Addressing / StatusSerializer / PollSerializer → StatusActivityBuilder → StatusService / InteractionService / PollService / InboundHandlers → StatusEndpoints → StatusesModule wiring`。
+依存方向（左→右、上位は下位のみ参照）: `model → StatusRepository / InteractionRepository / PollRepository / IdempotencyStore / RelationshipQuery(port) / VisibilityPolicy → Addressing / StatusSerializer / PollSerializer → StatusActivityBuilder → StatusService / InteractionService / PollService / InboundHandlers → StatusEndpoints → StatusesModule wiring`。
 
 ### Status Domain / ドメイン層
 
@@ -377,7 +382,7 @@ pub struct IdempotencyRecord { pub actor_id: Id, pub key: String, pub status_id:
 **Responsibilities & Constraints**
 - 挿入時に `actor_id`・`uri`・可視性・返信関係を記録（3.1, 3.5）。ID/時刻は `RuntimeContext`（決定性）。
 - 取得は可視性フィルタ（`VisibilityPolicy` 判定）を反映した可視スコープで行い、不可視/未存在は `None` 相当（6.1）。
-- context は返信関係を辿って祖先・子孫を取得（6.2）。削除は投稿と関連参照の整合を保つ（7.4）。
+- context は返信関係を辿って祖先・子孫を取得（6.2）。削除は投稿と関連参照の整合を保つ（7.4）。`status_edits`/`status_media`/`favourites`/`bookmarks`/`pins`/`polls` は Physical Data Model の物理 FK `ON DELETE CASCADE` で自動整合するが、`statuses.reblog_of_id`/`in_reply_to_id` は自己参照で FK/CASCADE を持たないため、`delete_status` が (a) 削除対象を `reblog_of_id` で参照するブースト行を明示的にカスケード削除し、(b) 削除対象が返信（`in_reply_to_id` を持つ）であった場合は親投稿の `replies_count` を `adjust_counts` で 1 減算する、という 2 点を明示的に処理する。
 - 編集は本文系を更新し `edited_at` を設定、編集前内容を `status_edits` に保存（8.1, 8.2）。カウンタは原子的に増減。
 
 **Contracts**: Service [x] / State [x]
@@ -388,12 +393,12 @@ pub async fn insert_status(pool: &PgPool, status: &Status) -> Result<(), AppErro
 pub async fn find_visible(pool: &PgPool, id: Id, viewer: Option<Id>) -> Result<Option<Status>, AppError>;
 pub async fn ancestors(pool: &PgPool, id: Id, viewer: Option<Id>) -> Result<Vec<Status>, AppError>;
 pub async fn descendants(pool: &PgPool, id: Id, viewer: Option<Id>) -> Result<Vec<Status>, AppError>;
-pub async fn delete_status(pool: &PgPool, id: Id) -> Result<(), AppError>; // 関連整合を保つ
+pub async fn delete_status(pool: &PgPool, id: Id) -> Result<(), AppError>; // ブースト行の明示カスケード削除 + 返信元 replies_count 減算を含め関連整合を保つ（7.4）
 pub async fn apply_edit(pool: &PgPool, id: Id, edit: &StatusEdit, now: OffsetDateTime) -> Result<(), AppError>;
 pub async fn list_edits(pool: &PgPool, id: Id) -> Result<Vec<StatusEdit>, AppError>;
 pub async fn adjust_counts(pool: &PgPool, id: Id, kind: CountKind, delta: i64) -> Result<(), AppError>;
 ```
-- Postconditions: `find_visible` は viewer から不可視の投稿を返さない（6.1）。
+- Postconditions: `find_visible` は viewer から不可視の投稿を返さない（6.1）。`delete_status` は同一トランザクションで、当該投稿を `reblog_of_id` により参照するブースト行を削除し、当該投稿が返信であれば親投稿の `replies_count` を 1 減算してから完了する（7.4）。
 
 #### InteractionRepository
 
@@ -453,20 +458,27 @@ pub async fn bind(pool: &PgPool, actor_id: Id, key: &str, status_id: Id) -> Resu
 | Requirements | 4.1, 4.2, 6.1, 6.3, 6.4, 9.5, 12.4 |
 
 **Responsibilities & Constraints**
-- `VisibilityPolicy`: 投稿が viewer から可視かを単一ロジックで判定し、取得・context・操作の可視性チェックで同一適用（4.1, 6.1, 6.3, 9.5）。未認証は公開のみ可視（6.4）。
-- `Addressing`: 可視性から `to`/`cc`（public collection・followers collection・メンション宛先）と recipient 集合を導出（4.2）。`direct` はメンション宛のみ、`public`/`unlisted` は public collection の配置差を持つ。
+- `VisibilityPolicy`: 投稿が viewer から可視かを単一ロジックで判定し、取得・context・操作の可視性チェックで同一適用（4.1, 6.1, 6.3, 9.5）。未認証は公開のみ可視（6.4）。`private` の可視判定は viewer が投稿者のフォロワーかどうか（`ViewerRelation`）を要する。
+- `Addressing`: 可視性から `to`/`cc`（public collection・followers collection・メンション宛先）と recipient 集合を導出（4.2）。`direct` はメンション宛のみ、`public`/`unlisted` は public collection の配置差を持つ。`private`/`unlisted` の recipient 確定には followers collection を実際の受信者集合へ展開する必要があり、`RelationshipQuery::followers_of` の解決結果を用いる。
+- `RelationshipQuery`（本コンポーネントが所有する委譲ポート）: viewer とのフォロー関係状態（`ViewerRelation`）解決と、投稿者のフォロワー受信者集合（`followers_of`）解決を social-graph へ委譲する。契約定義と既定実装（関係なし・空フォロワー）は本 spec が保持し、social-graph 未配線でも `is_visible`/`derive_recipients` は安全側の結果（`private` は非フォロワー扱い・フォロワー配送先は空）で単独動作する。実装供給は social-graph。
 - 本層は意味論のみ。ローカル/リモートの物理差を持たず、recipient を確定して `StatusActivityBuilder` 経由で `DeliveryService` へ渡す（4.2, 4.4）。
 
 **Contracts**: Service [x]
 
 ##### Service Interface
 ```rust
-pub fn is_visible(status: &Status, viewer: Option<Id>, rel: &ViewerRelation) -> bool; // フォロー/メンション関係は上流結果を受ける
+pub struct ViewerRelation { pub is_follower: bool } // viewer が投稿者をフォローしているか。RelationshipQuery::viewer_relation の戻り値
+pub trait RelationshipQuery: Send + Sync {
+    async fn viewer_relation(&self, author: Id, viewer: Option<Id>) -> Result<ViewerRelation, AppError>;
+    async fn followers_of(&self, author: Id) -> Result<Vec<Recipient>, AppError>; // private/unlisted 配送先
+}
+// 既定実装 NoRelationshipQuery: viewer_relation は常に ViewerRelation { is_follower: false }、followers_of は常に空 Vec を返す
+pub fn is_visible(status: &Status, viewer: Option<Id>, rel: &ViewerRelation) -> bool; // rel は RelationshipQuery::viewer_relation の解決結果
 pub fn derive_addressing(status: &Status, mentions: &[ActorRef], followers_uri: &str) -> Addressing; // to/cc
-pub fn derive_recipients(addressing: &Addressing, mentions: &[ActorRef]) -> Vec<Recipient>; // DeliveryService 用
+pub fn derive_recipients(addressing: &Addressing, mentions: &[ActorRef], followers: &[Recipient]) -> Vec<Recipient>; // DeliveryService 用。followers は RelationshipQuery::followers_of の解決結果（private/unlisted 配送先の実体化）
 pub struct Addressing { pub to: Vec<String>, pub cc: Vec<String> }
 ```
-- Invariants: 同一入力に対しローカル発生・リモート配送で同一 `Addressing`/recipient を返す（4.5）。
+- Invariants: 同一入力（同一 `ViewerRelation`/followers 集合を含む）に対しローカル発生・リモート配送で同一 `Addressing`/recipient を返す（4.5）。
 
 ### Federation Bridge / 連合橋渡し層
 
@@ -478,7 +490,8 @@ pub struct Addressing { pub to: Vec<String>, pub cc: Vec<String> }
 | Requirements | 4.3, 7.3, 8.4, 9.2, 9.4, 10.2, 10.3, 13.6 |
 
 **Responsibilities & Constraints**
-- Create(Note) / Announce / Like / Delete / Update / Undo(Announce|Like) / Vote の正規 Activity を `JsonLdCodec`・`ActorUrls` を用いて生成（4.3）。
+- Create(Note) / Announce / Like / Delete / Update / Undo(Announce|Like) の正規 Activity を `JsonLdCodec`・`ActorUrls` を用いて生成（4.3）。
+- 投票（vote）は ActivityPub・Mastodon のいずれにも独自の `Vote` Activity type が存在しないため、デファクトの Mastodon 互換ワイヤ形 `Create{Note, name=<選択された選択肢のテキスト>}`（宛先＝投票対象 Poll を持つ Status の投稿者アクター）として生成する（13.6）。`Vote` という独自 type は生成しない。
 - 生成した Activity と `Addressing` 由来 recipient を `DeliveryService::deliver(DeliveryRequest)` に渡す。物理配送分岐は federation-core が所有（4.3, 4.4）。
 - ローカル発生の状態反映は、必要に応じ federation-core の in-process 経路（`process_local`）を通して受信ハンドラと同一遷移に合流させ、意味論対称を担保。
 
@@ -492,7 +505,7 @@ pub async fn deliver_like(&self, actor: Id, target: &Status) -> Result<(), AppEr
 pub async fn deliver_undo(&self, actor: Id, undone: UndoKind, target: &Status) -> Result<(), AppError>;
 pub async fn deliver_delete(&self, status: &Status, recipients: Vec<Recipient>) -> Result<(), AppError>;
 pub async fn deliver_update(&self, status: &Status, recipients: Vec<Recipient>) -> Result<(), AppError>;
-pub async fn deliver_vote(&self, actor: Id, poll: &Poll, target: &Status, choices: &[i32]) -> Result<(), AppError>;
+pub async fn deliver_vote(&self, actor: Id, poll: &Poll, target: &Status, choices: &[i32]) -> Result<(), AppError>; // Create{Note, name=<選択肢テキスト>} を Poll 所有 Status の投稿者へ配送。独自 Vote type は使わない
 ```
 - Postconditions: 同一投稿に対し local 経路と remote 経路が同一正規 Activity を扱う（4.5、federation-core 10.5 と整合）。
 
@@ -585,7 +598,7 @@ pub async fn vote(&self, actor_id: Id, poll_id: Id, choices: &[i32]) -> Result<P
 
 **Responsibilities & Constraints**
 - `InboundActivityHandler` を Create(Note)/Announce/Like/Delete/Update/Undo ごとに実装し、`activity_types()` で対象種別を宣言して `InboundActivityDispatcher::register` で登録（14.1）。
-- Create(Note): リモート投稿を Status モデルへ取り込む（返信/可視性/添付/メンション）（14.2）。Announce/Like: ローカル対象のカウンタ/状態更新（14.3）。Delete/Update: 対象の削除/編集反映（14.4）。
+- Create(Note): リモート投稿を Status モデルへ取り込む（返信/可視性/添付/メンション）（14.2）。ただし受信 `Create{Note, name=...}` が投票のワイヤ形（`inReplyTo`/宛先が自ローカル所有かつ `poll_id` を持つ Status を指し、`name` が当該 Poll の選択肢テキストと一致する）と識別できる場合は、通常の Note 取り込みではなく `PollService` の投票記録へ分岐する（`name` を選択肢テキスト/インデックスへ解決して帰属させる、13.6）。Announce/Like: ローカル対象のカウンタ/状態更新（14.3）。Delete/Update: 対象の削除/編集反映（14.4）。
 - 各ハンドラはローカル発生時と同一の Repository/状態遷移を呼ぶ（共通コードパス、14.5）。未知方言プロパティは解釈せず継続（15.2）。登録は方言非依存（15.3）。
 
 **Contracts**: Service [x]
@@ -593,7 +606,7 @@ pub async fn vote(&self, actor_id: Id, poll_id: Id, choices: &[i32]) -> Result<P
 ##### Service Interface
 ```rust
 // federation-core の InboundActivityHandler を実装
-impl InboundActivityHandler for CreateNoteHandler { /* ingest remote status */ }
+impl InboundActivityHandler for CreateNoteHandler { /* ingest remote status; Create{Note,name=...} が自ローカル Poll の投票ワイヤ形と一致する場合は PollService の投票記録へ分岐 */ }
 impl InboundActivityHandler for AnnounceHandler { /* record reblog + count */ }
 impl InboundActivityHandler for LikeHandler { /* record favourite + count */ }
 impl InboundActivityHandler for DeleteHandler { /* remove target */ }
@@ -772,7 +785,7 @@ CREATE TABLE status_idempotency_keys (
 );
 ```
 
-- Consistency: カウンタ更新は条件付き原子更新。冪等キー・操作（fav/bookmark/pin/vote）の重複は一意制約で防止。削除は `ON DELETE CASCADE` で関連整合（7.4）。
+- Consistency: カウンタ更新は条件付き原子更新。冪等キー・操作（fav/bookmark/pin/vote）の重複は一意制約で防止。削除時の関連整合（7.4）は二段構え: `status_edits`/`status_media`/`favourites`/`bookmarks`/`pins`/`polls` は物理 FK `ON DELETE CASCADE` で自動整合するが、`statuses.reblog_of_id`/`in_reply_to_id` は自己参照で FK/CASCADE を持たないため、`StatusRepository::delete_status` がブースト行の明示カスケード削除と親投稿 `replies_count` の減算を行う（StatusRepository 参照）。
 - Temporal: `created_at` / `edited_at` / `expires_at` は `Clock` 由来（決定性）。`expired` 判定は `expires_at` と現在時刻で算出（2.3）。
 
 ### Data Contracts & Integration
@@ -807,11 +820,11 @@ CREATE TABLE status_idempotency_keys (
 - `IdempotencyStore`: (actor,key) 一意・再送同一解決（5.1, 5.2）。
 
 ### Integration Tests（`spawn_test_app` 上）
-- CRUD: 作成（CW/sensitive/メディア所有/返信/言語抽出）・空拒否・取得可視フィルタ・削除所有検証・編集/履歴/source（3.x, 6.1, 7.x, 8.x）。
+- CRUD: 作成（CW/sensitive/メディア所有/返信/言語抽出）・空拒否・取得可視フィルタ・削除所有検証・削除時のブースト行カスケード削除と親投稿 `replies_count` 減算・編集/履歴/source（3.x, 6.1, 7.4, 8.x）。
 - 冪等性: 同一キー再送で二重作成されず同一応答、キー無しは毎回作成（5.1–5.3）。
 - context: 祖先/子孫・不可視除外・未認証公開のみ（6.2–6.4）。
 - 操作: reblog/fav/bookmark/pin の登録/解除・重複防止・カウンタ・スコープ・ブックマーク一覧ページネーション・pin の direct 拒否（9.x, 10.x, 11.x, 12.x）。
-- 投票: 作成/投票・締切/範囲/重複/単複拒否・集計反映・メディア排他（13.x）。
+- 投票: 作成/投票・締切/範囲/重複/単複拒否・集計反映・メディア排他・投票 Activity ワイヤ形（`Create{Note, name=<選択肢テキスト>}`、宛先＝投票対象アクター）での配送と受信認識（13.x）。
 
 ### Contract Tests（api-foundation ハーネス上）
 - Status / Poll ゴールデン: 決定的境界で各状態（通常/reblog/編集済み/投票付き）の JSON が再現され、null 規律・操作状態・`expired` が固定される（1.4, 2.4）。実クライアントキャプチャをフィクスチャ登録。

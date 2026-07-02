@@ -37,7 +37,7 @@
 - 統一エラー型（`AppError`）と axum レスポンス変換の骨格、エラー分類（4xx/5xx）。
 - 構造化ログ基盤の初期化、HTTP リクエスト/レスポンス・SQL の診断出力、相関 ID 付与。
 - DB 込み統合テストを起動するテストハーネス（テスト用 `RuntimeContext` 構築、分離 DB、終了時解放）。
-- 並行 spec 横断で共有される軽量ドメインプリミティブの正準定義: `AccountRef`（`Local`/`Remote`）と `Visibility`（`Public`/`Unlisted`/`Private`/`Direct`）の列挙および serde/文字列表現。
+- 並行 spec 横断で共有される軽量ドメインプリミティブの正準定義: 識別子 `Id`（内部表現・serde/文字列表現・DB カラム対応）、`AccountRef`（`Local`/`Remote`）と `Visibility`（`Public`/`Unlisted`/`Private`/`Direct`）の列挙および serde/文字列表現。
 
 #### Boundary Commitment: 共有ドメインプリミティブの単一正準所有
 
@@ -72,7 +72,7 @@
 - マイグレーション基盤の配置規約（マイグレーション追加方法）の変更。
 - テストハーネスの起動 API・分離方式の変更。
 - 起動シーケンス順序・終了コード規律の変更。
-- 共有ドメインプリミティブ（`AccountRef` / `Visibility`）のバリアント構成・`Id` 型依存・serde/文字列表現の変更（下流全 spec に波及するため）。
+- 共有ドメインプリミティブ（`Id` / `AccountRef` / `Visibility`）の内部表現・バリアント構成・serde/文字列表現・DB カラム対応の変更（下流全 spec に波及するため）。
 
 ## Architecture
 
@@ -137,7 +137,7 @@ src/
 │   └── secret.rs                # シークレットラッパ型（Debug/ログでマスク）
 ├── domain/
 │   ├── mod.rs                   # 共有ドメインプリミティブの再公開（primitives 経由）
-│   └── primitives.rs            # 共有プリミティブの正準定義（AccountRef / Visibility と serde/文字列表現）
+│   └── primitives.rs            # 共有プリミティブの正準定義（Id / AccountRef / Visibility と serde/文字列表現）
 ├── telemetry.rs                 # tracing 初期化・ログレベル制御・相関 ID 方針
 ├── db.rs                        # PgPool 確立・接続パラメータ適用
 ├── migrate.rs                   # 埋め込みマイグレーション適用・不整合検出
@@ -215,8 +215,8 @@ sequenceDiagram
 | 5.1–5.6 | clock/id/rng/署名鍵の注入境界・本番/決定的切替 | RuntimeContext, Clock, IdGenerator, Rng, SigningKeyProvider | 4 trait + RuntimeContext | アーキ図 Injection_Boundaries |
 | 6.1–6.5 | 統一エラー型・HTTP 変換骨格・4xx/5xx 分類・内部詳細秘匿・拡張点 | Error | AppError, IntoResponse | エラー変換シーケンス |
 | 7.1–7.5 | 構造化ログ初期化・req/res ログ・SQL ログ・レベル制御・相関 ID | Telemetry, Server | init_telemetry()、TraceLayer | エラー変換シーケンス |
-| 8.1–8.5 | テスト用起動・適用済みDB・決定的注入・分離・解放 | TestHarness | spawn_test_app()、TestApp | （テスト時に起動シーケンスを再利用） |
-| 9.1–9.4 | 共有ドメインプリミティブの正準定義（AccountRef/Visibility）・振る舞い非所有・再定義禁止 | DomainPrimitives | AccountRef, Visibility | （横断利用・起動フロー外） |
+| 8.1–8.5 | テスト用起動・適用済みDB・決定的注入・分離・解放 | TestHarness | spawn_test_app()、TestApp、TestApp::cleanup() | （テスト時に起動シーケンスを再利用） |
+| 9.1–9.4 | 共有ドメインプリミティブの正準定義（Id/AccountRef/Visibility）・振る舞い非所有・再定義禁止 | DomainPrimitives | Id, AccountRef, Visibility | （横断利用・起動フロー外） |
 
 ## Components and Interfaces
 
@@ -232,7 +232,7 @@ sequenceDiagram
 | Bootstrap | Runtime | Composition Root・起動順序保証 | 1,2,3,4,5,7 | 全コンポーネント (P0) | Service |
 | AppState | Runtime | プール+RuntimeContext+設定の共有ハンドル | 1,3,5 | Db, RuntimeContext, Config (P0) | State |
 | TestHarness | Test | テスト用起動・分離DB・解放 | 8 | Bootstrap, Migrate, RuntimeContext (P0) | Service |
-| DomainPrimitives | Domain | 共有プリミティブ（AccountRef/Visibility）の正準定義 | 9 | Id (P0), serde (P0) | State |
+| DomainPrimitives | Domain | 共有プリミティブ（Id/AccountRef/Visibility）の正準定義 | 9 | serde (P0) | State |
 
 依存方向（左→右、上位は下位のみ参照）: `Config → Telemetry → Db → Migrate → RuntimeContext → AppState → Error/Server → Bootstrap`。`TestHarness` は Bootstrap 構成要素を再利用する。
 
@@ -345,6 +345,7 @@ pub async fn establish_pool(cfg: &DatabaseConfig) -> Result<PgPool, DbError>;
 - 4 つの trait を本 spec が所有し、本番実装（5.6）と決定的テスト実装（5.5）を提供。
 - `RuntimeContext` は 4 境界を保持し、下流が単一集約として受け取れるようにする。
 - 署名鍵は供給境界のみ所有。本番鍵の生成/保管/ローテーションは actor-model（Out of Boundary）。本 spec はテスト用固定鍵実装を提供し、本番実装差込の拡張点を開けておく。
+- `KeyRef` は署名鍵の参照として本 spec が正準定義する。single-key-per-actor（アクターごとに現在有効な鍵は常に1つ）というモデルを前提に、対象アクターの `Id` を直接ラップする newtype とする（`KeyRef(Id)`）。鍵バージョン/世代を区別する独立した鍵 ID は持たず、「どのアクターの現在有効な鍵か」のみを表す。
 
 **Dependencies**
 - Inbound: AppState, 下流の全 spec (P0)
@@ -358,6 +359,11 @@ pub async fn establish_pool(cfg: &DatabaseConfig) -> Result<PgPool, DbError>;
 pub trait Clock: Send + Sync { fn now(&self) -> OffsetDateTime; }
 pub trait IdGenerator: Send + Sync { fn next_id(&self) -> Id; }
 pub trait Rng: Send + Sync { fn fill_bytes(&self, buf: &mut [u8]); }
+
+/// 署名鍵の参照。single-key-per-actor モデルの下、対象アクターの `Id` を直接ラップする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeyRef(pub Id);
+
 pub trait SigningKeyProvider: Send + Sync { fn signing_key(&self, key_ref: KeyRef) -> Result<SigningKey, KeyError>; }
 
 pub struct RuntimeContext {
@@ -374,7 +380,7 @@ impl RuntimeContext {
 ```
 - Preconditions: なし。
 - Postconditions: `deterministic` は同一 seed で同一の時刻/ID/乱数/鍵列を再現する。
-- Invariants: trait は `Send + Sync` で並行アクセス安全。
+- Invariants: trait は `Send + Sync` で並行アクセス安全。`KeyRef` は対象アクターの `Id` のみを保持し、鍵バージョン/世代を区別しない（有効鍵は常に1つという single-key-per-actor 前提に従う）。
 
 **Implementation Notes**
 - Integration: AppState が保持し、ハンドラ/サービスへ共有。
@@ -488,7 +494,7 @@ impl IntoResponse for AppError { /* status + structured body, source は秘匿 *
 **Responsibilities & Constraints**
 - tracing subscriber を初期化（7.1）、ログレベルを設定駆動（7.4）。
 - HTTP req/res 診断をリクエスト span で出力（7.2）、相関 ID（request_id）を span フィールドで付与（7.5）。
-- 診断レベル有効時に実行 SQL を出力（7.3、sqlx のクエリログを tracing 経由で捕捉）。
+- 診断レベル有効時に実行 SQL を出力する（7.3）。sqlx のクエリログは `sqlx::query` ターゲットへの tracing イベントとして発生し、`LogConfig` の SQL 診断フラグを `tracing_subscriber::EnvFilter` のディレクティブ（例: 有効時は `sqlx::query=debug`、無効時は当該ターゲットを既定レベルより上げて抑制）へ反映することで出力可否を制御する。これらのイベントはハンドラ処理中のリクエスト span（7.2/7.5 で `request_id` を付与する span）の内側で発生するため、tracing のイベント→span 継承により自動的に `request_id` と相関する（イベント自体に `request_id` を持たせる必要はなく、所属 span のフィールドとしてログ出力側が解決する）。
 
 **Contracts**: Service [x]
 
@@ -511,7 +517,7 @@ pub fn init_telemetry(cfg: &LogConfig) -> Result<(), TelemetryError>;
 - テスト用ランタイムインスタンスを起動（8.1）。起動時に埋め込みマイグレーション適用済み DB を提供（8.2）。
 - `RuntimeContext::deterministic` で非決定性境界を決定的実装に差し替えて起動（8.3）。
 - テストごとに分離された DB 状態（一意の DB/スキーマ名 or テンプレート DB からの作成）を提供し干渉を防ぐ（8.4）。
-- 完了時にテスト用リソース（DB・listener・プール）を解放（8.5）。
+- 完了時にテスト用リソース（DB・listener・プール）を解放する（8.5）。正規の解放 API は明示的な `async fn cleanup(self)` とし、テストコードはこれを呼んで終了する。`Drop` 実装はベストエフォートに留める（例: 分離 DB の破棄をデタッチしたバックグラウンドタスクへ spawn する、または解放せず次回起動時の起動時スイープに委ねる）。tokio ランタイム内の同期 `Drop::drop` から async 処理を `block_on` すると panic しうるため、`Drop` に解放の正しさを依存させない。
 
 **Dependencies**
 - Inbound: 各 spec の統合テスト (P0)
@@ -529,7 +535,18 @@ pub struct TestApp {
 
 /// 分離DB作成 → マイグレーション適用 → 決定的 RuntimeContext で起動。
 pub async fn spawn_test_app() -> TestApp;
-impl Drop for TestApp { /* 分離DBとリソースを解放 (8.5) */ }
+
+impl TestApp {
+    /// 正規の終了 API。プール解放・分離DBの破棄・listener 停止を非同期に行う (8.5)。
+    /// テストコードは必ずこれを呼んで終了すること（成功/失敗にかかわらず）。
+    pub async fn cleanup(self);
+}
+
+/// ベストエフォートのみ。tokio ランタイム内の同期 Drop から async cleanup を block_on することは
+/// panic の危険があるため行わない。cleanup() 未呼び出し（パニック等での早期離脱）の取りこぼしに対する
+/// 保険として、分離DBの破棄をデタッチしたバックグラウンドタスクへ spawn するか、解放せず次回起動時の
+/// 起動時スイープ（残留テストDBの掃除）に委ねる。正しさの担保はここに置かない。
+impl Drop for TestApp { /* ベストエフォートの解放 (8.5 は cleanup() が正規経路) */ }
 ```
 
 ### Domain / 共有プリミティブ層
@@ -542,6 +559,7 @@ impl Drop for TestApp { /* 分離DBとリソースを解放 (8.5) */ }
 | Requirements | 9.1, 9.2, 9.3, 9.4 |
 
 **Responsibilities & Constraints**
+- `Id` を全ドメインエンティティ・プリミティブが共有する識別子として正準定義する。内部表現は 64bit 符号付き整数（`i64` をラップした newtype）で、生成時刻順に単調増加する Snowflake 風の値とする（`IdGenerator::next_id()`（`runtime/ids.rs`）が本表現で払い出す）。serde 表現は 10 進文字列とする（JSON number の 53bit 精度超過を避け、Mastodon 互換 API が ID を文字列で表現する慣行とも整合させるため）。DB 列は `BIGINT` にマッピングする。これは下流 spec のマイグレーションが既に採用している `id BIGINT PRIMARY KEY -- core-runtime IdGenerator 採番` という規約（actor-model / media-pipeline / notifications / federation-core / api-foundation / search / accounts-and-instance / social-graph の各 `design.md`）と一致させたものであり、本 spec がその規約の正準根拠となる。
 - `AccountRef` をローカル/リモートの区別と `Id` のみを持つ純粋なプリミティブとして所有する。所有者情報を露出せず、Account エンティティの知識を持たない（9.1）。
 - `Visibility` 列挙と、その serde/文字列表現の対応付けのみを所有する（9.2）。
 - 公開範囲ポリシー（`VisibilityPolicy` 等の振る舞い）は所有しない。statuses-core が `Visibility` を取り込んだ上で振る舞いを定義する（9.3）。
@@ -556,6 +574,18 @@ impl Drop for TestApp { /* 分離DBとリソースを解放 (8.5) */ }
 
 ##### Service Interface
 ```rust
+/// 全ドメインで共有される識別子。時刻順にソート可能な単調増加値（Snowflake 風: タイムスタンプ+シーケンスを
+/// 64bit に詰めた内部表現）。DB は BIGINT 列にマッピングし、serde は 10 進文字列で表現する
+/// （JSON number の 53bit 精度超過回避、Mastodon 互換 API の文字列 ID 表現とも整合）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Id(i64);
+
+impl Id {
+    pub fn from_i64(raw: i64) -> Self { Self(raw) }
+    pub fn as_i64(&self) -> i64 { self.0 }
+}
+// Serialize/Deserialize は 10 進文字列表現で実装する（sqlx 側は i64 <-> BIGINT の標準マッピングを利用）。
+
 /// ローカル/リモートアクターを区別する軽量参照。所有者情報・Account エンティティ知識を持たない純粋プリミティブ。
 pub enum AccountRef {
     Local(Id),
@@ -573,11 +603,11 @@ pub enum Visibility {
 }
 ```
 - Preconditions: なし（純粋値型）。
-- Postconditions: `Visibility` の serde/文字列表現は安定で、全 spec で一致する。
-- Invariants: `AccountRef` は `Id` のローカル/リモート区別以外の状態を持たない。`Visibility` のバリアントは追加/削除しない限り表現が固定。
+- Postconditions: `Visibility` の serde/文字列表現は安定で、全 spec で一致する。`Id` の serde 文字列表現と DB `BIGINT` 表現は可逆に変換できる。
+- Invariants: `AccountRef` は `Id` のローカル/リモート区別以外の状態を持たない。`Visibility` のバリアントは追加/削除しない限り表現が固定。`Id` は生成時刻順の単調増加のみを保証し、暗号学的なランダム性・推測不可能性は保証しない（それが必要な用途は呼び出し側が別途対策する）。
 
 **Implementation Notes**
-- Integration: `src/domain/primitives.rs` に定義し `src/domain/mod.rs` から再公開。下流 spec はこの型を import する。
+- Integration: `src/domain/primitives.rs` に `Id` / `AccountRef` / `Visibility` を定義し `src/domain/mod.rs` から再公開。下流 spec はこの型を import する。`IdGenerator::next_id()`（`runtime/ids.rs`、RuntimeContext コンポーネント）はここで定義する `Id` を払い出す。
 - Risks: 下流での再定義による型分裂。Boundary Commitment と Revalidation Trigger で防止する。
 
 ## Data Models
@@ -593,6 +623,7 @@ pub enum Visibility {
 
 - 後続 spec は `migrations/` に自身のマイグレーションを追加することでスキーマを拡張する。本 spec はこの追加規約（連番命名・前方追加のみ）を土台として確立するが、各ドメインテーブルは所有しない。
 - 共有ドメインプリミティブ（`AccountRef` / `Visibility`）は永続テーブルを持たない値型である。本 spec はこれらの**型としての正準定義と serde/文字列表現**のみを所有し、これらを列に持つテーブルやその永続化方法は各下流 spec が所有する。下流 spec は core-runtime の型を取り込んでカラム表現にマッピングする。
+- 共有識別子 `Id` は DB 上 `BIGINT` 列にマッピングする。これは下流全 spec のマイグレーションが用いる `id BIGINT PRIMARY KEY` 規約の正準根拠であり、本 spec 自身の `_sqlx_migrations` 以外に `Id` を列とするテーブルは持たないが、下流の全テーブル設計はこのマッピングに従う。
 
 ## Error Handling
 
@@ -619,7 +650,7 @@ pub enum Visibility {
 - Error: 4xx/5xx 分類と `IntoResponse` 変換で 5xx 本文に内部詳細が出ないこと（6.2, 6.3, 6.4）。
 
 ### Integration Tests
-- Lifecycle: `spawn_test_app` 起動でマイグレーション適用済み DB が得られ、ヘルス確認が応答し、shutdown でリソース解放されること（1.1, 1.5, 4.2, 8.1, 8.2, 8.5）。
+- Lifecycle: `spawn_test_app` 起動でマイグレーション適用済み DB が得られ、ヘルス確認が応答し、テストコードが明示的に呼ぶ `TestApp::cleanup()` でリソース解放されること（1.1, 1.5, 4.2, 8.1, 8.2, 8.5）。
 - Migration safety: 既存データ保持・再適用なし（4.4）、適用失敗/チェックサム不整合で起動中止し診断出力すること（4.5, 4.6）。
 - Startup failure: 必須設定欠落・DB 接続不可で HTTP リスナーを開始せず非ゼロ終了すること（1.2, 2.3, 3.2）。
 - Error response: ハンドラが `AppError(Server)` を返したとき本文に内部詳細が出ず、相関 ID 付きでログに出ること（6.4, 7.5）。

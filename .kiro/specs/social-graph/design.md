@@ -6,7 +6,7 @@
 
 **Users**: 標準クライアント（Ivory・Elk・Phanpy 等）の利用者がフォロー/ミュート/ブロックを行い、一人鯖オーナーがロック済みアクターのフォローリクエストを承認/拒否する。下流の accounts-and-instance（`RelationshipStateProvider`）・timelines・notifications・inbound-move-flag が、本 spec の関係状態を委譲境界・問い合わせ経由で消費する。
 
-**Impact**: core-runtime のランタイム土台、api-foundation の横断土台（Bearer / Scope / Pagination / MastodonError）、federation-core の連合配管（`DeliveryService` / `InboundActivityDispatcher` / `BlockPolicy`）、accounts-and-instance の Relationship 契約（`RelationshipView` / `RelationshipSerializer` / `RelationshipStateProvider`）の上に、API モジュール群 `src/social_graph/` と関係状態テーブル（`migrations/0006_social_graph.sql`）を追加する。本 spec は accounts-and-instance の `RelationshipStateProvider` と federation-core の `BlockPolicy` の既定実装を本実装へ差し替える。
+**Impact**: core-runtime のランタイム土台、api-foundation の横断土台（Bearer / Scope / Pagination / MastodonError）、federation-core の連合配管（`DeliveryService` / `InboundActivityDispatcher` / `BlockPolicy`）、accounts-and-instance の Relationship / カウント契約（`RelationshipView` / `RelationshipSerializer` / `RelationshipStateProvider` / `AccountCountsProvider`）、notifications の通知生成シーム（`NotificationEventSink`）の上に、API モジュール群 `src/social_graph/` と関係状態テーブル（`migrations/0006_social_graph.sql`）を追加する。本 spec は accounts-and-instance の `RelationshipStateProvider` / `AccountCountsProvider`（followers/following 部分）と federation-core の `BlockPolicy` の既定実装を本実装へ差し替え、notifications の `NotificationEventSink`（既定 no-op）へ `follow` / `follow_request` を emit する。
 
 ### Goals
 
@@ -54,19 +54,21 @@
 
 - core-runtime: `AppState` / `RuntimeContext`（`Clock` / `IdGenerator`）/ `PgPool` / `AppError` / 構造化ログ / マイグレーション基盤 / テストハーネス（`spawn_test_app`）。
 - api-foundation: Bearer 認証（`RequestActorContext`）/ `Scope`（`follow` / `read:follows` / `write:follows` 内包判定）/ `MastodonError` / `Pagination`（`PageParams` / `Cursor` / `build_link_header`）/ `X-RateLimit-*` レイヤー。
-- federation-core: `DeliveryService`（`DeliveryRequest` / `Recipient`）/ `InboundActivityDispatcher.register`（`InboundActivityHandler` / `InboundContext.signer` / `ParsedActivity`）/ `BlockPolicy` trait / `ActorUrls`（アクター/inbox URL）/ `ActorDirectory` 経由のアクター解決。
-- accounts-and-instance: `RelationshipView` / `RelationshipSerializer.build_relationship` / `RelationshipStateProvider` trait（登録先レジストリ）/ ローカル・リモートアカウント解決（`AccountRef`）。
+- federation-core: `DeliveryService`（`DeliveryRequest` / `Recipient`）/ `InboundActivityDispatcher.register`（`InboundActivityHandler` / `InboundContext.signer` / `ParsedActivity`）/ `BlockPolicy` trait（destination-aware、`LocalRecipientContext::Actor` / `LocalRecipientContext::SharedInbox`）/ `ActorUrls`（アクター/inbox URL）/ `ActorDirectory` 経由のアクター解決。
+- accounts-and-instance: `RelationshipView` / `RelationshipSerializer.build_relationship` / `RelationshipStateProvider` trait（登録先レジストリ）/ `AccountCountsProvider` trait（登録先レジストリ、`AccountCounts { followers, following, statuses, last_status_at }`）/ ローカル・リモートアカウント解決（`AccountRef`）。
+- notifications: `NotificationEventSink` trait（`AppState` レジストリ経由、既定 `NoopSink`）/ `NotificationEvent`（`recipient` / `origin` / `kind`（`Follow` / `FollowRequest`）/ `target_status_id`（常に `None`）/ `occurred_at`）。
 - actor-model: `ActorDirectory`（ローカルアクター解決、owner 非露出）。
 - 下流仕様（タイムライン/通知のフィルタ実装・ドメインブロック）を本 spec に持ち込まない。
 
 ### Revalidation Triggers
 
 - 関係状態テーブル（`follows` / `follow_requests` / `mutes` / `blocks`）のスキーマ・一意制約・マイグレーション番号の変更。
-- `RelationshipStateProvider` / `BlockPolicy` 実装が依存する上流 trait シグネチャの変更。
-- `FollowApprovalPolicy`（同一サーバー承認スキップ）の判定規約の変更。
+- `RelationshipStateProvider` / `BlockPolicy`（destination-aware `LocalRecipientContext` を含む）/ `AccountCountsProvider` 実装が依存する上流 trait シグネチャの変更。
+- `FollowApprovalPolicy`（同一サーバー承認スキップ）の判定規約の変更（`AccountRef` のバリアント構成が変わる場合を含む）。
 - Activity 生成（Follow/Accept/Reject/Block/Undo の論理形）・Undo 対象 id 保持規約の変更。
 - タイムライン/通知向け関係状態問い合わせの公開シグネチャの変更。
-- 上流（federation-core の `DeliveryService` / `InboundActivityHandler` / `BlockPolicy`、accounts-and-instance の `RelationshipView` / `RelationshipStateProvider`、api-foundation の Bearer/Scope/Pagination）契約の変更。
+- notifications `NotificationEventSink` / `NotificationEvent`（`Follow` / `FollowRequest` のペイロード形状）の変更。
+- 上流（federation-core の `DeliveryService` / `InboundActivityHandler` / `BlockPolicy`、accounts-and-instance の `RelationshipView` / `RelationshipStateProvider` / `AccountCountsProvider`、notifications の `NotificationEventSink`、api-foundation の Bearer/Scope/Pagination）契約の変更。
 
 ## Architecture
 
@@ -166,36 +168,36 @@ migrations/
 
 src/
 └── social_graph/
-    ├── mod.rs                    # SocialGraphModule 組み立て・公開・ルータ装着点・受信ハンドラ/Provider/BlockPolicy 登録
+    ├── mod.rs                    # SocialGraphModule 組み立て・公開・ルータ装着点・受信ハンドラ/RelationshipStateProvider/AccountCountsProvider/BlockPolicy 登録・NotificationEventSink 注入
     ├── model.rs                  # Follow, FollowRequest, Mute, Block, RelationshipState, FollowOptions, MuteOptions 等のドメイン型
     ├── repository.rs            # RelationshipRepository（follows/follow_requests/mutes/blocks の取得・upsert・削除・バッチ逆引き・期限考慮）
     ├── approval_policy.rs        # FollowApprovalPolicy（承認要否の単一判定 = 同一サーバー承認スキップ特権の唯一の定義点）
     ├── activity_builder.rs       # ActivityBuilder（Follow/Accept/Reject/Block/Undo の正規 Activity 論理生成・Undo 対象 id 解決）
-    ├── transitions.rs           # 関係状態遷移の共通関数群（establish_follow / remove_follow / apply_block / clear_block 等。API 経路と受信経路が合流）
+    ├── transitions.rs           # 関係状態遷移の共通関数群（establish_follow / remove_follow / apply_block / clear_block 等。API 経路と受信経路が合流。establish_follow/record_pending は notifications NotificationEventSink への follow/follow_request emit を内包）
     ├── relationship_mapper.rs    # RelationshipMapper（関係状態 → accounts-and-instance RelationshipView 写像、期限切れミュート除外、domain_blocking=false）
     ├── follow_service.rs         # FollowService（follow/unfollow 業務集約。配送依頼・承認要否・冪等）
     ├── follow_request_service.rs # FollowRequestService（一覧/authorize/reject 業務集約）
     ├── mute_service.rs           # MuteService（mute/unmute 業務集約。連合なし）
     ├── block_service.rs          # BlockService（block/unblock 業務集約。関係解消・配送依頼）
     ├── inbound.rs                # InboundActivityHandler 実装（Follow/Accept/Reject/Block/Undo 受信→transitions 合流）
-    ├── providers.rs              # RelationshipStateProvider 実装 + BlockPolicy 実装 + フィルタ問い合わせ（FilterQuery）
+    ├── providers.rs              # RelationshipStateProvider 実装 + BlockPolicy 実装 + AccountCountsProvider 実装（followers/following） + フィルタ問い合わせ（FilterQuery）
     └── endpoints.rs              # 各エンドポイントハンドラ（スコープ要求・応答コード規律・Relationship 応答生成）
 
 tests/
-├── follow_unfollow_it.rs        # follow/unfollow（ローカル/リモート・冪等・自己フォロー拒否・オプション反映・Relationship 応答）（統合）
-├── follow_request_it.rs         # ロック済み宛保留・一覧ページネーション・authorize/reject と Accept/Reject 配送（統合）
+├── follow_unfollow_it.rs        # follow/unfollow（ローカル/リモート・冪等・自己フォロー拒否・オプション反映・Relationship 応答・follow 通知イベント emit）（統合）
+├── follow_request_it.rs         # ロック済み宛保留・一覧ページネーション・authorize/reject と Accept/Reject 配送・follow_request 通知イベント emit（統合）
 ├── same_server_skip_it.rs       # 同一サーバー承認スキップ特権（ローカル間は即時確立、片側リモートは通常承認）（統合）
 ├── mute_block_it.rs             # mute/unmute（通知・期限）・block/unblock（関係解消・配送）（統合）
 ├── inbound_activities_it.rs     # 受信 Follow/Accept/Reject/Block/Undo の状態遷移・冪等（統合）
 ├── block_policy_it.rs           # ブロック先署名拒否（BlockPolicy 実装が federation-core に効く）（統合）
-├── relationship_provider_it.rs  # RelationshipStateProvider 供給で accounts-and-instance relationships が実値を返す（統合）
+├── relationship_provider_it.rs  # RelationshipStateProvider / AccountCountsProvider 供給で accounts-and-instance の relationships/counts が実値を返す（統合）
 └── federation_symmetry_it.rs    # 2 インスタンス往復でローカル/HTTP 同一結果（連合）
 ```
 
 ### Modified Files
 
 - `src/state.rs`（core-runtime）— `AppState` に `SocialGraphModule`（各サービス・リポジトリのハンドル）を追加。
-- `src/bootstrap.rs`（core-runtime）— プール・api-foundation・federation-core・accounts-and-instance モジュール構築後に `SocialGraphModule` を組み立て、(1) 受信ハンドラを `InboundActivityDispatcher` へ登録、(2) `RelationshipStateProvider` 実装を accounts-and-instance のレジストリへ登録（既定差し替え）、(3) `BlockPolicy` 実装を federation-core へ登録（既定 no-op 差し替え）、`AppState` に格納。
+- `src/bootstrap.rs`（core-runtime）— プール・api-foundation・federation-core・accounts-and-instance モジュール構築後に `SocialGraphModule` を組み立て、(1) 受信ハンドラを `InboundActivityDispatcher` へ登録、(2) `RelationshipStateProvider` 実装を accounts-and-instance のレジストリへ登録（既定差し替え）、(3) `BlockPolicy` 実装を federation-core へ登録（既定 no-op 差し替え）、(4) `AccountCountsProvider` の followers/following 部分の実装を accounts-and-instance のレジストリへ登録（既定 0 を差し替え）、(5) notifications の `NotificationEventSink` レジストリからハンドルを取得し `Transitions` へ注入（notifications 未構築でも既定 `NoopSink` として安全）、`AppState` に格納。
 - `src/server.rs`（core-runtime）— ルータに social_graph エンドポイントを mount し、api-foundation の横断レイヤー適用点に乗せる。
 
 > 各ファイルは単一責務。承認要否は `approval_policy.rs`、状態遷移は `transitions.rs`、関係→契約写像は `relationship_mapper.rs` に集約し、Composition Root へ一方向に配線する。
@@ -279,6 +281,8 @@ flowchart TD
 | 6.1–6.4 | ブロック先署名拒否・BlockPolicy 供給・継続拒否・解除 | BlockPolicyImpl, RelationshipRepository | is_blocked() | ブロック |
 | 7.1–7.7 | 受信 Follow/Accept/Reject/Block/Undo 処理・冪等 | InboundHandler, Transitions, ApprovalPolicy, ActivityBuilder | handle() | 承認/受信 Follow / ブロック |
 | 8.1–8.5 | 関係真実源・Provider 供給・Relationship 契約消費・全フラグ導出・domain_blocking=false | RelationshipRepository, RelProviderImpl, RelationshipMapper | relationships() | （委譲） |
+| 8.1（Boundary Commitments） | followers/following カウントの算出・供給（accounts-and-instance `AccountCountsProvider`） | AccountCountsProviderImpl, RelationshipRepository | counts() | （委譲） |
+| 1.1, 3.1–3.2, 7.2, 7.3（Boundary Commitments） | follow / follow_request 通知イベントの emit（notifications `NotificationEventSink`） | Transitions, FollowService, InboundHandler | establish_follow(), record_pending() | フォロー / 承認・受信 Follow |
 | 9.1–9.4 | フィルタ向け関係集合公開・期限考慮・フィルタ本体は非実装 | FilterQuery, RelationshipRepository | blocked_set(), muted_set(), following_set() | （問い合わせ） |
 | 10.1–10.5 | 認証/スコープ・エラー互換・対称性・ページネーション・404 | SocialGraphEndpoints, ApiFoundation(参照) | （全エンドポイント） | 全フロー横断 |
 
@@ -288,9 +292,9 @@ flowchart TD
 |-----------|--------------|--------|--------------|--------------------------|-----------|
 | model | Social Graph Domain | フォロー/リクエスト/ミュート/ブロックのドメイン型 | 1,2,4,5,8 | core-runtime Id/時刻型 (P0) | State |
 | RelationshipRepository | Data | 関係状態の永続化・バッチ逆引き・期限考慮 | 1,2,4,5,8,9 | PgPool (P0) | Service, State |
-| FollowApprovalPolicy | Domain Policy | 承認要否の単一判定（同一サーバー特権） | 3 | ActorDirectory (P0) | Service |
+| FollowApprovalPolicy | Domain Policy | 承認要否の単一判定（同一サーバー特権。`AccountRef` バリアントを直接検査、外部解決不要） | 3 | model（`AccountRef`）(P0) | Service |
 | ActivityBuilder | Federation | Follow/Accept/Reject/Block/Undo 論理生成・Undo id 解決 | 1,2,5,7 | ActorUrls, RelationshipRepository (P0) | Service |
-| Transitions | Domain | 関係状態遷移の共通関数（API/受信が合流） | 1,2,3,5,7 | RelationshipRepository (P0) | Service |
+| Transitions | Domain | 関係状態遷移の共通関数（API/受信が合流）。確立/保留コミット後に notifications へ follow/follow_request emit | 1,2,3,5,7 | RelationshipRepository, NotificationEventSink (P0) | Service |
 | RelationshipMapper | Serialization | 関係状態 → RelationshipView 写像・期限/ドメインブロック規律 | 8,4,9 | RelationshipRepository, RelationshipSerializer(参照) (P0/P1) | Service |
 | FollowService | Service | follow/unfollow 業務集約 | 1 | ApprovalPolicy, ActivityBuilder, Transitions, Delivery, RelationshipMapper (P0) | Service |
 | FollowRequestService | Service | 一覧/authorize/reject 業務集約 | 2 | RelationshipRepository, ActivityBuilder, Transitions, Pagination (P0) | Service |
@@ -299,11 +303,12 @@ flowchart TD
 | InboundHandler | Federation Inbound | 受信 Activity → 状態遷移合流 | 7,2,3 | Transitions, ApprovalPolicy, ActivityBuilder, Delivery (P0) | Service |
 | BlockPolicyImpl | Port Impl | federation-core BlockPolicy の本実装 | 6 | RelationshipRepository (P0) | Service |
 | RelProviderImpl | Port Impl | accounts RelationshipStateProvider の本実装 | 8 | RelationshipRepository, RelationshipMapper (P0) | Service |
+| AccountCountsProviderImpl | Port Impl | accounts-and-instance AccountCountsProvider の followers/following 部分の本実装 | 8 | RelationshipRepository (P0) | Service |
 | FilterQuery | Query | タイムライン/通知向け関係集合問い合わせ | 9 | RelationshipRepository (P0) | Service |
 | SocialGraphEndpoints | API | 各エンドポイント HTTP 表層・スコープ・応答コード | 1,2,4,5,10 | Services, Bearer, Scope, MastodonError, Pagination, RelationshipSerializer (P0) | API |
-| SocialGraphModule(wiring) | Runtime | 構築・受信/Provider/BlockPolicy 登録・ルータ装着・AppState 格納 | 6,7,8,10 | core-runtime bootstrap (P0) | Service |
+| SocialGraphModule(wiring) | Runtime | 構築・受信/RelationshipStateProvider/AccountCountsProvider/BlockPolicy 登録・NotificationEventSink 注入・ルータ装着・AppState 格納 | 6,7,8,10 | core-runtime bootstrap (P0) | Service |
 
-依存方向（左→右、上位は下位のみ参照）: `model → RelationshipRepository → FollowApprovalPolicy / ActivityBuilder / Transitions / RelationshipMapper / FilterQuery → FollowService / FollowRequestService / MuteService / BlockService / InboundHandler / BlockPolicyImpl / RelProviderImpl → SocialGraphEndpoints → SocialGraphModule wiring`。
+依存方向（左→右、上位は下位のみ参照）: `model → RelationshipRepository → FollowApprovalPolicy / ActivityBuilder / Transitions / RelationshipMapper / FilterQuery → FollowService / FollowRequestService / MuteService / BlockService / InboundHandler / BlockPolicyImpl / RelProviderImpl / AccountCountsProviderImpl → SocialGraphEndpoints → SocialGraphModule wiring`。
 
 ### Social Graph Domain / ドメイン層
 
@@ -348,17 +353,20 @@ pub struct Block { pub blocker: AccountRef, pub blocked: AccountRef, pub activit
 
 **Responsibilities & Constraints**
 - 宛先ローカルアクターがロック済みなら原則承認必要（2.1）。
-- 例外（管理者特権）: 送信元・宛先がともに同一サーバーのローカルアクターのときは、ロック済みでも承認不要（3.1）。この分岐は本コンポーネント内にのみ存在する（3.3）。
-- 送信元または宛先のいずれかがリモートのときは特権を適用せず通常判定（3.4）。
+- 例外（管理者特権）: `source` と `target` がともに `AccountRef::Local`（＝同一サーバーのローカルアクター。kawasemi は一人のオーナーが複数ローカルアクターを保持する構成のため、ローカル同士は常に同一サーバー）のときは、ロック済みでも承認不要（3.1）。
+- **同一サーバー判定（両者がローカルか）は本メソッドが `source`・`target` の `AccountRef`（core-runtime `domain-primitives` の正準定義。`Local(Id)` / `Remote(Id)`）バリアントを直接検査して内部で行う**。呼び出し側（API 経路の `FollowService` / 受信経路の `InboundHandler`）は同一サーバー判定ロジックを持たず、素の `source` / `target` と宛先のロック状態のみを渡す。この分岐は本コンポーネント内にのみ存在し、呼び出し点ごとに重複・分岐実装させない（3.3）。これにより API 経路と受信経路で判定が乖離するリスク（リモート特権漏れ）を構造的に排除する。
+- `source` または `target` のいずれかが `AccountRef::Remote` のときは特権を適用せず通常判定（3.4）。
 
 **Contracts**: Service [x]
 
 ##### Service Interface
 ```rust
 pub enum FollowDecision { Establish, RequireApproval }
-pub fn requires_approval(&self, source: &AccountRef, target_locked: bool, both_local_same_server: bool) -> FollowDecision;
+/// 同一サーバー（両者ローカル）判定は本メソッド内部で AccountRef のバリアントを検査して完結させる。
+/// 呼び出し側は same-server 判定を自前で行わない。
+pub fn requires_approval(&self, source: &AccountRef, target: &AccountRef, target_locked: bool) -> FollowDecision;
 ```
-- Postconditions: `both_local_same_server == true` なら常に `Establish`（同一サーバー特権の唯一の表現）。
+- Postconditions: `source` と `target` がともに `AccountRef::Local` なら常に `Establish`（同一サーバー特権の唯一の表現。判定はメソッド内部で完結し、呼び出し側は同一サーバー判定ロジックを持たない）。
 
 #### Transitions
 
@@ -371,6 +379,8 @@ pub fn requires_approval(&self, source: &AccountRef, target_locked: bool, both_l
 - `establish_follow` / `remove_follow` / `record_pending` / `promote_pending`（Accept 受領）/ `drop_pending`（Reject 受領）/ `apply_block` / `clear_block` / `mark_blocked_by` / `clear_blocked_by` を提供。
 - `apply_block` は単一トランザクションで双方向フォロー・両方向保留を解消してから block 行を確定（5.2）。
 - すべての遷移は冪等（既存状態と一致するなら二重適用しない）（1.6, 7.7）。
+- 通知イベント emit（Boundary Commitments）: `establish_follow` はコミット後、`followee` が `AccountRef::Local` のとき notifications `NotificationEventSink` へ `NotificationEvent{ recipient: followee, origin: follower, kind: NotificationType::Follow, target_status_id: None, occurred_at }` を emit する（`followee` がリモートなら emit しない。通知の recipient はローカル限定という notifications 側の型不変条件と整合）。`record_pending` はコミット後、`req.direction == Inbound`（受信 Follow によるローカル宛の保留）のとき `NotificationEvent{ recipient: req.target, origin: req.requester, kind: NotificationType::FollowRequest, target_status_id: None, occurred_at }` を emit する（`direction == Outbound` は宛先がリモートのため emit しない）。
+- emit は `establish_follow` / `record_pending` という単一の合流点でのみ行い、`FollowService`（API 経路）・`InboundHandler`（受信経路）のどちらから呼ばれても二重に生成しない（steering の単一生成点原則、notifications 側の「単一の生成点から生成」制約と整合）。`Transitions` は `NotificationEventSink` の実装ハンドルを保持する（`AppState` 上のレジストリ経由。notifications 未構築時は既定 `NoopSink` のため安全に no-op）。
 
 **Contracts**: Service [x]
 
@@ -386,7 +396,7 @@ pub async fn clear_block(&self, blocker: &AccountRef, blocked: &AccountRef) -> R
 pub async fn mark_blocked_by(&self, source: &AccountRef, target: &AccountRef) -> Result<(), AppError>;     // 受信 Block
 pub async fn clear_blocked_by(&self, source: &AccountRef, target: &AccountRef) -> Result<(), AppError>;    // 受信 Undo Block
 ```
-- Invariants: API 経路と受信経路は同じ遷移関数を呼び、ローカル/リモートで同一結果になる（10.3）。
+- Invariants: API 経路と受信経路は同じ遷移関数を呼び、ローカル/リモートで同一結果になる（10.3）。`establish_follow` / `record_pending` の notifications emit も同じ理由で API/受信経路間で重複しない。
 
 ### Data / データ層
 
@@ -402,6 +412,7 @@ pub async fn clear_blocked_by(&self, source: &AccountRef, target: &AccountRef) -
 - 閲覧者 + 対象 id 群に対する関係フラグのバッチ逆引き（`RelationshipView` 導出のため、N+1 を避ける）（8.4）。
 - ミュート期限切れは導出・フィルタ集合から除外（取得時に `Clock` 由来 now で判定）（4.3, 9.3）。
 - 時刻/ID は `RuntimeContext`（決定性）。
+- 対象アカウントを主体としたフォロワー数/フォロー中数の集計（`follows` テーブルの単純 COUNT）を提供し、`AccountCountsProviderImpl` の供給元となる（Boundary Commitments）。
 
 **Contracts**: Service [x] / State [x]
 
@@ -421,6 +432,8 @@ pub async fn blocked_targets(&self, viewer: &AccountRef) -> Result<Vec<AccountRe
 pub async fn blocked_by(&self, viewer: &AccountRef) -> Result<Vec<AccountRef>, AppError>;            // 9.1
 pub async fn muted_targets(&self, viewer: &AccountRef, now: OffsetDateTime, notifications_only: bool) -> Result<Vec<AccountRef>, AppError>; // 9.1,9.3
 pub async fn following_targets(&self, viewer: &AccountRef) -> Result<Vec<AccountRef>, AppError>;     // 9.2
+pub async fn count_followers(&self, target: &AccountRef) -> Result<i64, AppError>;  // followee=target の確立済み follows 件数（AccountCountsProvider 供給用）
+pub async fn count_following(&self, target: &AccountRef) -> Result<i64, AppError>;  // follower=target の確立済み follows 件数（AccountCountsProvider 供給用）
 ```
 
 ### Federation / 連合層
@@ -479,7 +492,7 @@ pub fn to_view(&self, state: &RelationshipState) -> RelationshipView;   // accou
 | Requirements | 1.1, 1.4, 1.5, 1.6, 1.7, 2.1, 2.2, 2.3, 2.4, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 5.4 |
 
 **Responsibilities & Constraints**
-- `FollowService.follow`: 自己フォロー拒否（1.7）→ 既存確認で冪等（1.6）→ `FollowApprovalPolicy` で承認要否（3.x）→ `Transitions` で確立 or 保留 → `ActivityBuilder` + `DeliveryService` で Follow 配送（1.2, 1.3）→ `RelationshipMapper` で応答（1.1）。`unfollow` は逆操作 + Undo 配送（1.4）。
+- `FollowService.follow`: 自己フォロー拒否（1.7）→ 既存確認で冪等（1.6）→ `FollowApprovalPolicy` で承認要否（3.x）→ `Transitions` で確立 or 保留 → `ActivityBuilder` + `DeliveryService` で Follow 配送（1.2, 1.3）→ `RelationshipMapper` で応答（1.1）。`unfollow` は逆操作 + Undo 配送（1.4）。`Transitions.establish_follow`/`record_pending` 呼び出しは notifications への `follow`/`follow_request` emit を内包するため、本サービス自身は emit を行わない（Boundary Commitments）。
 - `FollowRequestService`: 受信保留一覧をページネーションで返す（2.2）。authorize は `promote_pending` + Accept 配送（2.3）、reject は `drop_pending` + Reject 配送（2.4）。
 - `MuteService`: mute/unmute は DB 状態のみ更新（連合なし、4.5）。通知ミュート（4.2）・期限（4.3）を反映。
 - `BlockService`: `apply_block`（関係解消込み単一tx, 5.2）→ Block 配送（5.3）。unblock は `clear_block` + Undo(Block) 配送（5.4）。
@@ -511,7 +524,7 @@ pub async fn unblock(&self, viewer: &RequestActorContext, target: &str) -> Resul
 
 **Responsibilities & Constraints**
 - `activity_types()` は Follow/Accept/Reject/Block/Undo を宣言（7.1）。
-- 受信 Follow: `FollowApprovalPolicy` で承認要否 → 確立なら `establish_follow` + Accept 配送、要承認なら `record_pending`（inbound）（7.2, 7.3, 3.2）。
+- 受信 Follow: `FollowApprovalPolicy` で承認要否 → 確立なら `establish_follow` + Accept 配送、要承認なら `record_pending`（inbound）（7.2, 7.3, 3.2）。呼び出す `establish_follow`/`record_pending`（`direction=Inbound`）は notifications への `follow`/`follow_request` emit を内包し、API 経路と同一関数のため二重生成しない（Boundary Commitments）。
 - 受信 Accept: `promote_pending`（2.5）。受信 Reject: `drop_pending`（2.6）。
 - 受信 Block: `mark_blocked_by` + 関係解消（7.4）。受信 Undo は wrap 種別で分岐し `remove_follow`（7.5）/ `clear_blocked_by`（7.6）。
 - すべて冪等（既処理は状態を二重変更しない）（7.7）。`InboundContext.signer` の検証済み URI を関係主体の特定に用いる。
@@ -528,24 +541,32 @@ impl InboundActivityHandler for SocialGraphInbound {
 
 ### Port Impl / 委譲実装層
 
-#### BlockPolicyImpl / RelProviderImpl / FilterQuery
+#### BlockPolicyImpl / RelProviderImpl / AccountCountsProviderImpl / FilterQuery
 
 | Field | Detail |
 |-------|--------|
-| Intent | federation-core `BlockPolicy`・accounts-and-instance `RelationshipStateProvider` の本実装供給と、タイムライン/通知向け関係問い合わせ |
+| Intent | federation-core `BlockPolicy`・accounts-and-instance `RelationshipStateProvider` / `AccountCountsProvider` の本実装供給と、タイムライン/通知向け関係問い合わせ |
 | Requirements | 6.1, 6.2, 6.3, 6.4, 8.2, 8.3, 8.4, 9.1, 9.2, 9.3, 9.4 |
 
 **Responsibilities & Constraints**
-- `BlockPolicyImpl.is_blocked(actor_uri)`: 署名者 URI を `AccountRef` へ解決し、当該宛先ローカルアクターがブロックしているかを判定（6.1, 6.2）。ブロック継続中は真、解除後は偽（6.3, 6.4）。
+- `BlockPolicyImpl.is_blocked(actor_uri, local_recipient)`: federation-core の destination-aware `BlockPolicy` 契約に従う。`local_recipient` が `LocalRecipientContext::Actor { actor_uri: recipient_uri }` のとき、`recipient_uri` が指すローカルアクターを主体として、署名者 URI（`AccountRef` へ解決）に対する `blocks` 行（宛先アクター→署名者方向）の有無を `RelationshipRepository` から判定する（6.1, 6.2）。Follow/Accept/Reject/Block/Undo（本 spec が処理する種別）は常にアクター個別 inbox へ配送されるため、本 spec の判定は実質的にこの分岐のみで完結する。`local_recipient` が `LocalRecipientContext::SharedInbox`（宛先アクターを一意に決定できない共有 inbox 受信）のときは、federation-core の契約に従い常に `false` を返し一括拒否しない（本 spec が扱う Activity 種別は shared inbox 経由では到達しない想定のため、この分岐が実質的な判定精度を落とすことはない）。ブロック継続中は真、解除後は偽（6.3, 6.4）。
 - `RelProviderImpl.relationships(viewer, targets)`: `RelationshipRepository.load_states` → `RelationshipMapper.to_view` で `Vec<RelationshipView>` を返す（8.2, 8.3, 8.4）。
+- `AccountCountsProviderImpl.counts(target)`: `RelationshipRepository` から `target` を主体に `followers`（`followee` = target の確立済み `follows` 件数）と `following`（`follower` = target の確立済み `follows` 件数）を集計して `AccountCounts` の当該フィールドへ設定する（Boundary Commitments、follows テーブルが単一の真実源）。`statuses` / `last_status_at` は本 spec の範囲外のため常に accounts-and-instance の既定値（`0` / `None`）のまま返す（statuses-core が別途上書きする分担）。
 - `FilterQuery`: ブロック/被ブロック/ミュート（期限考慮）/フォロー集合を返す（9.1, 9.2, 9.3）。フィルタ適用自体は実装しない（9.4）。
 
 **Contracts**: Service [x]
 
 ##### Service Interface
 ```rust
-impl BlockPolicy for BlockPolicyImpl { async fn is_blocked(&self, actor_uri: &str) -> Result<bool, AppError>; }
+impl BlockPolicy for BlockPolicyImpl {
+    // LocalRecipientContext::Actor は宛先ローカルアクター視点で blocks を判定、SharedInbox は常に false（federation-core 契約）。
+    async fn is_blocked(&self, actor_uri: &str, local_recipient: LocalRecipientContext) -> Result<bool, AppError>;
+}
 impl RelationshipStateProvider for RelProviderImpl { async fn relationships(&self, viewer: Id, targets: &[AccountRef]) -> Result<Vec<RelationshipView>, AppError>; }
+impl AccountCountsProvider for AccountCountsProviderImpl {
+    // followers/following は follows テーブルから集計。statuses/last_status_at は既定のまま（0/None）。
+    async fn counts(&self, target: &AccountRef) -> Result<AccountCounts, AppError>;
+}
 pub async fn blocked_set(&self, viewer: &AccountRef) -> Result<RelationshipSets, AppError>; // blocked/blocked_by/muted/muted_notifications
 pub async fn following_set(&self, viewer: &AccountRef) -> Result<Vec<AccountRef>, AppError>;
 ```
@@ -585,11 +606,11 @@ pub async fn following_set(&self, viewer: &AccountRef) -> Result<Vec<AccountRef>
 
 | Field | Detail |
 |-------|--------|
-| Intent | 構築・受信ハンドラ/Provider/BlockPolicy 登録・ルータ装着・AppState 格納 |
+| Intent | 構築・受信ハンドラ/RelationshipStateProvider/AccountCountsProvider/BlockPolicy 登録・NotificationEventSink 注入・ルータ装着・AppState 格納 |
 | Requirements | 6.1, 7.1, 8.2, 10.1 |
 
 **Responsibilities & Constraints**
-- 各リポジトリ/サービス/ビルダを構築し、(1) `InboundHandler` を `InboundActivityDispatcher` に登録、(2) `RelProviderImpl` を accounts-and-instance レジストリへ登録（既定差し替え）、(3) `BlockPolicyImpl` を federation-core へ登録（既定 no-op 差し替え）。
+- 各リポジトリ/サービス/ビルダを構築し、(1) `InboundHandler` を `InboundActivityDispatcher` に登録、(2) `RelProviderImpl` を accounts-and-instance レジストリへ登録（既定差し替え）、(3) `BlockPolicyImpl` を federation-core へ登録（既定 no-op 差し替え）、(4) `AccountCountsProviderImpl`（followers/following 部分）を accounts-and-instance の `AccountCountsProvider` レジストリへ登録（既定 0 を差し替え）、(5) notifications の `NotificationEventSink` レジストリからハンドルを取得し `Transitions` へ注入（notifications 未構築でも既定 `NoopSink` のため安全）。
 - social_graph ルータを土台ルータへ装着し、api-foundation の横断レイヤー適用点に乗せる。
 
 **Contracts**: Service [x]
@@ -669,8 +690,8 @@ CREATE INDEX blocks_blocked_idx ON blocks(blocked_kind, blocked_id);
 ### Data Contracts & Integration
 
 - 操作応答は accounts-and-instance の Relationship JSON（`RelationshipView` → `RelationshipSerializer`）。follow_requests 一覧は Account JSON（accounts-and-instance のアカウント解決を利用）+ `Link`。
-- 下流供給: `RelationshipStateProvider`（accounts へ登録）、`BlockPolicy`（federation-core へ登録）、`FilterQuery`（timelines/notifications が消費）。
-- 上流消費: federation-core（`DeliveryService` / `InboundActivityDispatcher` / `ActorUrls`）、accounts-and-instance（`RelationshipView` / `RelationshipSerializer` / アカウント解決）、api-foundation（Bearer/Scope/MastodonError/Pagination）。
+- 下流供給: `RelationshipStateProvider`（accounts へ登録）、`AccountCountsProvider` の followers/following 部分（accounts へ登録）、`BlockPolicy`（federation-core へ登録、destination-aware）、`NotificationEventSink` への `follow`/`follow_request` emit（notifications のレジストリへ）、`FilterQuery`（timelines/notifications が消費）。
+- 上流消費: federation-core（`DeliveryService` / `InboundActivityDispatcher` / `ActorUrls`）、accounts-and-instance（`RelationshipView` / `RelationshipSerializer` / アカウント解決）、notifications（`NotificationEventSink` / `NotificationEvent`）、api-foundation（Bearer/Scope/MastodonError/Pagination）。
 
 ## Error Handling
 
@@ -689,7 +710,7 @@ CREATE INDEX blocks_blocked_idx ON blocks(blocked_kind, blocked_id);
 ## Testing Strategy
 
 ### Unit Tests
-- `FollowApprovalPolicy`: 同一サーバー両ローカルは常に `Establish`、片側リモート + ロック済みは `RequireApproval`、両ローカルでないロック済みは `RequireApproval`（3.1, 3.4）。
+- `FollowApprovalPolicy`: `source`/`target` がともに `AccountRef::Local` なら常に `Establish`、いずれかが `AccountRef::Remote` かつ `target_locked=true` は `RequireApproval`（同一サーバー判定はメソッド内部で `AccountRef` バリアントから導出されることを検証）（3.1, 3.4）。
 - `RelationshipMapper`: 関係状態から全フラグを決定論的に導出、期限切れミュートで `muting` 偽、`domain_blocking` 常に偽（8.4, 8.5, 4.3）。
 - `ActivityBuilder`: Follow/Accept/Reject/Block/Undo の正規形、Undo に元 Activity id を埋め込む（1.4, 5.4）。
 - `Transitions.apply_block`: 双方向フォロー・両方向保留の解消と block 確定が冪等（5.2, 7.7）。
@@ -702,6 +723,8 @@ CREATE INDEX blocks_blocked_idx ON blocks(blocked_kind, blocked_id);
 - 受信 Activity: 受信 Follow（承認要否分岐）・Accept/Reject・Block・Undo(Follow/Block) の状態遷移と冪等（7.2–7.7, 2.5, 2.6）。
 - BlockPolicy: ブロック後に当該署名者の受信が federation-core で拒否され、解除後は通る（6.1–6.4）。
 - RelationshipStateProvider: 本 spec 登録後に accounts-and-instance の relationships が実フラグを返す（8.2, 8.3）。
+- AccountCountsProvider: フォロー確立/解消後に accounts-and-instance の counts（`followers_count` / `following_count`）が実値を返す（Boundary Commitments）。
+- 通知イベント emit: フォロー確立時（同一サーバースキップ・受信 Follow 即時確立の双方）に `follow` の `NotificationEvent` が、ロック済みローカル宛の受信保留時に `follow_request` の `NotificationEvent` が、登録された notifications `NotificationEventSink` へ冪等に届く（重複再処理で二重 emit しない）（Boundary Commitments）。
 
 ### Federation Tests（2 インスタンス往復）
 - A→B のフォローで B にフォロワー確立・A に following 反映、ロック済み B では承認後に確立、A のブロックで B からの受信が拒否される（1.2, 2.x, 6.x, 7.x）。

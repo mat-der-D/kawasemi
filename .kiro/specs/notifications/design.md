@@ -139,7 +139,7 @@ graph LR
 
 ```
 migrations/
-└── 0009_notifications.sql       # notifications テーブルと重複排除一意制約・受信者カーソルインデックス（research.md の Migration Numbering Coordination 参照）
+└── 0009_notifications.sql       # notifications テーブルと重複排除の部分一意制約（未消去限定）・受信者カーソルインデックス（research.md の Migration Numbering Coordination 参照）
 
 src/
 └── notifications/
@@ -206,7 +206,7 @@ sequenceDiagram
     end
 ```
 
-通知は上流イベントの消費のみで生成し再検出しない（5.1）。受信者ローカル限定（5.3）。ブロック/通知ミュートは生成段で抑制し関係判定は social-graph に委譲（7.1–7.4）。重複は一意制約で冪等化し新規時のみ配信シームへ引き渡す（8.1, 8.2, 5.5）。
+通知は上流イベントの消費のみで生成し再検出しない（5.1）。受信者ローカル限定（5.3）。ブロック/通知ミュートは生成段で抑制し関係判定は social-graph に委譲（7.1–7.4）。未消去の同一通知との重複は部分一意インデックスで冪等化し新規時のみ配信シームへ引き渡す（消去済みは一意制約の対象外のため取り消し→再実行で再生成される、8.1, 8.2, 5.5）。
 
 ### 通知一覧の取得（ページネーション・フィルタ）
 
@@ -267,7 +267,7 @@ flowchart TD
 - `NotificationType` は v1 種別集合（`Mention` / `Follow` / `FollowRequest` / `Favourite` / `Reblog` / `Poll` / `Status` / `Update`）の列挙に限定し、範囲外を表現不能にする（1.5）。
 - `Notification` は `id`・`recipient_id`（ローカルアクター）・`type`・`account`（通知元 `AccountRef`、ローカル/リモート）・`status_id`（任意）・`dismissed`・`created_at` を持つ（1.1）。
 - `NotificationEvent` は通知生成イベント（`recipient`・`origin`（通知元 `AccountRef`）・`type`・`target_status_id`（任意）・`occurred_at`）を表す。上流が emit する不変ペイロード（5.1）。
-- 重複排除キーは (`recipient_id`, `type`, `origin`, `status_id`) で論理的に一意（8.1）。
+- 重複排除キーは (`recipient_id`, `type`, `origin`, `status_id`) について**未消去の通知間でのみ**論理的に一意（8.1）。「重複」とは同一の未消去（表示中）通知が既に存在することを指し、「当該イベントが過去に一度でも発生したか」を恒久的に記録するものではない。消去済み通知は重複判定の対象から外れるため、取り消し→再実行（unfollow→re-follow、unfavourite→re-favourite、dismiss 後の同一操作の再発生 等）は新規通知として生成される。
 
 **Dependencies**
 - Inbound: 全通知コンポーネント (P0)
@@ -301,8 +301,8 @@ pub struct NotificationEvent {
 | Requirements | 2.1, 2.2, 2.3, 2.4, 3.1, 4.1, 4.2, 4.4, 8.1, 8.2 |
 
 **Responsibilities & Constraints**
-- 挿入は重複排除キー (recipient, type, origin, status) に対する `ON CONFLICT DO NOTHING` で冪等化し、新規作成か既存無視かを返す（8.1, 8.2）。ID/時刻は `RuntimeContext`（決定性）。
-- 一覧は受信者スコープ・消去済み除外・通知 ID カーソル（`max_id`/`since_id`/`min_id`）・種別フィルタ（`types`/`exclude_types`）・`account_id` フィルタを適用（2.1–2.4）。
+- 挿入は重複排除キー (recipient, type, origin, status) に対する `ON CONFLICT (recipient_id, kind, origin_kind, origin_id, COALESCE(status_id, 0)) WHERE NOT dismissed DO NOTHING`（部分一意インデックス `notifications_dedup_idx` を衝突対象に指定）で冪等化し、新規作成か既存無視かを返す（8.1, 8.2）。衝突対象は未消去の通知に限るため、消去済みの同一キー通知は新規挿入を妨げない（取り消し→再実行の再通知を許容）。ID/時刻は `RuntimeContext`（決定性）。
+- 一覧は受信者スコープ・消去済み除外・通知 ID カーソル（`max_id`/`since_id`/`min_id`）・種別フィルタ（`types`/`exclude_types`）・`account_id` フィルタを適用（2.1–2.4）。`account_id` フィルタは呼び出し側（`NotificationEndpoints`）で文字列 ID から解決済みの `AccountRef` を受け取り、本層では ID 解決を行わない。
 - 単一取得は (id, recipient) で取得し、他者宛/未存在は `None`（3.1）。dismiss は単一を消去、clear は受信者の全通知を消去（4.1, 4.2）。消去は以降の取得から除外（4.4）。
 
 **Contracts**: Service [x] / State [x]
@@ -377,6 +377,7 @@ pub async fn should_suppress(&self, recipient: &AccountRef, origin: &AccountRef)
 **Responsibilities & Constraints**
 - 受信者がローカルアクターのイベントのみ通知化（5.3）。`NotificationFilter` で抑制判定（7.x）。
 - 種別ごと（fav/reblog/mention/follow/follow_request/poll、加えて status/update）の `NotificationEvent` を `Notification` へ写像し `insert_dedup` で冪等永続化（6.1–6.6, 8.1, 8.2）。
+- 重複排除の意図は「同一の未消去通知を二重に見せない」ことであり、「同一イベントが過去に一度でも起きたか」を恒久的に記録することではない。dismiss/clear 済みの通知は重複判定の対象から外れ、取り消し→再実行（unfollow→re-follow・unfavourite→re-favourite・dismiss 後の同一操作の再発生 等）による同一キーのイベントは新規通知として生成される（8.1, 8.2）。
 - 新規作成された通知のみ `NotificationDeliverySink.deliver` へ引き渡す（二重発火防止、5.5）。配信失敗は本 spec の生成成否に影響させない（後段の関心）。
 - ID/時刻は `RuntimeContext`（決定性）。この 1 コンポーネントが唯一の生成点であり、ローカル/リモート由来イベントが合流する（5.1, 5.2）。
 
@@ -443,10 +444,11 @@ pub async fn clear(&self, ctx: &RequestActorContext) -> Result<(), AppError>;
 | Field | Detail |
 |-------|--------|
 | Intent | 通知の HTTP 表層・スコープ要求・応答コード規律 |
-| Requirements | 2.1, 2.5, 3.1, 3.2, 4.1, 4.2, 4.3, 9.1, 9.2, 9.3, 9.4 |
+| Requirements | 2.1, 2.3, 2.5, 3.1, 3.2, 4.1, 4.2, 4.3, 9.1, 9.2, 9.3, 9.4 |
 
 **Responsibilities & Constraints**
 - スコープ: 取得系（一覧/単一）= `read:notifications`、消去系（clear/dismiss）= `write:notifications`（9.1）。Bearer + Scope は api-foundation 再利用。
+- `account_id` クエリパラメータ（Mastodon 互換のアカウント ID 文字列）は、accounts-and-instance のアカウント解決（`AccountService::show_account` が用いるものと同じ解決区分: ローカルは `ActorDirectory`、既知リモートは `RemoteAccountRepository` による解決。accounts-and-instance design.md の「accounts/:id 取得」フロー参照）を用いて `AccountRef` へ解決し、`NotificationRepository::ListFilter.account_id` へ渡す（2.3）。解決できない（未知の ID）場合はエラーにせず、`NotificationRepository` を呼ばずに空の結果一覧（`Notification[] = []` + 通常のページネーションヘッダ）を返す（最も単純かつ安全な既定動作として採用）。
 - 失敗は api-foundation の Mastodon 互換エラー本文（9.2）。他者宛/未存在は 404（3.2, 4.3）。一覧は `Link` + 通知 ID カーソル（9.3）。レート制限は横断レイヤー（9.4）。
 
 **Contracts**: API [x]
@@ -454,7 +456,7 @@ pub async fn clear(&self, ctx: &RequestActorContext) -> Result<(), AppError>;
 ##### API Contract
 | Method | Endpoint | Request | Response | Errors |
 |--------|----------|---------|----------|--------|
-| GET | /api/v1/notifications | Bearer(`read:notifications`), max_id/since_id/min_id/limit, types[], exclude_types[], account_id | 200 Notification[] + Link | 401, 403 |
+| GET | /api/v1/notifications | Bearer(`read:notifications`), max_id/since_id/min_id/limit, types[], exclude_types[], account_id | 200 Notification[] + Link（`account_id` が未知の ID に解決できない場合も 200 + 空配列。404 にはしない） | 401, 403 |
 | GET | /api/v1/notifications/:id | Bearer(`read:notifications`) | 200 Notification | 401, 403, 404 |
 | POST | /api/v1/notifications/clear | Bearer(`write:notifications`) | 200 {} | 401, 403 |
 | POST | /api/v1/notifications/:id/dismiss | Bearer(`write:notifications`) | 200 {} | 401, 403, 404 |
@@ -480,7 +482,7 @@ pub async fn clear(&self, ctx: &RequestActorContext) -> Result<(), AppError>;
 
 本 spec が所有する永続構造（`migrations/0009_notifications.sql`）。Account 実体（actor-model / accounts-and-instance / remote_accounts）・Status 実体（statuses-core）は上流所有で論理参照のみ。
 
-- `notifications`: 通知本体（受信者ローカルアクター・種別・通知元（ローカル/リモート kind）・対象投稿（任意）・消去フラグ・作成時刻）。重複排除は (recipient, type, origin, status) 一意。
+- `notifications`: 通知本体（受信者ローカルアクター・種別・通知元（ローカル/リモート kind）・対象投稿（任意）・消去フラグ・作成時刻）。重複排除は (recipient, type, origin, status) について**未消去（`dismissed=false`）の間のみ**一意（部分インデックス）。消去済み通知は一意制約の対象外とし、同一操作の取り消し→再実行（unfollow→re-follow 等）で新たな通知を生成できるようにする。
 
 ### Physical Data Model
 
@@ -497,12 +499,15 @@ CREATE TABLE notifications (
     created_at    TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX notifications_recipient_idx ON notifications(recipient_id, id DESC);
--- 重複排除: status を伴う種別と伴わない種別の双方を一意化（status_id は NULL を一意キーに含める運用）
+-- 重複排除: status を伴う種別と伴わない種別の双方を一意化（status_id は NULL を一意キーに含める運用）。
+-- 部分インデックス（WHERE NOT dismissed）: 「重複」は未消去（現在提示中）の同一通知に限定し、消去済み通知は一意制約の対象外とする。
+-- これにより dismiss 後や unfollow→re-follow 等の取り消し→再実行で、同一キーの通知を新規生成できる（Mastodon の実挙動に合わせる）。
 CREATE UNIQUE INDEX notifications_dedup_idx
-    ON notifications(recipient_id, kind, origin_kind, origin_id, COALESCE(status_id, 0));
+    ON notifications(recipient_id, kind, origin_kind, origin_id, COALESCE(status_id, 0))
+    WHERE NOT dismissed;
 ```
 
-- Consistency: 生成は `ON CONFLICT (重複排除キー) DO NOTHING` で冪等（8.1, 8.2）。消去は `dismissed=TRUE` 更新（または受信者全件更新）で取得から除外（4.4）。
+- Consistency: 生成は `ON CONFLICT (recipient_id, kind, origin_kind, origin_id, COALESCE(status_id, 0)) WHERE NOT dismissed DO NOTHING`（部分一意インデックス `notifications_dedup_idx` を衝突対象に指定）で冪等（8.1, 8.2）。衝突判定は**未消去の通知同士**に限られるため、消去済み通知は新規挿入を妨げない（=取り消し→再実行の再通知を許容する）。消去は `dismissed=TRUE` 更新（または受信者全件更新）で取得から除外（4.4）。
 - Temporal: `created_at` は `Clock` 由来（決定性）。一覧カーソルは `id` 降順（受信者インデックス）。
 - Referential: 受信者・通知元・対象投稿は論理参照（FK はモジュール境界方針に従い任意）。受信者ローカル限定は生成段（`NotificationGenerator`）で担保。
 
@@ -520,7 +525,7 @@ CREATE UNIQUE INDEX notifications_dedup_idx
 
 ### Error Categories and Responses
 - **利用者起因**: 認証欠如/無効 → 401、スコープ不足 → 403（9.1）、他者宛/未存在通知 → 404（3.2, 4.3）。いずれも互換エラー本文（9.2）。
-- **生成段**: 非ローカル受信者・ブロック/通知ミュート・重複は通知を生成しない（エラーではなくスキップ、5.3/7.x/8.x）。
+- **生成段**: 非ローカル受信者・ブロック/通知ミュート・重複（未消去の同一通知が既に存在する場合）は通知を生成しない（エラーではなくスキップ、5.3/7.x/8.x）。
 - **配信シーム**: `NotificationDeliverySink` の失敗は後段（streaming/web-push）の関心であり、生成の成否に同期しない（5.5）。
 - **システム起因（5xx）**: 内部詳細を本文に出さず互換本文のみ。診断は core-runtime ログへ。
 
@@ -533,12 +538,12 @@ CREATE UNIQUE INDEX notifications_dedup_idx
 - `NotificationSerializer`: `type` v1 種別のみ、follow/follow_request で `status` null 規律、投稿関連種別で `status` 埋め込み点が受信者 viewer になる（1.2, 1.4, 1.5）。
 - `NotificationFilter`: ブロック/被ブロック/通知ミュートで抑制、期限切れミュートは抑制しない（7.1, 7.2, 7.3）。
 - `NotificationGenerator`: 非ローカル受信者でスキップ、抑制/重複で永続化も配信引き渡しもしない、新規時のみ配信シームへ引き渡す（5.3, 5.5, 8.2）。
-- `NotificationRepository.insert_dedup`: 同一重複排除キーの二重挿入が冪等（8.1, 8.2）。
+- `NotificationRepository.insert_dedup`: 同一重複排除キーの二重挿入が冪等（8.1, 8.2）。消去済み（`dismissed=TRUE`）にした通知と同一キーの新規挿入は部分インデックスの対象外として新規作成される（取り消し→再実行の再通知、8.1）。
 
 ### Integration Tests（`spawn_test_app` 上）
 - 一覧: ページネーション（通知 ID カーソル・`Link`）、`types[]`/`exclude_types[]`/`account_id` フィルタ、消去済み除外、`read:notifications` 必須（2.1–2.5, 9.3）。
 - 単一/消去: 単一取得・他者宛 404、dismiss/clear 後に取得から除外、`write:notifications` 必須（3.1, 3.2, 4.1–4.4）。
-- 生成: 各種別（fav/reblog/mention/follow/follow_request/poll）でイベント消費 → 受信者宛通知が作成、受信者ローカル限定、重複イベントで二重生成されない、新規時に配信シームが呼ばれる（5.1–5.5, 6.1–6.6, 8.1, 8.2）。
+- 生成: 各種別（fav/reblog/mention/follow/follow_request/poll）でイベント消費 → 受信者宛通知が作成、受信者ローカル限定、重複イベントで二重生成されない、新規時に配信シームが呼ばれる（5.1–5.5, 6.1–6.6, 8.1, 8.2）。取り消し→再実行の再通知: 同一キーの通知を dismiss 済みにした後、同一イベント（unfollow→re-follow / unfavourite→re-favourite 等）を再度消費すると新規通知が生成される。未消去のまま同一イベントが再送された場合は重複として抑制される（8.1, 8.2）。
 - フィルタ: ブロック/被ブロック/通知ミュート（期限考慮）で通知が生成されない（7.1–7.4）。
 
 ### Contract Tests（api-foundation ハーネス上）
