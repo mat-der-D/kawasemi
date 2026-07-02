@@ -40,17 +40,17 @@ kawasemi は一人鯖（single-user server）運用に特化した Fediverse サ
 
 > 以下は Phase 1（MVP の実線まで）。brief.md 作成済み。`/kiro-spec-batch` はこの一覧を依存波順に並列生成する。
 
-- [ ] core-runtime -- axum 起動・二層設定(TOML+DB)・埋め込みマイグレーション自動実行・DI境界(clock/id/rng/署名鍵)・可観測性・エラー基盤。Dependencies: none
-- [ ] actor-model -- 複数アクターモデル + アクター毎署名鍵/ローテーション。管理層概念をプロトコル層に漏らさない境界。Dependencies: core-runtime
-- [ ] api-foundation -- OAuth2(複数アクター×1トークンのアクター選択) + ページネーション規約 + レート制限/エラー互換 + 契約テストハーネス。Dependencies: core-runtime, actor-model
-- [ ] federation-core -- HTTP Signatures(draft+RFC9421+double-knock)・WebFinger・NodeInfo・inbox/outbox/shared inbox・activity+json GET・JSON-LD・配送関数分岐・DB配送キュー。Dependencies: core-runtime, actor-model
-- [ ] media-pipeline -- 非同期アップロード(202→poll)・ストレージ抽象・BlurHash・フォーカルポイント・ネイティブ依存判断ゲート。Dependencies: core-runtime, api-foundation
-- [ ] accounts-and-instance -- accounts/relationships/update_credentials・instance v2・custom_emojis(read)。Dependencies: api-foundation, federation-core, media-pipeline
-- [ ] statuses-core -- 投稿CRUD/編集/context・reblog/fav/bookmark/pin・投票・冪等性・可視性/addressing共通パス。Dependencies: api-foundation, federation-core, media-pipeline
-- [ ] social-graph -- follow/follow_requests・mute/block(Block/Undo連合・署名拒否)・同一サーバー承認スキップ特権。Dependencies: api-foundation, federation-core, accounts-and-instance
-- [ ] timelines -- home/public/local/tag タイムライン。Dependencies: statuses-core, social-graph
-- [ ] notifications -- 通知 v1。Dependencies: statuses-core, social-graph
-- [ ] search -- 抽象境界背後の最小実装（標準 PostgreSQL）。Dependencies: accounts-and-instance, statuses-core
+- [x] core-runtime -- axum 起動・二層設定(TOML+DB)・埋め込みマイグレーション自動実行・DI境界(clock/id/rng/署名鍵)・可観測性・エラー基盤・共有ドメインプリミティブ(AccountRef/Visibility)の正準定義。Dependencies: none
+- [x] actor-model -- 複数アクターモデル + アクター毎署名鍵/ローテーション。管理層概念をプロトコル層に漏らさない境界。Dependencies: core-runtime
+- [x] api-foundation -- OAuth2(複数アクター×1トークンのアクター選択) + ページネーション規約 + レート制限/エラー互換 + 契約テストハーネス。Dependencies: core-runtime, actor-model
+- [x] federation-core -- HTTP Signatures(draft+RFC9421+double-knock)・WebFinger・NodeInfo・inbox/outbox/shared inbox・activity+json GET・JSON-LD・配送関数分岐・DB配送キュー・受信ディスパッチ(種別多重ハンドラ)。Dependencies: core-runtime, actor-model
+- [x] media-pipeline -- 非同期アップロード(202→poll)・ストレージ抽象・BlurHash・フォーカルポイント・ネイティブ依存判断ゲート。Dependencies: core-runtime, api-foundation
+- [x] accounts-and-instance -- accounts/relationships/update_credentials・instance v2・custom_emojis(read)。Dependencies: api-foundation, federation-core, media-pipeline
+- [x] statuses-core -- 投稿CRUD/編集/context・reblog/fav/bookmark/pin・投票・冪等性・可視性/addressing共通パス・タグ永続化・StatusIngestService。Dependencies: api-foundation, federation-core, media-pipeline
+- [x] social-graph -- follow/follow_requests・mute/block(Block/Undo連合・署名拒否)・同一サーバー承認スキップ特権。Dependencies: api-foundation, federation-core, accounts-and-instance
+- [x] timelines -- home/public/local/tag タイムライン。Dependencies: statuses-core, social-graph
+- [x] notifications -- 通知 v1。Dependencies: statuses-core, social-graph, accounts-and-instance
+- [x] search -- 抽象境界背後の最小実装（標準 PostgreSQL）。Dependencies: accounts-and-instance, statuses-core, federation-core, actor-model
 
 ## Future Phases (briefs pending)
 

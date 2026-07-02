@@ -1,0 +1,122 @@
+# Implementation Plan
+
+- [ ] 1. 基盤: スキーマ・ドメイン型・解析・照合ポート
+- [ ] 1.1 検索用テーブルのマイグレーションを追加する
+  - `migrations/0010_search.sql` を作成し `search_tags`（`name` UNIQUE・使用集計）と `search_status_tags`（tag_id↔status_id）を定義し、前方一致索引（`text_pattern_ops`）と status_id 索引を設定する
+  - 既定構成に `CREATE EXTENSION`（`pg_bigm` 等）を含めず、標準 PostgreSQL のみで成立させる。日本語拡張インデックスを後から独立マイグレーション（`CREATE EXTENSION` + GIN）で追加しても本テーブル・既定契約を破壊しない構造（スキーマコメントで後付け経路を明記）にする
+  - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、2 テーブルと各索引・制約が存在し、拡張未導入でも起動する統合確認が通る
+  - _Requirements: 8.1, 8.2, 8.3_
+  - _Boundary: Migration_
+- [ ] 1.2 (P) 検索ドメイン型を定義する
+  - `src/search/model.rs` に `SearchType` / `SearchParams` / `ParsedQuery` / `SearchMatches`（識別子のみ）/ `TagMatch` / `TagView` / `TagHistoryEntry` を定義し、`AccountRef`（accounts-and-instance）と core-runtime Id/時刻型を消費する
+  - 観測可能な完了条件: 各型がコンパイルされ、`SearchMatches` がエンティティ JSON を持たず識別子のみで構成される単体テストが通る
+  - _Requirements: 1.3, 2.1, 2.2, 7.2_
+  - _Boundary: model_
+  - _Depends: 1.1_
+- [ ] 1.3 (P) クエリパーサを実装する
+  - `src/search/query_parser.rs` に `parse_query` を実装し、`acct:user@domain` / `@user@domain` / URL（スキーム付き）/ プレーン語を `ParsedQuery` に判別・正規化し、空/空白のみは 422 相当の `AppError` を返す
+  - 観測可能な完了条件: 4 種別の判別と空クエリ拒否を網羅する単体テストが通る
+  - _Requirements: 2.3, 6.1, 6.2_
+  - _Boundary: QueryParser_
+  - _Depends: 1.2_
+- [ ] 1.4 (P) 検索バックエンド抽象ポートを定義する
+  - `src/search/ports.rs` に `SearchBackend` trait（`search_accounts` / `search_statuses` / `search_hashtags`、いずれも識別子のみ返す）と `AccountQuery` / `StatusQuery` / `HashtagQuery`、テスト用 `StubSearchBackend` の差し替え規約を定義する
+  - 観測可能な完了条件: スタブ実装が trait を満たし、識別子のみを返す差し替えが可能で、呼び出し側がエンジン非依存に書ける単体テストが通る
+  - _Requirements: 7.1, 7.2, 7.5_
+  - _Boundary: SearchBackend_
+  - _Depends: 1.2_
+
+- [ ] 2. データ層: ハッシュタグ読み取りインデックス
+- [ ] 2.1 ハッシュタグインデックスリポジトリを実装する
+  - `src/search/hashtag_repository.rs` に `match_hashtags`（名前の前方/部分一致で `TagView` を返す）と `upsert_tag_usage`（`search_tags`/`search_status_tags` の upsert）を実装し、本 spec 所有テーブルのみを参照する
+  - 観測可能な完了条件: 名前一致で `TagView` が返り、`limit`/`offset` が反映され、(tag_id, status_id) 重複が一意化される統合テストが通る
+  - _Requirements: 5.1, 5.2, 5.5_
+  - _Boundary: HashtagIndexRepository_
+  - _Depends: 1.1, 1.2_
+- [ ] 2.2 ハッシュタグインデクサ（導出・バックフィル）を実装する
+  - `src/search/hashtag_indexer.rs` に `backfill_from_statuses` を実装し、statuses-core の投稿保持データ（抽出済みハッシュタグ）を read-only で走査して `search_tags`/`search_status_tags` を導出・upsert する。時刻/ID は `RuntimeContext` を用いる
+  - 観測可能な完了条件: 既存投稿のハッシュタグがインデックスへ導出され、再実行で重複生成されず、upstream テーブルを変更しない統合テストが通る
+  - _Requirements: 5.3_
+  - _Boundary: HashtagIndexer_
+  - _Depends: 2.1_
+
+- [ ] 3. 照合: 標準 PostgreSQL 最小バックエンド
+- [ ] 3.1 PgSearchBackend のアカウント・投稿照合を実装する
+  - `src/search/pg_backend.rs` に `search_accounts`（ローカル/既知リモートの display_name/username/acct 部分一致で `AccountRef` 群）と `search_statuses`（閲覧者可視候補の投稿 `Id` 群、`account_id` 絞り、本文部分一致）を標準 SQL（`ILIKE`）で実装し、`limit`/`offset` を反映する
+  - 観測可能な完了条件: アカウント/投稿照合が識別子のみを返し、`account_id` 絞り・`limit`/`offset` が効き、必須拡張なしで動作する統合テストが通る
+  - _Requirements: 3.1, 3.4, 4.1, 4.3, 4.4, 4.5, 4.6, 7.2_
+  - _Boundary: PgSearchBackend_
+  - _Depends: 1.4_
+- [ ] 3.2 PgSearchBackend のハッシュタグ照合を結線する
+  - `pg_backend.rs` の `search_hashtags` を `HashtagIndexRepository::match_hashtags` に結線し、`TagMatch` 群を `limit`/`offset` 付きで返す
+  - 観測可能な完了条件: ハッシュタグ照合が読み取りインデックス経由で `TagMatch` を返す統合テストが通る
+  - _Requirements: 5.1, 5.5_
+  - _Boundary: PgSearchBackend_
+  - _Depends: 2.1, 3.1_
+
+- [ ] 4. 具体化・解決・シリアライズ
+- [ ] 4.1 (P) Tag / SearchResults シリアライザを実装する
+  - `src/search/tag_serializer.rs` と `src/search/result_serializer.rs` を実装し、Tag（`name`/`url`/`history`）と SearchResults（`accounts`/`statuses`/`hashtags`、空種別は `[]` 非 null、上流 Account/Status 出力は再シリアライズせず格納）を生成し、api-foundation 契約ハーネスへゴールデン登録する
+  - 観測可能な完了条件: 空種別が `[]` になり、Account/Status が上流出力のまま格納され、ゴールデンが決定的に再現される契約テストが通る
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
+  - _Boundary: TagSerializer, SearchResultSerializer_
+  - _Depends: 1.2_
+- [ ] 4.2 検索ハイドレータを実装する
+  - `src/search/hydrator.rs` に `hydrate_accounts`（accounts-and-instance の Account シリアライズ・複数 ID 一括・一意化・`following` 最終フィルタ）/ `hydrate_statuses`（statuses-core 可視投稿解決 + `VisibilityPolicy` で不可視除外 + Status シリアライズ）/ `hydrate_hashtags`（`TagView`→`TagSerializer`）を実装する
+  - 観測可能な完了条件: 重複アカウントが一意化され、閲覧者不可視の投稿が必ず除外され、ハッシュタグが Tag JSON 化される統合テストが通る
+  - _Requirements: 1.2, 3.2, 3.3, 3.5, 4.2, 5.2_
+  - _Boundary: SearchHydrator_
+  - _Depends: 4.1, 3.1_
+- [ ] 4.3 リモートリゾルバを実装する
+  - `src/search/remote_resolver.rs` に `resolve_remote` を実装し、`Acct` はアウトバウンド WebFinger（`FederationHttpClient.fetch` で JRD 取得→`self` の actor_uri 抽出）→ accounts-and-instance `RemoteAccountFetcher.fetch_and_normalize` で Account 化、`Url` は連合取得 + JSON-LD 安全展開で Account/Status 化（Note は statuses-core 取り込み経路）し、取得/正規化失敗は `Resolved::None` に正規化する
+  - 観測可能な完了条件: `FederationHttpClient` モックで `acct:`→Account・URL→Status の解決が成立し、取得失敗が `None` になり検索全体を失敗させない統合テストが通る
+  - _Requirements: 6.1, 6.2, 6.4_
+  - _Boundary: RemoteResolver_
+  - _Depends: 1.3_
+
+- [ ] 5. サービス・エンドポイント・配線
+- [ ] 5.1 検索サービスを実装する
+  - `src/search/service.rs` に `search` を実装し、解析（空クエリ 422）→ `type` 絞り（他種別は空配列）→ `resolve=true` かつ認証時のみ `RemoteResolver` 呼び出し（`resolve=false`/未認証はローカル既知のみ）→ `SearchBackend` 照合（`limit`/`offset`/`account_id`/`following`/`exclude_unreviewed` 受理）→ `SearchHydrator` 具体化 → `SearchResultSerializer` 組み立て、を結線する
+  - 検索処理（解析・照合・リモート解決・具体化・組み立て）の失敗・部分失敗を、クエリ種別・対象種別・失敗箇所を含む構造化診断（秘匿値を除く）として core-runtime 観測性に出力する
+  - 観測可能な完了条件: type 絞り・空クエリ拒否・resolve 分岐・限定種別の空配列が一連で機能し、呼び出し側がエンジン非依存（`SearchBackend` 経由）で、失敗時に種別・箇所を含む診断が出力される統合テストが通る
+  - _Requirements: 2.1, 2.2, 2.3, 2.5, 5.4, 6.3, 6.5, 7.1, 9.5_
+  - _Boundary: SearchService_
+  - _Depends: 3.2, 4.2, 4.3_
+- [ ] 5.2 検索エンドポイントを実装する
+  - `src/search/endpoint.rs` に `GET /api/v2/search` ハンドラを実装し、Bearer + `read:search` を要求、`q`/`type`/`resolve`/`following`/`account_id`/`limit`/`offset`/`exclude_unreviewed` を抽出して `SearchParams` を構築（`limit`/`offset` は api-foundation 規約で丸め）、失敗は Mastodon 互換エラー本文で返す
+  - 観測可能な完了条件: 認証時に SearchResults が返り、未認証 401・`read:search` 欠落 403・空クエリ 422 になり、`limit`/`offset` が規約どおり丸められる統合テストが通る
+  - _Requirements: 2.3, 2.4, 9.1, 9.2, 9.3_
+  - _Boundary: SearchEndpoint_
+  - _Depends: 5.1_
+- [ ] 5.3 検索モジュールを bootstrap と AppState へ配線する
+  - `src/search/mod.rs`（`SearchModule`）を実装し、`src/state.rs`/`src/bootstrap.rs`/`src/server.rs`（core-runtime）を更新して、既定 `PgSearchBackend` を `SearchBackend` として配線・`HashtagIndexer` を初期化・`/api/v2/search` ルータを横断レイヤー（認証・エラー・レート制限）適用点へ装着し、`SearchService` を `AppState` に格納する。差し替え点を 1 箇所に集約する
+  - 観測可能な完了条件: 起動後に `/api/v2/search` が一連で機能し、既定バックエンドが必須拡張なしで配線され、`X-RateLimit-*` 付与・レート制限装着点に乗ることが確認できる
+  - _Requirements: 7.3, 7.4, 8.1, 8.4, 9.4_
+  - _Boundary: SearchModule, Bootstrap, AppState, Server_
+  - _Depends: 5.2_
+
+- [ ] 6. 検証
+- [ ] 6.1 (P) SearchResults / Tag 契約のゴールデンテスト
+  - 決定的 `RuntimeContext` で SearchResults（空配列規律・`accounts`/`statuses` の上流埋め込み形）と Tag（`name`/`url`/`history`）のゴールデンを固定し、実クライアントキャプチャをフィクスチャ登録する
+  - 観測可能な完了条件: ゴールデンが決定的に再現され、空種別が `[]`、Account/Status が上流出力のまま格納されることが契約テストで確認できる
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
+  - _Boundary: search_contract_it_
+  - _Depends: 5.3_
+- [ ] 6.2 (P) アカウント・投稿・ハッシュタグ検索の統合テスト
+  - アカウント検索（一致・following 絞り・一意化・limit/offset）、投稿検索（可視性に閉じる・不可視除外・account_id 絞り・limit/offset）、ハッシュタグ検索（名前一致・インデックス導出反映・exclude_unreviewed 受理）を検証する
+  - 観測可能な完了条件: 不可視投稿が漏れず、各種別の絞り込み・ページングが効き、ハッシュタグがインデックス導出を反映する統合テストが通る
+  - _Requirements: 3.1, 3.3, 3.4, 3.5, 4.1, 4.2, 4.3, 4.6, 5.1, 5.3, 5.4, 5.5_
+  - _Boundary: search_accounts_it, search_statuses_it, search_hashtags_it_
+  - _Depends: 5.3_
+- [ ] 6.3 (P) リモート解決・type/スコープの統合テスト
+  - `resolve=true` 認証時の `acct:`→Account（WebFinger モック）・URL→Status・取得失敗の除外・未認証/`resolve=false` のローカル限定、`type` 絞りの他種別空配列、空クエリ 422、`read:search` 認証/スコープ（401/403）を検証する
+  - 観測可能な完了条件: リモート解決が認証・resolve 条件どおり振る舞い失敗を除外し、type 絞り・空クエリ拒否・スコープ制御が成立する統合テストが通る
+  - _Requirements: 2.2, 2.4, 6.1, 6.2, 6.3, 6.4, 6.5, 9.1, 9.2_
+  - _Boundary: search_resolve_it, search_type_scope_it_
+  - _Depends: 5.3_
+- [ ] 6.4 (P) 検索バックエンド差し替えの統合テスト
+  - `SearchBackend` を `StubSearchBackend` に差し替え、`SearchService`・結果組み立て・エンドポイントを変更せずに動作することと、呼び出し側が特定エンジン実装に依存しないことを検証する
+  - 観測可能な完了条件: 既定 `PgSearchBackend` をスタブへ差し替えても API 契約・結果組み立てが不変で、差し替え点が配線 1 箇所であることが確認できる
+  - _Requirements: 7.1, 7.3, 7.4, 7.5, 8.4_
+  - _Boundary: search_backend_swap_it_
+  - _Depends: 5.3_

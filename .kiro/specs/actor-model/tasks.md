@@ -1,0 +1,108 @@
+# Implementation Plan
+
+- [ ] 1. 基盤: スキーマとドメイン型
+- [ ] 1.1 アクター/オーナー/鍵テーブルのマイグレーションを追加する
+  - `migrations/0002_actors.sql` を作成し `owners` / `local_actors` / `actor_signing_keys` を定義する
+  - `local_actors.handle` の一意制約、`actor_signing_keys` のアクター毎 active 部分一意制約、`owner_id`/`actor_id` の外部キーを設定する
+  - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、3テーブルと各制約が存在する
+  - _Requirements: 1.2, 2.1, 5.3_
+  - _Boundary: Migration_
+- [ ] 1.2 ドメイン型と参照型を定義する
+  - `Owner` / `LocalActor` / `ActorType`(person, service) / `ActorState`(active, deactivated) / `Handle`(形式検証付き値オブジェクト) を定義する
+  - プロトコル層向け参照型 `ResolvedActor` / `ActorPublicKey` / 管理層一覧型 `ActorSummary` を、owner 情報を構造的に含めずに定義する
+  - 観測可能な完了条件: `Handle::new` が空文字・不正文字を拒否し許可文字を受理する単体テストが通り、参照型に owner フィールドが存在しないことがコンパイル/テストで確認できる
+  - _Requirements: 1.1, 1.4, 1.6, 3.1, 7.1_
+  - _Boundary: model_
+  - _Depends: 1.1_
+
+- [ ] 2. オーナー・アクターの永続化と業務
+- [ ] 2.1 (P) オーナーの永続化を実装する
+  - オーナーの作成（ID は core-runtime の ID 境界で採番、時刻は時刻境界）と取得を実装する
+  - 観測可能な完了条件: オーナーを作成すると一意な識別子付きの行が永続化され、取得で同一オーナーが返る
+  - _Requirements: 2.1, 2.4_
+  - _Boundary: OwnerRepository_
+  - _Depends: 1.2_
+- [ ] 2.2 (P) アクターの永続化を実装する
+  - アクターの挿入・状態更新・取得（ハンドル別/ID別/オーナー別）を実装し、ハンドル一意制約違反を重複エラーへ写像する
+  - 観測可能な完了条件: 重複ハンドル挿入が重複エラーを返し、オーナー別取得が当該オーナーのアクターのみを返す
+  - _Requirements: 1.1, 1.2, 1.3, 2.2, 7.3, 8.1, 8.2_
+  - _Boundary: ActorRepository_
+  - _Depends: 1.2_
+- [ ] 2.3 (P) 署名鍵の永続化を実装する
+  - 有効鍵挿入・有効鍵失効・有効公開鍵取得・全有効鍵の起動時一括ロードを実装し、秘密鍵は封緘済みバイト列として格納する
+  - 観測可能な完了条件: 有効鍵を挿入後に取得でき、失効操作で status が retired に遷移し、一括ロードが全有効鍵を返す
+  - _Requirements: 4.1, 4.5, 5.2, 5.3, 5.4, 6.2_
+  - _Boundary: ActorSigningKeyRepository_
+  - _Depends: 1.2_
+
+- [ ] 3. 鍵素材と封緘
+- [ ] 3.1 (P) 注入乱数による鍵ペア生成を実装する
+  - core-runtime の乱数境界を受けて RSA-2048 鍵ペアを生成し、公開鍵 SPKI/PEM・秘密鍵 PKCS#8/PEM（Secret ラッパ）を出力する
+  - 観測可能な完了条件: 同一の決定的乱数で同一鍵が再現され、異なるシードで異なる鍵になる単体テストが通る
+  - _Requirements: 4.2, 4.3, 4.6_
+  - _Boundary: KeyMaterial_
+  - _Depends: 1.2_
+- [ ] 3.2 (P) 秘密鍵の at-rest 封緘境界を実装する
+  - `KeyCipher` 境界（seal/open）を AEAD と起動設定 KEK・注入乱数 nonce で実装し、本番/決定的テスト実装を差し替え可能にする
+  - 観測可能な完了条件: seal→open のラウンドトリップで原文が一致し、封緘出力に平文秘密鍵が含まれないことがテストで確認できる
+  - _Requirements: 4.4, 4.5_
+  - _Boundary: KeyCipher_
+  - _Depends: 1.2_
+
+- [ ] 4. 署名鍵サービスと供給
+- [ ] 4.1 鍵キャッシュと業務サービスを実装する
+  - `KeyCache`（KeyRef→有効署名鍵のメモリ保持）と `SigningKeyService`（作成時生成・ローテーション・有効鍵一意・キャッシュ更新）を実装する
+  - 鍵生成→封緘→有効鍵挿入を単一トランザクションで行い、ローテーションは旧鍵失効＋新鍵有効化を原子的に行い不在アクターを拒否する
+  - 観測可能な完了条件: ローテーションで active が高々1に保たれ、書込と同時にキャッシュが更新され、不在アクターのローテーションがエラーを返す
+  - _Requirements: 4.1, 4.5, 5.1, 5.2, 5.3, 5.5, 6.4_
+  - _Boundary: SigningKeyService, KeyCache_
+  - _Depends: 2.3, 3.1, 3.2_
+- [ ] 4.2 署名鍵供給境界の本番実装を提供する
+  - core-runtime の `SigningKeyProvider` を `DbSigningKeyProvider` として実装し、`KeyRef` をアクター有効鍵参照として解釈してキャッシュから返す
+  - 観測可能な完了条件: 登録済みアクターの鍵参照で有効鍵を返し、未登録参照で未検出エラーを返す
+  - _Requirements: 6.1, 6.2, 6.3_
+  - _Boundary: DbSigningKeyProvider_
+  - _Depends: 4.1_
+
+- [ ] 5. アクター業務と下流向け参照
+- [ ] 5.1 アクター作成とライフサイクルを実装する
+  - `ActorService` で作成（ハンドル形式検証→オーナー存在確認→active 初期化挿入→鍵生成を単一トランザクション、ID/時刻は注入境界）と無効化（Deactivated 遷移・updated_at 更新）を実装する
+  - 観測可能な完了条件: アクター作成で active アクターと有効鍵1つが永続化され、オーナー不在/重複ハンドル/形式不正が各エラーを返し、無効化で状態が遷移する
+  - _Requirements: 1.1, 1.3, 1.5, 1.6, 2.2, 2.3, 7.2, 7.3, 7.5_
+  - _Boundary: ActorService_
+  - _Depends: 2.1, 2.2, 4.1_
+- [ ] 5.2 下流向けアクター参照を実装する
+  - `ActorDirectory` で管理層 `list_actors_for_owner` と、プロトコル層 `resolve_actor_by_handle`・`actor_public_key` を実装し、後二者は owner を含まない参照型のみ返す
+  - 観測可能な完了条件: オーナー別一覧が当該オーナー分のみ返し、ハンドル解決・公開鍵供給の戻り値に owner 情報が含まれない
+  - _Requirements: 2.5, 3.1, 3.2, 3.3, 8.1, 8.2, 8.3, 8.4_
+  - _Boundary: ActorDirectory_
+  - _Depends: 2.2, 2.3_
+
+- [ ] 6. 統合配線
+- [ ] 6.1 bootstrap と AppState へ配線する
+  - core-runtime config に KEK の起動シークレット項目を追加し、bootstrap でプール確立後に全有効鍵をロードして `KeyCache`・`DbSigningKeyProvider` を構築し `RuntimeContext` へ注入する
+  - `ActorModule`（ActorService / SigningKeyService / ActorDirectory）を組み立て `AppState` に格納する
+  - 観測可能な完了条件: 起動後にアクター作成→供給→ローテーションが一連で機能し、署名鍵供給が DB 由来の最新鍵を返す
+  - _Requirements: 6.1, 6.4_
+  - _Boundary: ActorModule, Bootstrap, AppState, Config_
+  - _Depends: 4.2, 5.1, 5.2_
+
+- [ ] 7. 検証
+- [ ] 7.1 (P) アクターライフサイクルの統合テスト
+  - 作成（active＋鍵1つ）、重複ハンドル拒否、無効化後の状態判別を `spawn_test_app` 上で検証する
+  - 観測可能な完了条件: 上記シナリオがグリーンで、無効化後に解決で Deactivated が判別できる
+  - _Requirements: 1.1, 1.3, 7.2, 7.3, 7.4_
+  - _Boundary: actor_lifecycle_it_
+  - _Depends: 6.1_
+- [ ] 7.2 (P) 署名鍵の生成・ローテーション・供給の統合テスト
+  - 作成時鍵生成、ローテーション（active 高々1・旧鍵 retired）、供給が最新鍵を返す/未検出、決定的乱数での再現を検証する
+  - 観測可能な完了条件: ローテーション後に供給が新鍵を返し、決定的構成で鍵が再現され、未登録参照が未検出エラーになる
+  - _Requirements: 4.1, 4.3, 5.1, 5.2, 5.3, 5.5, 6.2, 6.3, 6.4_
+  - _Boundary: signing_key_it_
+  - _Depends: 6.1_
+- [ ] 7.3 (P) オーナー↔アクター境界の統合テスト
+  - 管理層一覧がオーナー別に正しく、プロトコル層参照（ハンドル解決・公開鍵供給）に owner 情報が一切現れないこと、秘密鍵がログ/参照型/DB 平文に現れないことを検証する
+  - 観測可能な完了条件: プロトコル経路の戻り値・ログに owner と平文秘密鍵が含まれず、管理層一覧のみが owner 別対応を返す
+  - _Requirements: 2.5, 3.1, 3.2, 3.3, 4.4, 4.5, 8.1, 8.4_
+  - _Boundary: owner_actor_boundary_it_
+  - _Depends: 6.1_

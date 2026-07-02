@@ -1,0 +1,144 @@
+# Implementation Plan
+
+- [ ] 1. 基盤: スキーマとドメイン型
+- [ ] 1.1 投稿コアのマイグレーションを追加する
+  - `migrations/0007_statuses.sql` に `statuses` / `status_edits` / `status_media` / `favourites` / `bookmarks` / `pins` / `polls` / `poll_options` / `poll_votes` / `status_idempotency_keys` に加えて、ハッシュタグ永続化用の `tags` / `status_tags`（投稿↔タグ関連付け）を作成し、一意制約・外部参照・インデックスを定義する
+  - 操作の重複防止（fav/bookmark/pin は (actor_id, status_id) 一意、vote は (poll_id, actor_id, choice) 一意、冪等は (actor_id, idempotency_key) 一意、status_tags は (status_id, tag_id) 一意）を制約で担保する
+  - 観測可能な完了: `sqlx migrate` がローカル DB で適用でき、全テーブル（tags / status_tags を含む）と一意制約・インデックスが作成される
+  - research.md の「Migration Numbering Coordination」に従い、番号は 0007（core 連番：0008 は federation-core が所有）で確定
+  - _Requirements: 1.1, 3.6, 5.1, 7.4, 9.3, 10.4, 11.1, 12.1, 13.1, 13.5_
+  - _Boundary: 0007_statuses.sql_
+- [ ] 1.2 投稿ドメイン型を定義する
+  - `Status` / `StatusEdit` / `Poll` / `PollOption` / `PollVote` / `IdempotencyRecord` / `Tag` 等を core-runtime の Id/時刻型の上に定義する。`Visibility` と `AccountRef` は再定義せず core-runtime の domain-primitives（正準所有）から import する
+  - コア状態モデルに連合方言（引用・絵文字リアクション）フィールドを含めないことを型で保証する
+  - 観測可能な完了: 各ドメイン型がコンパイルでき、`Visibility`（core-runtime import）が 4 値、ブースト（`reblog_of_id`）・返信（`in_reply_to_id`）・投票（`poll_id`）の関連が型で表現される
+  - _Requirements: 1.1, 2.1, 3.1, 4.1, 15.1_
+  - _Boundary: model_
+
+- [ ] 2. データ層（リポジトリ）
+- [ ] 2.1 (P) 投稿リポジトリを実装する
+  - 投稿の挿入・可視スコープ取得・祖先/子孫走査・削除（関連整合）・編集適用と履歴保存・カウンタ原子更新に加え、`tags` / `status_tags` へのタグ関連付け永続化と、照会可能な読み取り境界（タグ→投稿・投稿→タグ）を実装する（timelines のタグタイムライン・search のハッシュタグインデックスが消費）
+  - 観測可能な完了: 投稿を挿入し ID で取得でき、削除で関連行が整合し、編集で `edited_at` が更新され履歴が `status_edits` に残り、タグ関連付けが永続化され read-only 照会できる（リポジトリ単体テストがグリーン）
+  - _Requirements: 3.1, 3.5, 3.6, 6.1, 6.2, 7.1, 7.4, 8.1, 8.2_
+  - _Boundary: StatusRepository, TagRepository_
+- [ ] 2.2 (P) 操作リポジトリを実装する
+  - favourite/reblog/bookmark/pin の記録・取消・存在判定・ブックマーク一覧（作成順カーソル）を実装し、重複は一意制約で防ぐ
+  - 観測可能な完了: 同一 (actor, status) への二重登録が抑止され、ブックマーク一覧がブックマーク固有カーソルで取得できる（リポジトリ単体テストがグリーン）
+  - _Requirements: 9.1, 9.3, 9.4, 10.1, 10.3, 10.4, 11.1, 11.2, 11.3, 12.1, 12.2_
+  - _Boundary: InteractionRepository_
+- [ ] 2.3 (P) 投票リポジトリと冪等ストアを実装する
+  - poll/option/vote の挿入・投票記録（締切/範囲/単複/重複の検証）・集計取得と、(actor_id, key) 一意の冪等記録・再送解決を実装する
+  - 観測可能な完了: 締切後/範囲外/重複投票が拒否され集計が反映される、同一冪等キーの再送が記録済み status_id を返す（リポジトリ単体テストがグリーン）
+  - _Requirements: 5.1, 5.2, 13.1, 13.2, 13.3, 13.4, 13.5_
+  - _Boundary: PollRepository, IdempotencyStore_
+
+- [ ] 3. 可視性・addressing・シリアライズ
+- [ ] 3.1 (P) 可視性判定を実装する
+  - 投稿が viewer から可視かを単一ロジックで判定し、取得・context・操作の可視性チェックで同一適用、未認証は公開のみ可視とする
+  - 観測可能な完了: public/unlisted/private/direct について可視/不可視が単一関数で判定され、未認証文脈で公開のみ可視になる（単体テストがグリーン）
+  - _Requirements: 4.1, 6.1, 6.3, 6.4, 9.5, 12.4_
+  - _Boundary: VisibilityPolicy_
+- [ ] 3.2 (P) addressing 導出を実装する
+  - 可視性から `to`/`cc` と recipient 集合（公開コレクション・フォロワーコレクション・メンション宛）を導出する単一ロジックを実装する
+  - 観測可能な完了: 各可視性に対し決定的な `to`/`cc`/recipient が導出され、direct はメンション限定になる（単体テストがグリーン）
+  - _Requirements: 4.1, 4.2_
+  - _Boundary: Addressing_
+  - _Depends: 3.1_
+- [ ] 3.3 (P) Status / Poll シリアライザと契約ゴールデンを実装する
+  - Mastodon 互換 JSON（フィールド・null 規律・reblog ネスト・操作状態・`expired`/`voted`/`own_votes`）を出力し、Account/メディアは上流シリアライズへ委譲、方言フィールドを含めない
+  - api-foundation 契約ハーネスへ Status / Poll ゴールデンを登録し決定的に再現可能にする
+  - 観測可能な完了: 決定的 `RuntimeContext` 下で通常/reblog/編集済み/投票付きの Status と Poll のゴールデンが一致する（契約テストがグリーン）
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.3, 2.4, 15.1_
+  - _Boundary: StatusSerializer, PollSerializer_
+
+- [ ] 4. 連合橋渡し
+- [ ] 4.1 投稿 Activity ビルダと配送依頼を実装する
+  - Create(Note)/Announce/Like/Delete/Update/Undo/Vote の正規 Activity を `JsonLdCodec`・`ActorUrls` で生成し、`Addressing` 由来の recipient を federation-core `DeliveryService::deliver` へ渡す
+  - 論理的に同一の正規 Activity を生成・検証してから配送手段のみを federation-core に分岐させる
+  - 観測可能な完了: 各操作で正規 Activity が生成され、ローカル/リモート混在 recipient が同一 Activity で `DeliveryService` に渡る（単体/結合テストがグリーン）
+  - _Requirements: 4.2, 4.3, 4.4, 7.3, 8.4, 9.2, 9.4, 10.2, 10.3, 13.6_
+  - _Boundary: StatusActivityBuilder_
+  - _Depends: 3.2_
+
+- [ ] 5. サービス層
+- [ ] 5.1 投稿サービス（作成/取得/削除/編集/context）を実装する
+  - 冪等確認→空投稿拒否→メディア所有検証→投票排他→言及/タグ/絵文字抽出→挿入→可視性/addressing 導出→配送依頼の作成フローと、取得/context の可視フィルタ、削除/編集の所有検証・配送、履歴/source 取得を実装する
+  - 観測可能な完了: 投稿が作成され配送依頼が発行される、同一冪等キー再送が同一投稿を返す、不可視投稿は取得で 404 相当、削除/編集で Delete/Update が配送される（サービステストがグリーン）
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 5.1, 5.2, 5.3, 6.1, 6.2, 6.3, 6.4, 7.1, 7.2, 7.3, 7.4, 8.1, 8.2, 8.3, 8.4, 8.5_
+  - _Boundary: StatusService_
+  - _Depends: 2.1, 2.3, 3.1, 3.2, 4.1_
+- [ ] 5.2 (P) 操作サービス（reblog/fav/bookmark/pin）を実装する
+  - 可視性チェック・重複防止・記録・カウンタ更新・連合配送（reblog=Announce/Undo、favourite=Like/Undo）を実装し、bookmark/pin はローカル状態のみ（非連合）、pin は所有検証と direct 拒否を行う
+  - 観測可能な完了: reblog/favourite でカウンタが増減し Announce/Like が配送される、bookmark/pin は連合せず状態が反映される、direct 投稿の pin が拒否される（サービステストがグリーン）
+  - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 10.1, 10.2, 10.3, 10.4, 11.1, 11.2, 11.3, 11.4, 12.1, 12.2, 12.3, 12.4_
+  - _Boundary: InteractionService_
+  - _Depends: 2.2, 3.1, 4.1_
+- [ ] 5.3 (P) 投票サービスを実装する
+  - poll 取得・投票（締切/範囲/単複/重複検証）・集計反映・投票 Activity 配送を実装する
+  - 観測可能な完了: 締切前の有効投票で集計が更新され投票 Activity が配送される、無効投票が拒否される（サービステストがグリーン）
+  - _Requirements: 13.2, 13.3, 13.4, 13.5, 13.6_
+  - _Boundary: PollService_
+  - _Depends: 2.3, 3.1, 4.1_
+
+- [ ] 6. 受信ハンドラ
+- [ ] 6.1 投稿関連受信ハンドラを実装し登録する
+  - Create(Note)/Announce/Like/Delete/Update/Undo のハンドラを実装し、ローカル発生時と同一の状態遷移ロジックを呼び、未知方言プロパティは解釈せず継続する
+  - 各ハンドラを federation-core の `InboundActivityDispatcher` へ種別宣言付きで登録する。`Undo` は social-graph も登録するため、inner `object` 種別（Announce/Like）を検査し所有しないものは `HandleOutcome::Ignored` を返すファンアウト前提で実装する
+  - 観測可能な完了: リモート Create でローカル Status が取り込まれ、Announce/Like でカウンタが更新され、Delete/Update が反映される（受信結合テストがグリーン）
+  - _Requirements: 14.1, 14.2, 14.3, 14.4, 14.5, 15.2, 15.3_
+  - _Boundary: InboundHandlers_
+  - _Depends: 2.1, 2.2, 2.3, 3.1_
+- [ ] 6.2 リモート投稿取り込みエントリポイント（StatusIngestService）を実装する
+  - 受信 Create(Note) 正規化パスを再利用し、ドキュメント/URL → Status の取り込みを受信 Activity ディスパッチの外（search の `RemoteResolver` 等）からも呼び出せる `StatusIngestService` として公開する
+  - 観測可能な完了: URL/ドキュメント指定で Note が取得・正規化され Status として取り込まれる（単体/結合テストがグリーン）。受信ハンドラ経路と同一結果になる
+  - _Requirements: 14.1, 14.2, 14.3_
+  - _Boundary: StatusIngestService_
+  - _Depends: 6.1_
+
+- [ ] 7. エンドポイントと配線
+- [ ] 7.1 投稿/投票/ブックマークのエンドポイントを実装する
+  - statuses（作成/取得/削除/編集/history/source/context）・reblog/fav/bookmark/pin・bookmarks 一覧・polls（取得/投票）の HTTP ハンドラを実装し、Bearer + 必要スコープ・`Idempotency-Key` 受理・Mastodon 互換エラー・ページネーション（Link）を適用する
+  - 観測可能な完了: 各エンドポイントが正しい応答コード（200/401/403/404/422）とスコープ検証で動作し、ブックマーク一覧に Link ヘッダが付く（エンドポイント結合テストがグリーン）
+  - _Requirements: 3.1, 3.2, 6.1, 7.1, 7.2, 8.1, 8.5, 9.1, 10.1, 11.1, 11.3, 12.1, 12.3, 12.4, 13.2_
+  - _Boundary: StatusEndpoints_
+  - _Depends: 5.1, 5.2, 5.3_
+- [ ] 7.2 モジュール配線と受信登録・設定を行う
+  - `StatusesModule` を構築して各サービス/リポジトリを束ね、`StatusActivityBuilder` を `DeliveryService` に結線、受信ハンドラを `InboundActivityDispatcher` へ登録、ルータを土台へ装着、`AppState` に格納し、投稿関連の運用設定項目を追加する
+  - 観測可能な完了: アプリ起動時に投稿/投票/ブックマークのルートが有効になり受信ハンドラが登録され、E2E で投稿作成から配送依頼まで一気通貫で動く
+  - _Requirements: 4.3, 14.1_
+  - _Boundary: StatusesModule, server, bootstrap, config_
+  - _Depends: 6.1, 7.1_
+
+- [ ] 8. 検証
+- [ ] 8.1 統合テスト（CRUD・冪等・context・操作・投票）を整備する
+  - 作成（CW/sensitive/メディア所有/返信/言語抽出）・空拒否・取得可視フィルタ・削除/編集所有検証・履歴/source、冪等再送、context 祖先子孫と不可視除外、reblog/fav/bookmark/pin の登録解除/重複防止/カウンタ/スコープ/一覧、投票の各拒否と集計を `spawn_test_app` 上で検証する
+  - 観測可能な完了: 上記シナリオの統合テストが全てグリーンになる
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 5.1, 5.2, 5.3, 6.1, 6.2, 6.3, 6.4, 7.1, 7.2, 8.1, 8.2, 8.3, 8.5, 9.1, 9.3, 9.4, 10.1, 10.3, 10.4, 11.1, 11.2, 11.3, 11.4, 12.1, 12.2, 12.3, 12.4, 13.1, 13.2, 13.3, 13.4, 13.5_
+  - _Boundary: StatusService, InteractionService, PollService, StatusEndpoints_
+  - _Depends: 7.2_
+- [ ] 8.2 (P) 契約テスト（Status / Poll ゴールデン）を整備する
+  - 決定的境界で通常/reblog/編集済み/投票付きの Status と Poll の JSON ゴールデンを固定し、null 規律・操作状態・`expired` を検証、実クライアントキャプチャをフィクスチャ登録する
+  - 観測可能な完了: Status / Poll の契約ゴールデンテストがグリーンになり、再実行で同一 JSON が再現される
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.3, 2.4_
+  - _Boundary: StatusSerializer, PollSerializer_
+  - _Depends: 7.2_
+- [ ] 8.3 連合テスト（2 インスタンス・ローカル/HTTP 同値）を整備する
+  - `spawn_federation_pair` で A→B の投稿/ブースト/お気に入り/削除/編集を往復させ受信反映を検証し、同一操作をローカル in-process 配送と HTTP 配送で実行して業務処理結果が同値であることを検証する（最重要リスク）
+  - 観測可能な完了: 連合往復テストがグリーンになり、ローカル最適化パスと HTTP 連合パスの結果同値が担保される
+  - _Requirements: 4.4, 4.5, 14.1, 14.2, 14.3, 14.4, 14.5_
+  - _Boundary: StatusActivityBuilder, InboundHandlers_
+  - _Depends: 7.2_
+
+- [ ] 9. 下流委譲シームと通知イベント
+- [ ] 9.1 accounts 委譲ポートの実装を供給する
+  - accounts-and-instance が所有する `AccountStatusesProvider`（`GET /accounts/:id/statuses` 用の投稿ページ供給。可視性フィルタ適用）を実装し、`AccountCountsProvider` へ `statuses_count`（および `last_status_at`）を供給する。契約は再定義せず、bootstrap で既定実装（空ページ / 0）を本 spec の実装へ差し替える
+  - 観測可能な完了: 配線後に `GET /accounts/:id/statuses` が投稿ページを返し、Account の `statuses_count` が実値になる（結合テストがグリーン）。未配線時は accounts の既定実装で安全に空/0
+  - _Requirements: 6.1, 7.1_
+  - _Boundary: AccountStatusesProviderImpl, AccountCountsContribution_
+  - _Depends: 5.1, 7.2_
+- [ ] 9.2 通知イベント（NotificationEvent）を emit する
+  - notifications が所有する `NotificationEventSink`（既定 no-op）へ、favourite / reblog(Announce) / mention / poll-end /（任意で）edit の状態遷移コミット後に冪等に `NotificationEvent` を emit する。イベント型/シンク契約は notifications 所有で再定義しない
+  - 観測可能な完了: 各操作コミット後にシンクへ 1 度だけイベントが渡る（再送で重複しない）ことをテストで確認。既定 no-op のため notifications 未配線でも本 spec は成功する
+  - _Requirements: 9.1, 9.2, 10.1, 13.2_
+  - _Boundary: InteractionService, StatusService, PollService_
+  - _Depends: 5.1, 5.2, 5.3_

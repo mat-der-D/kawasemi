@@ -1,0 +1,163 @@
+# Implementation Plan
+
+- [ ] 1. 基盤: スキーマ・直列化・URL・低位境界
+- [ ] 1.1 連合用テーブルのマイグレーションを追加する
+  - `migrations/0008_federation.sql` を作成し `delivery_jobs` / `received_activities` / `remote_public_keys` / `instance_signature_capabilities` を定義する
+  - 配送ジョブの期限索引と、`target_inbox` × Activity id の重複排除一意索引、状態カラム（pending/in_progress/done/failed）を設定する
+  - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、4テーブルと各索引・制約が存在する
+  - _Requirements: 11.1, 11.4, 7.4_
+  - _Boundary: Migration_
+- [ ] 1.2 (P) JSON-LD コーデックを実装する
+  - ActivityPub `@context` 付与の直列化、未知プロパティで失敗しない安全展開、必須プロパティ（type/id）欠落検出、`application/activity+json`・`application/ld+json` のメディアタイプ判定を実装する
+  - 観測可能な完了条件: 未知プロパティ入り文書を解釈でき、必須欠落は検証エラーになり、直列化出力に `@context` が含まれる単体テストが通る
+  - _Requirements: 9.1, 9.2, 9.3, 9.4_
+  - _Boundary: JsonLdCodec_
+  - _Depends: 1.1_
+- [ ] 1.3 (P) アクター URL ビルダーを実装する
+  - サーバードメイン設定からアクター/inbox/outbox/shared inbox/オブジェクト/コレクション URL と keyId URL を構築する
+  - 観測可能な完了条件: 同一ハンドルに対し一貫した URL 群と keyId が生成される単体テストが通る
+  - _Requirements: 6.1, 8.1_
+  - _Boundary: ActorUrls_
+  - _Depends: 1.1_
+- [ ] 1.4 (P) 送信ネットワーク境界とダイジェストを実装する
+  - `FederationHttpClient` port（送信・取得）と本文 SHA-256 ダイジェストの算出・検証を実装し、本番実装と決定的モック実装を差し替え可能にする
+  - 観測可能な完了条件: モック HTTP クライアントで送信/取得を差し替えられ、ダイジェスト不一致が検出される単体テストが通る
+  - _Requirements: 2.7, 1.3, 2.5_
+  - _Boundary: FederationHttpClient, Digest_
+  - _Depends: 1.1_
+- [ ] 1.5 (P) 署名スイート抽象を実装する
+  - `SignatureSuite` を draft-cavage / RFC 9421 の両形式で実装し、署名対象構築・署名ヘッダ組み立て・解析・受信形式検出を提供する
+  - 観測可能な完了条件: 各形式で署名対象とヘッダを構築・解析でき、受信ヘッダから形式を検出できる単体テストが通る
+  - _Requirements: 1.4, 2.2_
+  - _Boundary: SignatureSuite_
+  - _Depends: 1.4_
+
+- [ ] 2. コア: 署名送受信と公開鍵
+- [ ] 2.1 公開鍵リゾルバを実装する
+  - keyId から公開鍵素材（公開鍵 PEM・所有アクター URI）を取得して `remote_public_keys` にキャッシュし、有効キャッシュ時はネットワーク取得を行わず、force 指定で再取得する
+  - 観測可能な完了条件: 初回取得後はキャッシュから返り、force 再取得でネットワーク取得が走る統合テストが通る
+  - _Requirements: 2.3, 2.4_
+  - _Boundary: PublicKeyResolver_
+  - _Depends: 1.4_
+- [ ] 2.2 (P) リクエスト署名器を実装する
+  - core-runtime 署名鍵供給境界からアクター有効鍵を取得し、keyId 設定・本文ダイジェスト同梱・指定形式での署名付与を行い、鍵欠落時は署名を中止してエラーを返す
+  - 観測可能な完了条件: 署名付きリクエストが生成され、有効鍵が無いアクターでは署名がエラーになる単体テストが通る
+  - _Requirements: 1.1, 1.2, 1.3, 1.5_
+  - _Boundary: RequestSigner_
+  - _Depends: 1.5_
+- [ ] 2.3 署名検証器を実装する
+  - 受信署名の形式検出→署名対象再構築→公開鍵検証→本文ダイジェスト検証を行い、署名欠落/不正/期限切れ/鍵取得失敗を検証失敗とし、検証失敗時はキャッシュ無効化＋一度再取得する。検証器自体をモック可能境界として trait 化する
+  - 観測可能な完了条件: 正当署名で署名者 URI を返し、改ざん・欠落・鍵取得失敗が検証失敗になり、両形式で検証が成立する統合テストが通る
+  - _Requirements: 2.1, 2.2, 2.5, 2.6, 7.1_
+  - _Boundary: SignatureVerifier_
+  - _Depends: 2.1, 2.2_
+- [ ] 2.4 署名形式ネゴシエータを実装する
+  - host 既知形式（無ければ既定）で署名送信し、署名関連拒否時に他形式で再送、送達成功形式を `instance_signature_capabilities` に記録し以降優先する double-knocking を実装する
+  - 観測可能な完了条件: 未知 host で片形式→拒否→他形式再送が起き、成功後は記録形式が優先される単体/統合テストが通る
+  - _Requirements: 3.1, 3.2, 3.3_
+  - _Boundary: SignatureNegotiator_
+  - _Depends: 2.2_
+
+- [ ] 3. コア: 受信構成要素と配送構成要素
+- [ ] 3.1 (P) 受信重複排除ストアを実装する
+  - Activity id を `received_activities` に記録し、新規判定（新規 true / 既知 false）を提供する
+  - 観測可能な完了条件: 同一 Activity id の二度目が既知と判定される統合テストが通る
+  - _Requirements: 7.4_
+  - _Boundary: ReceivedActivityStore_
+  - _Depends: 1.1_
+- [ ] 3.2 (P) 受信ディスパッチ境界とブロック委譲境界を実装する
+  - 種別→`InboundActivityHandler` の `InboundActivityDispatcher` レジストリと、既定 no-op の `BlockPolicy` 委譲境界を実装し、未登録種別を安全に扱う
+  - 観測可能な完了条件: スタブハンドラを登録すると対応種別がそれへ委譲され、既定ブロックポリシーが常に非ブロックを返すテストが通る
+  - _Requirements: 7.3, 7.5, 12.1, 12.3_
+  - _Boundary: InboundActivityDispatcher, BlockPolicy_
+  - _Depends: 1.2_
+- [ ] 3.3 (P) 配送キューを実装する
+  - 配送ジョブの永続化（enqueue）・期限到来ジョブの排他取得（claim_due）・完了/再スケジュール/恒久失敗の状態遷移を実装し、再試行間隔を指数的に広げる
+  - 観測可能な完了条件: enqueue 後に claim_due で取得でき、reschedule で次回試行時刻が後ろ倒しされ、上限到達で failed に遷移する統合テストが通る
+  - _Requirements: 11.1, 11.2, 11.3, 11.5_
+  - _Boundary: DeliveryQueue_
+  - _Depends: 1.1_
+- [ ] 3.4 (P) 宛先ターゲットリゾルバを実装する
+  - recipient を actor-model のハンドル解決で local/remote 物理ターゲットへ分類し、同一 shared inbox を 1 ターゲットへ重複排除する
+  - 観測可能な完了条件: ローカル/リモート混在 recipient が正しく分類され、同一 shared inbox 宛が 1 件に畳まれる単体テストが通る
+  - _Requirements: 10.3, 10.4, 11.4_
+  - _Boundary: RecipientTargetResolver_
+  - _Depends: 1.3_
+- [ ] 3.5 (P) ActivityPub ドキュメントビルダーを実装する
+  - アクター表現（id・inbox・outbox・公開鍵, owner 非露出）と outbox 順序付きコレクションのページ構築を、actor-model のアクター解決・公開鍵供給と JSON-LD コーデックで実装し、範囲外 Activity を除外する
+  - 観測可能な完了条件: アクター表現に公開鍵が含まれ owner が含まれず、outbox がページ単位で順序付きコレクションとして構築される単体テストが通る
+  - _Requirements: 6.1, 6.2, 6.5, 8.1, 8.2, 8.3_
+  - _Boundary: ActivityPubDocumentBuilder_
+  - _Depends: 1.2, 1.3_
+
+- [ ] 4. 統合: 受信パイプラインと配送抽象
+- [ ] 4.1 受信パイプラインサービスを実装する
+  - `InboxService` でリモート受信フルパイプライン（署名検証→必須プロパティ検証→ブロック判定→重複排除→ディスパッチ）と、署名検証を除く同一意味論経路（process_local）を実装し、各拒否を意味論処理より前に行う
+  - 観測可能な完了条件: 検証失敗が認証失敗・ブロック署名者が拒否・必須欠落が不正・重複が再処理なしになり、リモート経路とローカル経路が同一の重複排除・ディスパッチ処理に合流する統合テストが通る
+  - _Requirements: 6.4, 7.1, 7.2, 7.3, 7.4, 9.3, 12.1, 12.2_
+  - _Boundary: InboxService_
+  - _Depends: 2.3, 3.1, 3.2_
+- [ ] 4.2 配送サービスと配送シンクを実装する
+  - `DeliveryService` の共通部（正規 Activity 生成・検証・宛先解決）を分岐前に一度だけ実行し、`LocalDeliverySink`（InboxService::process_local への in-process 受け渡し）と `HttpDeliverySink`（配送キュー投入）に物理配送のみを分岐させる
+  - 観測可能な完了条件: 同一配送依頼で local 経路と remote 経路が同一の正規 Activity を扱い、local はキューを介さず受信意味論経路へ、remote はキューへ投入される統合テストが通る
+  - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 11.1_
+  - _Boundary: DeliveryService, DeliverySink_
+  - _Depends: 3.3, 3.4, 4.1_
+- [ ] 4.3 配送ワーカーを実装する
+  - 配送キューから期限到来ジョブを取り出し、署名形式ネゴシエータ経由で署名付き HTTP 送信を行い、一時失敗はバックオフ再試行・上限到達は恒久失敗記録とする
+  - 観測可能な完了条件: ワーカーがジョブを送信して done にし、一時失敗で再スケジュール、上限で failed に遷移する統合テストが通る
+  - _Requirements: 1.1, 3.1, 3.2, 3.3, 11.2, 11.3, 11.5_
+  - _Boundary: DeliveryWorker_
+  - _Depends: 2.4, 3.3_
+
+- [ ] 5. 統合: エンドポイントと配線
+- [ ] 5.1 (P) WebFinger と NodeInfo エンドポイントを実装する
+  - WebFinger で `acct:` を解析し自ドメイン照合のうえ複数ローカルアクターを owner 非露出で解決し self link を JRD で返す。NodeInfo でディスカバリリンクと最小公開統計（ソフトウェア名・バージョン・ActivityPub）を返し内部情報を出さない
+  - 観測可能な完了条件: 複数アクターがそれぞれ JRD で解決され、他ドメイン照会は非解決・不在は未検出、NodeInfo に内部情報が含まれない統合テストが通る
+  - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3_
+  - _Boundary: webfinger, nodeinfo_
+  - _Depends: 3.5_
+- [ ] 5.2 (P) ActivityPub GET と outbox エンドポイントを実装する
+  - アクター/オブジェクト/コレクション GET を content negotiation で activity+json で返し、セキュアモード時は authorized fetch（署名検証）を要求して未署名/検証失敗には表現を返さず、非 AP Accept は表現を返さず、不在は未検出とする。outbox をページ単位の順序付きコレクションで返す
+  - 観測可能な完了条件: AP Accept で activity+json が返り owner を含まず、非 AP Accept は AP 表現を返さず、セキュアモードで未署名 GET が拒否され、outbox がページで返る統合テストが通る
+  - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.6, 8.1, 8.2, 9.4_
+  - _Boundary: ap_get, outbox_
+  - _Depends: 3.5, 4.1_
+- [ ] 5.3 inbox / shared inbox エンドポイントを実装する
+  - inbox（アクター毎）と shared inbox の POST を受信パイプラインへ接続し、検証失敗は認証失敗応答、受理は 202、重複は再処理なしの受領応答とする
+  - 観測可能な完了条件: 署名付き Activity が 202 で受理されディスパッチされ、検証失敗が認証失敗応答になる統合テストが通る
+  - _Requirements: 7.1, 7.2_
+  - _Boundary: inbox_
+  - _Depends: 4.1_
+- [ ] 5.4 連合モジュールを bootstrap と AppState へ配線する
+  - core-runtime 起動設定にセキュアモードフラグと配送リトライ方針を追加し、各 port（HTTP クライアント・公開鍵リゾルバ・既定ブロックポリシー・ディスパッチャ）を構築・配線して連合ルータを土台ルータへ装着し、配送ワーカーを起動して配送サービスとディスパッチャを `AppState` に格納する
+  - 観測可能な完了条件: 起動後に WebFinger・AP GET・inbox・配送が一連で機能し、下流がディスパッチャへハンドラ登録・配送サービスへ配送依頼できる
+  - _Requirements: 7.3, 10.1, 11.1, 11.2_
+  - _Boundary: FederationModule, Bootstrap, AppState, Config_
+  - _Depends: 4.2, 4.3, 5.1, 5.2, 5.3_
+
+- [ ] 6. 検証
+- [ ] 6.1 (P) 署名送受信の統合テスト
+  - 送信側署名を受信側で検証成功、改ざん/欠落の拒否、両形式での成立、double-knock 再送と形式記録、公開鍵キャッシュ/再取得をモック HTTP で決定的に検証する
+  - 観測可能な完了条件: 上記シナリオがグリーンで、改ざん署名が拒否され double-knock が片形式拒否後に他形式で成功する
+  - _Requirements: 1.1, 2.1, 2.2, 2.6, 2.7, 3.1, 3.2, 3.3_
+  - _Boundary: signatures_it_
+  - _Depends: 5.4_
+- [ ] 6.2 (P) 受信・配送キューの統合テスト
+  - inbox 受信のディスパッチ受け渡し・重複再処理なし・ブロック署名者拒否、配送キューの即時復帰・ワーカー送信・バックオフ再試行・恒久失敗・shared inbox 重複排除を検証する
+  - 観測可能な完了条件: ブロック署名者が拒否され、重複 Activity が再処理されず、配送が再試行・恒久失敗・重複排除のとおり振る舞う
+  - _Requirements: 7.3, 7.4, 11.1, 11.2, 11.3, 11.4, 11.5, 12.1, 12.2_
+  - _Boundary: inbox_delivery_it_
+  - _Depends: 5.4_
+- [ ] 6.3 (P) WebFinger/NodeInfo/AP GET の統合テスト
+  - 複数アクター WebFinger 解決・他ドメイン非解決・未検出、NodeInfo の内部情報非露出、AP GET の owner 非露出・content negotiation・セキュアモード authorized fetch・未検出を検証する
+  - 観測可能な完了条件: 上記がグリーンで、AP 表現に owner が含まれずセキュアモードで未署名 GET が拒否される
+  - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 8.1, 8.2, 8.3, 9.1, 9.4_
+  - _Boundary: webfinger_nodeinfo_it_
+  - _Depends: 5.4_
+- [ ] 6.4 連合往復とローカル/HTTP 結果同値の検証
+  - 2 インスタンスを決定的注入境界で起動する `spawn_federation_pair` を実装し、A→B 署名付き Activity 往復で受信検証・ディスパッチ受け渡しを検証し、同一 Activity をローカル配送（in-process）と HTTP 配送で実行して登録スタブハンドラの業務処理結果が同値であることを検証する
+  - 観測可能な完了条件: A→B 往復が成立し、ローカル配送結果と HTTP 配送結果が同一の業務処理結果になることがテストで確認できる
+  - _Requirements: 10.5, 13.1, 13.2, 13.3, 13.4_
+  - _Boundary: FederationTestHarness, federation_pair_it_
+  - _Depends: 5.4_
