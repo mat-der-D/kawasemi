@@ -56,7 +56,10 @@ fn env_only_config_with_no_toml_file_is_valid() {
     let config = load_config_from(None, &overrides).expect("env-only config should be sufficient");
 
     assert_eq!(config.server.domain, "env-only.example");
-    assert_eq!(config.database.url, "postgres://user:pass@localhost/db");
+    assert_eq!(
+        config.database.url.expose_secret().as_str(),
+        "postgres://user:pass@localhost/db"
+    );
     // Defaults kick in for everything not supplied.
     assert_eq!(config.database.max_connections, 10);
     assert_eq!(config.log.level, LogLevel::Info);
@@ -213,7 +216,7 @@ fn fully_specified_toml_loads_without_env_overrides() {
     );
     assert_eq!(config.server.shutdown_grace, Duration::from_secs(15));
     assert_eq!(
-        config.database.url,
+        config.database.url.expose_secret().as_str(),
         "postgres://toml-user:toml-pass@localhost/toml_db"
     );
     assert_eq!(config.database.max_connections, 7);

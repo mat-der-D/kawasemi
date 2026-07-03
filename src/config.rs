@@ -13,10 +13,10 @@
 //! database-stored, admin-editable settings owned by a later spec) —
 //! see Requirement 2.6.
 //!
-//! `database.url` is kept as a plain [`String`] for now. Task 2.2 introduces
-//! a `Secret<T>` wrapper (`src/config/secret.rs`) under this same boundary
-//! that will wrap secret-bearing fields like this one to prevent accidental
-//! plaintext logging; wrapping a `String` field is a non-breaking follow-up.
+//! `database.url` is wrapped in [`Secret<String>`](secret::Secret) (task
+//! 2.2, Requirement 2.5): it can embed credentials
+//! (`postgres://user:pass@host/db`), so it must never print in plaintext
+//! via `Debug`/`Display`/log output.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -25,6 +25,10 @@ use std::time::Duration;
 
 #[cfg(test)]
 mod tests;
+
+mod secret;
+
+pub use secret::Secret;
 
 /// Prefix applied to every environment variable this module reads, e.g.
 /// `KAWASEMI_SERVER_DOMAIN`, `KAWASEMI_DATABASE_URL`.
@@ -59,9 +63,11 @@ pub struct ServerConfig {
 /// Database connection startup settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DatabaseConfig {
-    /// Database connection string. Required (Requirement 2.3). Plain
-    /// `String` for now; task 2.2 wraps secret-bearing fields in `Secret<T>`.
-    pub url: String,
+    /// Database connection string. Required (Requirement 2.3). Wrapped in
+    /// [`Secret`] because it can embed credentials
+    /// (`postgres://user:pass@host/db`) and must not print in plaintext via
+    /// `Debug`/`Display`/log output (Requirement 2.5).
+    pub url: Secret<String>,
     /// Maximum number of pooled connections (consumed by task 4.1). Defaults
     /// to 10.
     pub max_connections: u32,
@@ -297,7 +303,9 @@ fn load_config_from(
             shutdown_grace: shutdown_grace.expect("validated above"),
         },
         database: DatabaseConfig {
-            url: url.expect("validated above: no issues means all required fields present"),
+            url: Secret::new(
+                url.expect("validated above: no issues means all required fields present"),
+            ),
             max_connections: max_connections.expect("validated above"),
             acquire_timeout: acquire_timeout.expect("validated above"),
         },
