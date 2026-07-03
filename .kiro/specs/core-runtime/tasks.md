@@ -48,7 +48,7 @@
   - _Boundary: Db_
   - _Depends: 2.1_
 
-- [ ] 4.2 埋め込みマイグレーションの起動時自動適用を実装する
+- [x] 4.2 埋め込みマイグレーションの起動時自動適用を実装する
   - `migrations/` をバイナリに埋め込み、確立済みプールに対して未適用分を適用順に自動適用する（未適用が無ければ no-op）
   - 適用失敗時は失敗マイグレーションを特定できる情報とともに起動を中止し、`_sqlx_migrations` のチェックサム不整合を検出して起動を中止する
   - 統合テストで「適用後にスキーマが最新化される」「再起動で再適用されずデータが保持される」「不整合/失敗で起動中止」が観測できる
@@ -174,3 +174,5 @@
 
 - 1.1: `edition = "2024"` を採用（design.md の Technology Stack 表は "edition 2021" と記載されているが、その脚注で「バージョンは確定版ではなく系列の目安」と明記されており、steering（tech.md/structure.md）の Edition 2024 指定が優先される）。
 - 1.1: steering（structure.md）は `mod.rs` 方式を禁止している。design.md の File Structure Plan にある `dir/mod.rs` は、以降のタスクで `dir.rs`（`dir/` の兄弟ファイル）として作成すること（例: `src/config/mod.rs` → `src/config.rs` + `src/config/secret.rs`）。
+- 4.2: design.md のトレーサビリティ表は Migrate のインターフェース名を `run_migrations()` と記載しているが、実装は `apply_migrations()`（`db.rs` の `establish_pool` と対称的な命名）。挙動に影響する矛盾ではないため実装を優先し、doc 側の整合は将来の軽微な修正候補として残す。
+- 4.2: Requirement 4.5（失敗マイグレーションの特定）は、0001 が no-op のため実際の embedded `MIGRATOR` 経由では未検証（別途組み立てた `Migrator` で `MigrateError` のラップ経路のみ検証）。将来、実データマイグレーションが追加された時点で、意図的に破壊した実マイグレーションに対する end-to-end 回帰テストの追加を検討すること。
