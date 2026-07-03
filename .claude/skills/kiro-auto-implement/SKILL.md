@@ -18,7 +18,7 @@ This skill turns one trigger (typically a Routine firing on a schedule) into one
 
 Every `Agent` tool call performed anywhere in this procedure — the Step 0 dispatch of `main`, and every dispatch `main` performs later (implementer, reviewer, debugger, final reviewer) — MUST:
 - pass `model: "sonnet"` (the current latest Sonnet model)
-- prepend this line to the dispatched prompt verbatim: `Reasoning effort: high. Think carefully through edge cases, verify assumptions against the actual repository state, and do not shortcut analysis before acting.`
+- prepend this line to the dispatched prompt verbatim: `Reasoning effort: medium. Think carefully through edge cases, verify assumptions against the actual repository state, and do not shortcut analysis before acting.`
 
 ## Step 0 — Dispatch (executed by whoever invoked this skill)
 
