@@ -10,7 +10,7 @@ argument-hint: [feature-name]
 
 ## Overview
 
-This skill turns one trigger (typically a Routine firing on a schedule) into one bounded unit of unattended forward progress on the kawasemi implementation: pick the next eligible spec, drive `kiro-impl` through exactly one top-level task group of it, tag each completed task, run a final AI review, and push straight to `agent`. There is no human review step — an AI reviewer's `APPROVED` verdict is the only gate before push. A single group, not the whole feature, keeps each run within budget; the Routine re-firing is what accumulates progress across groups over time.
+This skill turns one trigger (typically a Routine firing on a schedule) into one bounded unit of unattended forward progress on the kawasemi implementation: pick the next eligible spec, drive `kiro-impl` through exactly one top-level task group of it, run a final AI review, and push straight to `agent`. There is no human review step — an AI reviewer's `APPROVED` verdict is the only gate before push. A single group, not the whole feature, keeps each run within budget; the Routine re-firing is what accumulates progress across groups over time.
 
 **REQUIRED SUB-SKILLS:** `kiro-impl` (task execution engine this wraps), `kiro-review` (per-task and final review protocol), `kiro-verify-completion` (evidence gate), `kiro-validate-impl` (feature-level GO/NO-GO), `kiro-debug` (blocked-task investigation).
 
@@ -59,7 +59,7 @@ If `$ARGUMENTS` names a feature explicitly, use it — but still run the eligibi
 5. If no Phase 1 spec is eligible, check "Future Phases" entries that already have a `.kiro/specs/<name>/` directory (meaning a spec was created since roadmap.md was written) and repeat 2-4 over those.
 6. If nothing is eligible anywhere (all complete, or the next one has no spec directory yet — spec creation is out of scope for this skill), STOP: report that implementation is caught up and, if applicable, which spec needs `/kiro-spec-init` next. Skip to Step 6.
 
-## Step 3: Select one task group, then drive implementation via `kiro-impl`, with per-task tagging
+## Step 3: Select one task group, then drive implementation via `kiro-impl`
 
 A whole feature (11-26 subtasks across specs seen so far) is too large a unit for one run's budget. This step bounds the run to a single top-level task group instead.
 
@@ -67,9 +67,6 @@ A whole feature (11-26 subtasks across specs seen so far) is too large a unit fo
 2. Invoke the `kiro-impl` skill for the chosen feature in **autonomous mode** (fresh-subagent-per-task dispatch discipline — do not switch to manual/main-context mode), with these modifications to its documented procedure:
    - Restrict the task queue built in `kiro-impl`'s "Build task queue" step to subtasks whose ID starts with `GROUP.` (e.g. `2.1`, `2.2`, ...). Ignore other groups' tasks entirely for this run, even ones with satisfied dependencies.
    - Skip `kiro-impl`'s own Step 4 ("Final Validation") entirely. Whether `kiro-validate-impl` runs at all is decided by this skill's Step 4 below, based on whether the *whole feature* — not just `GROUP` — is complete after this run.
-   - One further addition: immediately after each per-task commit that `kiro-impl`'s "Commit (parent-only, selective staging)" step performs, before moving to the next task, run:
-     `git tag -a agent/<feature>/<task-id> -m "<feature> <task-id>: <task description>"`
-     on the commit you just made.
 
 Do not alter any other part of `kiro-impl`'s behavior: implementer and reviewer are still fresh subagents dispatched per task (apply the Model & Effort Rule above to those dispatches too), `kiro-review` and `kiro-verify-completion` still gate every task, and `kiro-debug` still handles `BLOCKED`/rejection-round-3 per its existing bounded-retry rules. Within this restricted queue, `kiro-impl` runs until its own natural stop: every subtask in `GROUP` is complete or `BLOCKED`, or `STOP_FOR_HUMAN` is raised.
 
@@ -86,24 +83,22 @@ Do not alter any other part of `kiro-impl`'s behavior: implementer and reviewer 
 ## Step 5: Final review gate, then push
 
 1. Diff the whole run: `git diff RUN_START_SHA...HEAD` (and `git log RUN_START_SHA..HEAD` for the commit list).
-2. Dispatch one **final reviewer** subagent (fresh, per the Model & Effort Rule) with: the full run diff, the list of tasks/commits/tags produced, the feature's `requirements.md`/`design.md` paths, and the repo's build/test commands (discover the same way `kiro-impl`'s preflight does: `Cargo.toml` → `cargo check` / `cargo test`, etc.). Ask it to apply the `kiro-review` protocol at run scope — read the code, run the build/test commands itself, do not trust prior reports — and return a structured `## Review Verdict` / `- VERDICT: APPROVED|REJECTED` block. This is the AI review agent gate; there is no human approval step.
+2. Dispatch one **final reviewer** subagent (fresh, per the Model & Effort Rule) with: the full run diff, the list of tasks/commits produced, the feature's `requirements.md`/`design.md` paths, and the repo's build/test commands (discover the same way `kiro-impl`'s preflight does: `Cargo.toml` → `cargo check` / `cargo test`, etc.). Ask it to apply the `kiro-review` protocol at run scope — read the code, run the build/test commands itself, do not trust prior reports — and return a structured `## Review Verdict` / `- VERDICT: APPROVED|REJECTED` block. This is the AI review agent gate; there is no human approval step.
 3. **REJECTED**: do NOT push. The work stays committed locally on `agent` (already individually task-reviewed) for the next run or a human to inspect. Report the findings verbatim in Step 6.
-4. **APPROVED**: push everything from this run in one shot:
-   - `git push origin agent`
-   - `git push origin <tag1> <tag2> ...` (the exact tag names created in Step 3 — never `git push --tags`, which could push unrelated local tags).
+4. **APPROVED**: push everything from this run: `git push origin agent`.
 
 ## Step 6: Report
 
 Report concisely (this is what gets relayed to the user):
 - Feature selected and why (or why none was eligible), and which group (`GROUP`) this run worked on.
-- Tasks completed this run (task IDs + one-line descriptions), with commit SHAs and tag names.
+- Tasks completed this run (task IDs + one-line descriptions), with commit SHAs.
 - Whether the feature is now fully complete or groups remain for a future run.
 - Final review verdict and whether it was pushed.
 - If stopped early (`BLOCKED`/`STOP_FOR_HUMAN`/NO-GO/REJECTED): the exact reason, and what the next run (or a human) needs to do.
 
 ## Non-negotiable constraints
 
-- Only `main` and its dispatched subagents touch this repo; `main` never writes implementation code itself — that's always a dispatched implementer subagent. `main`'s own tool use is limited to git plumbing, `tasks.md`/tag bookkeeping that `kiro-impl` already documents as parent-context actions, and reading spec/steering files.
+- Only `main` and its dispatched subagents touch this repo; `main` never writes implementation code itself — that's always a dispatched implementer subagent. `main`'s own tool use is limited to git plumbing, `tasks.md` bookkeeping that `kiro-impl` already documents as parent-context actions, and reading spec/steering files.
 - Never push to any branch other than `agent`. Never force-push, never `git reset --hard`, `git checkout -f`, or `git clean` — if the branch state is unexpected, stop and report instead of forcing past it.
 - Never skip the per-task reviewer, `kiro-verify-completion`, or the Step 5 final reviewer. A push without an `APPROVED` verdict backing it is not allowed.
 - Never batch multiple features into one run, and never batch multiple task groups into one run. One `main` dispatch advances at most one top-level task group (`N.1`..`N.M`) of one spec, then reports — even if further groups or specs are immediately eligible afterward. Continuous progress comes from the Routine re-triggering this skill, not from this skill looping internally across groups, specs, or runs.
