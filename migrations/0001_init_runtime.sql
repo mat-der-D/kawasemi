@@ -1,0 +1,24 @@
+-- 0001_init_runtime.sql
+--
+-- core-runtime: initial migration.
+--
+-- Purpose (Requirement 4.1, design.md "Migrate" / "Logical Data Model"):
+--   Establish the embedded-migration mechanism and the naming/versioning
+--   convention that all downstream specs' migrations must follow:
+--     - Sequential numeric version prefix (0001, 0002, ...).
+--     - Forward-only append: never edit or renumber an already-applied
+--       migration file; add a new one instead.
+--   This mechanism is driven by `sqlx::migrate!("./migrations")`, embedding
+--   this directory into the compiled binary so no external migration files
+--   or tooling are required at runtime.
+--
+-- core-runtime intentionally owns no domain tables. It does not know about
+-- accounts, statuses, or any other domain entity — those belong to later
+-- specs. This initial migration is therefore a near no-op: it contains no
+-- schema-changing statements. Its only purpose is to exist as version 0001
+-- so that sqlx's migration history (`_sqlx_migrations`, managed by sqlx
+-- itself) has a first, checksum-tracked entry to build on.
+--
+-- Wiring this migration into the startup sequence (automatic execution via
+-- `sqlx::migrate!()` at boot) is out of scope for this file; see the
+-- Migrate component in design.md.
