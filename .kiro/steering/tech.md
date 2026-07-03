@@ -9,7 +9,7 @@
 
 ## Core Technologies
 
-- **言語（バックエンド）**：Rust
+- **言語（バックエンド）**：Rust（Edition 2024）
 - **Web フレームワーク**：axum
 - **非同期ランタイム**：tokio
 - **DB**：PostgreSQL
