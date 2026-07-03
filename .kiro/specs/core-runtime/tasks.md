@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. プロジェクト基盤の構築
-- [ ] 1.1 Rust クレートと依存・エントリポイント骨格を作成する
+- [x] 1.1 Rust クレートと依存・エントリポイント骨格を作成する
   - `Cargo.toml` に axum / tokio / sqlx(PostgreSQL) / tracing / tracing-subscriber / tower-http / toml 等の依存を定義する
   - `src/main.rs` を作成し、後続で実装する `bootstrap()` を呼んで終了コードへ変換する最小骨格を置く
   - `cargo check` が通り、空のバイナリがビルドできる状態になる
@@ -169,3 +169,8 @@
   - テストがグリーンになり、分離性と shutdown 挙動が観測できる
   - _Requirements: 1.3, 1.4, 8.4_
   - _Depends: 8.1_
+
+## Implementation Notes
+
+- 1.1: `edition = "2024"` を採用（design.md の Technology Stack 表は "edition 2021" と記載されているが、その脚注で「バージョンは確定版ではなく系列の目安」と明記されており、steering（tech.md/structure.md）の Edition 2024 指定が優先される）。
+- 1.1: steering（structure.md）は `mod.rs` 方式を禁止している。design.md の File Structure Plan にある `dir/mod.rs` は、以降のタスクで `dir.rs`（`dir/` の兄弟ファイル）として作成すること（例: `src/config/mod.rs` → `src/config.rs` + `src/config/secret.rs`）。
