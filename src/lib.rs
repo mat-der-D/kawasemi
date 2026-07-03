@@ -8,3 +8,4 @@
 //! adds no behavior of its own, only module registration.
 
 pub mod config;
+pub mod telemetry;
