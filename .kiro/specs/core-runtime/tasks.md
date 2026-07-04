@@ -66,7 +66,7 @@
   - _Requirements: 9.1, 9.2, 9.3, 9.4_
   - _Boundary: DomainPrimitives_
 
-- [ ] 5.2 (P) Clock 境界を実装する
+- [x] 5.2 (P) Clock 境界を実装する
   - `Clock` trait と本番実装（システム時刻）・決定的実装（固定時刻）を実装する
   - 単体テストで決定的実装が常に同一時刻を返すことを確認できる
   - _Requirements: 5.1_
