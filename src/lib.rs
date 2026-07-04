@@ -13,4 +13,5 @@ pub mod domain;
 pub mod error;
 pub mod migrate;
 pub mod runtime;
+pub mod state;
 pub mod telemetry;
