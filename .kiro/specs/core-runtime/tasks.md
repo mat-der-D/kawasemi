@@ -101,7 +101,7 @@
   - _Depends: 5.2, 5.3, 5.4, 5.5_
 
 - [ ] 6. エラー基盤（Error）の実装
-- [ ] 6.1 (P) 統一エラー型と HTTP レスポンス変換骨格を実装する
+- [x] 6.1 (P) 統一エラー型と HTTP レスポンス変換骨格を実装する
   - 横断利用する `AppError`（4xx=Client / 5xx=Server の分類）を定義し、axum `IntoResponse` でステータスと構造化本文へ変換する
   - 5xx では内部 source を本文に露出させず相関 ID 付きでログにのみ出力し、本文表現を api-foundation が拡張できる拡張点を残す
   - 単体テストで「4xx は public_message を返す」「5xx 本文に内部詳細が出ない」ことを確認できる
@@ -176,3 +176,5 @@
 - 1.1: steering（structure.md）は `mod.rs` 方式を禁止している。design.md の File Structure Plan にある `dir/mod.rs` は、以降のタスクで `dir.rs`（`dir/` の兄弟ファイル）として作成すること（例: `src/config/mod.rs` → `src/config.rs` + `src/config/secret.rs`）。
 - 4.2: design.md のトレーサビリティ表は Migrate のインターフェース名を `run_migrations()` と記載しているが、実装は `apply_migrations()`（`db.rs` の `establish_pool` と対称的な命名）。挙動に影響する矛盾ではないため実装を優先し、doc 側の整合は将来の軽微な修正候補として残す。
 - 4.2: Requirement 4.5（失敗マイグレーションの特定）は、0001 が no-op のため実際の embedded `MIGRATOR` 経由では未検証（別途組み立てた `Migrator` で `MigrateError` のラップ経路のみ検証）。将来、実データマイグレーションが追加された時点で、意図的に破壊した実マイグレーションに対する end-to-end 回帰テストの追加を検討すること。
+- 6.1: `AppError::server` は 5xx の `public_message` を固定定数 `GENERIC_SERVER_MESSAGE` に限定し、呼び出し元が任意の文言を渡せる構成にしていない（Requirement 6.4 の「内部詳細を露出させない」保証を構造的に保つため）。後続タスクで 5xx エラーを生成する際はこの固定文言をそのまま使うこと（カスタム文言が必要になった場合は、`source` を経由しない安全な文言のみを許可する形で `AppError::server` 側を拡張する設計変更が必要）。
+- 6.1: 相関 ID 付きログ（Requirement 6.4 の「診断情報をログへ出力」）は `tracing::error!` で `source`/`status` を出力するのみで、`request_id` の span 付与は行っていない（7.2 が `TraceLayer`/request span を配線した時点で `tracing` の span 継承により自動的に相関される設計）。9.2 の統合テストで実際に相関 ID 付きログになることを検証する想定。
