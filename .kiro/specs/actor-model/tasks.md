@@ -7,7 +7,7 @@
   - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、3テーブルと各制約が存在する
   - _Requirements: 1.2, 2.1, 5.3_
   - _Boundary: Migration_
-- [ ] 1.2 ドメイン型と参照型を定義する
+- [x] 1.2 ドメイン型と参照型を定義する
   - `Owner` / `LocalActor` / `ActorType`(person, service) / `ActorState`(active, deactivated) / `Handle`(形式検証付き値オブジェクト) を定義する
   - プロトコル層向け参照型 `ResolvedActor` / `ActorPublicKey` / 管理層一覧型 `ActorSummary` を、owner 情報を構造的に含めずに定義する
   - 観測可能な完了条件: `Handle::new` が空文字・不正文字を拒否し許可文字を受理する単体テストが通り、参照型に owner フィールドが存在しないことがコンパイル/テストで確認できる
