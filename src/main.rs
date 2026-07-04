@@ -1,4 +1,5 @@
 mod bootstrap;
+mod config;
 
 use std::process::ExitCode;
 

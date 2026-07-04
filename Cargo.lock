@@ -692,6 +692,7 @@ name = "kawasemi"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "serde",
  "sqlx",
  "tokio",
  "toml",
