@@ -1,10 +1,6 @@
-mod bootstrap;
-mod config;
-mod telemetry;
-
 use std::process::ExitCode;
 
-use bootstrap::bootstrap;
+use kawasemi::bootstrap::bootstrap;
 
 #[tokio::main]
 async fn main() -> ExitCode {
