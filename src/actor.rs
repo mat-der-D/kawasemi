@@ -8,14 +8,17 @@
 //! - Task 2.1 (`Boundary: OwnerRepository`): the owner concept's
 //!   persistence — creation and lookup against a plain `&PgPool` — see
 //!   [`owner`].
+//! - Task 2.2 (`Boundary: ActorRepository`): the local actor's persistence,
+//!   state transitions, and handle/id/owner-scoped lookups — see
+//!   [`repository`].
 //!
-//! `ActorRepository` / `ActorSigningKeyRepository` / `ActorService` /
-//! `ActorDirectory` / the `keys` submodule are later tasks (2.2-6.x) per
-//! design.md's File Structure Plan, and are deliberately not declared here
-//! until those tasks land.
+//! `ActorSigningKeyRepository` / `ActorService` / `ActorDirectory` / the
+//! `keys` submodule are later tasks (2.3-6.x) per design.md's File Structure
+//! Plan, and are deliberately not declared here until those tasks land.
 
 pub mod model;
 pub mod owner;
+pub mod repository;
 
 pub use model::{
     ActorPublicKey, ActorState, ActorSummary, ActorType, Handle, LocalActor, Owner, ResolvedActor,

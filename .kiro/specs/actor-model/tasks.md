@@ -22,7 +22,7 @@
   - _Requirements: 2.1, 2.4_
   - _Boundary: OwnerRepository_
   - _Depends: 1.2_
-- [ ] 2.2 (P) アクターの永続化を実装する
+- [x] 2.2 (P) アクターの永続化を実装する
   - アクターの挿入・状態更新・取得（ハンドル別/ID別/オーナー別）を実装し、ハンドル一意制約違反を重複エラーへ写像する
   - 観測可能な完了条件: 重複ハンドル挿入が重複エラーを返し、オーナー別取得が当該オーナーのアクターのみを返す
   - _Requirements: 1.1, 1.2, 1.3, 2.2, 7.3, 8.1, 8.2_
@@ -110,3 +110,4 @@
 ## Implementation Notes
 
 - 1.1: マイグレーション/テストハーネス基盤（`src/migrate.rs` とその `tests.rs`、`src/test_harness.rs`）は core-runtime が所有し本スペックの Out of Boundary。検証用テストは `apply_migrations`/`spawn_test_app` などの公開 API 経由でのみ利用し、`tests/*_it.rs` に actor-model 独自の統合テストとして追加すること（core-runtime のプライベートなテストモジュールを直接編集しない）。
+- 2.2: `insert_actor` が必要とする `PgTransaction<'a>`（`sqlx::Transaction<'a, sqlx::Postgres>` のローカル型エイリアス）は `src/actor/repository.rs` にのみ定義した（リポジトリ横断の共有型はまだ存在しない）。design.md では 2.3（`ActorSigningKeyRepository`）も `tx: &mut PgTransaction` を要求するため、2.3 実装時に同じ別名を再定義するか、共有場所（例: `src/db.rs`）へ昇格するかを判断すること。
