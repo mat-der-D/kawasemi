@@ -72,7 +72,7 @@
   - _Requirements: 5.1_
   - _Boundary: RuntimeContext/clock_
 
-- [ ] 5.3 (P) IdGenerator 境界を実装する
+- [x] 5.3 (P) IdGenerator 境界を実装する
   - `IdGenerator` trait と本番実装・決定的実装（シード由来の連番）を実装し、5.1 で定義した正準 `Id` 型を払い出す
   - 単体テストで決定的実装が同一シードで同一 ID 列を再現することを確認できる
   - _Requirements: 5.2_

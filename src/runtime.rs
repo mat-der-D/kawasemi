@@ -9,5 +9,7 @@
 //! are added by later tasks in this same task group.
 
 pub mod clock;
+pub mod ids;
 
 pub use clock::{Clock, FixedClock, SystemClock};
+pub use ids::{IdGenerator, SeqIdGenerator, SnowflakeIdGenerator};
