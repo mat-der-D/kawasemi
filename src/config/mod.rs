@@ -7,10 +7,9 @@
 //! *operational* configuration stored in the database belongs to a later
 //! spec and is never read or written here (Requirement 2.6).
 //!
-//! Secret-bearing values (currently `DatabaseConfig::url`) are held as a
-//! plain `String` in this task. A subsequent, dependent task introduces a
-//! `Secret<T>` wrapper (`src/config/secret.rs`) and applies it to these
-//! fields so they are never exposed via `Debug`/`Display` (Requirement 2.5).
+//! Secret-bearing values (currently `DatabaseConfig::url`) are held in the
+//! [`Secret<T>`](secret::Secret) wrapper so they are never exposed via
+//! `Debug`/`Display` (Requirement 2.5).
 //!
 //! `load_config()` (the real, IO-backed entry point) is not yet called
 //! from anywhere: wiring it into the startup sequence is task 7.4's job
@@ -19,10 +18,14 @@
 
 #![allow(dead_code)]
 
+pub mod secret;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::Path;
+
+pub use secret::Secret;
 use std::time::Duration;
 
 /// Prefix used for every environment variable recognized as a startup
@@ -60,8 +63,10 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseConfig {
-    /// The PostgreSQL connection string. Required.
-    pub url: String,
+    /// The PostgreSQL connection string. Required. Wrapped in [`Secret`]
+    /// because it embeds database credentials and must never be exposed
+    /// via `Debug`/`Display`/logging (Requirement 2.5).
+    pub url: Secret<String>,
     pub max_connections: u32,
     pub acquire_timeout: Duration,
 }
@@ -393,7 +398,7 @@ fn build_config(toml_cfg: TomlConfig, env: &HashMap<String, String>) -> Result<A
             shutdown_grace: shutdown_grace.expect("validated above: no issues means shutdown_grace is Some"),
         },
         database: DatabaseConfig {
-            url: db_url.expect("validated above: no issues means db_url is Some"),
+            url: Secret::new(db_url.expect("validated above: no issues means db_url is Some")),
             max_connections: max_connections
                 .expect("validated above: no issues means max_connections is Some"),
             acquire_timeout: acquire_timeout
@@ -440,7 +445,7 @@ mod tests {
 
         assert_eq!(cfg.server.domain, "env.example.org");
         // Sanity: the TOML-only database.url still comes through untouched.
-        assert_eq!(cfg.database.url, "postgres://toml/db");
+        assert_eq!(cfg.database.url.expose(), "postgres://toml/db");
     }
 
     #[test]
@@ -450,7 +455,7 @@ mod tests {
 
         let cfg = build_config(toml_cfg, &env).expect("should build");
 
-        assert_eq!(cfg.database.url, "postgres://env/db");
+        assert_eq!(cfg.database.url.expose(), "postgres://env/db");
     }
 
     #[test]
@@ -461,7 +466,7 @@ mod tests {
         let cfg = build_config(toml_cfg, &env).expect("should build purely from toml");
 
         assert_eq!(cfg.server.domain, "toml.example.org");
-        assert_eq!(cfg.database.url, "postgres://toml/db");
+        assert_eq!(cfg.database.url.expose(), "postgres://toml/db");
     }
 
     #[test]
