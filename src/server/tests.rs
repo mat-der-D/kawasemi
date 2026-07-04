@@ -33,6 +33,7 @@ use tracing_subscriber::registry::LookupSpan;
 
 use super::*;
 use crate::config::{AppConfig, DatabaseConfig, LogConfig, LogLevel, Secret, ServerConfig};
+use crate::error::{AppError, GENERIC_SERVER_MESSAGE};
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::telemetry::{REQUEST_ID_FIELD, REQUEST_SPAN_NAME};
 
@@ -148,6 +149,11 @@ struct RecordedEvent {
     /// `request_id` of the span this event was recorded inside, resolved by
     /// looking up the event's current span in `Capture::spans`.
     request_id: Option<String>,
+    /// All fields recorded on this event (including `message`), so tests can
+    /// inspect event-specific diagnostic fields (e.g. `AppError`'s `error`
+    /// field carrying the 5xx `source`'s text) beyond just the message and
+    /// correlating `request_id`.
+    fields: HashMap<String, String>,
 }
 
 #[derive(Clone, Default)]
@@ -182,6 +188,7 @@ where
         self.events.lock().unwrap().push(RecordedEvent {
             message,
             request_id,
+            fields: fields.0,
         });
     }
 }
@@ -253,6 +260,154 @@ async fn trace_layer_logs_request_and_response_correlated_by_the_same_request_id
         sent[0].request_id,
         Some(request_id),
         "the 'request received' and 'response sent' events must carry the same request_id"
+    );
+}
+
+// --- Task 9.2: AppError(Server) end-to-end body secrecy + correlated
+// diagnostic logging (Requirements 6.4, 7.5) ---
+//
+// `src/error/tests.rs` (task 6.1) already proves, at the unit level, that
+// converting an `AppError::server(..)` never leaks `source` into the
+// response body. `trace_layer_logs_request_and_response_correlated_by_the_same_request_id`
+// above already proves request/response logs share a `request_id`, but only
+// for a handler that never errors. Neither proves the combination this task
+// needs: a real HTTP round trip, through the actual router + `TraceLayer` +
+// `AppError` stack, where a handler returns `AppError::server(..)`, and the
+// *error-path* diagnostic log (`error.rs`'s `log_if_server`) both shares the
+// request's `request_id` and carries the failure detail. This test closes
+// that gap using the same `Capture`/`set_default` technique as the
+// correlation test above (safe here for the same reason documented in
+// `telemetry::tests`'s module doc comment: `tracing::subscriber::set_default`
+// is a thread-local, reentrant scoped override, not the process-global
+// subscriber that `init_telemetry` installs exactly once — this test never
+// calls `bootstrap()`/`init_telemetry`, so it has no reason to live in a
+// separate `tests/*_it.rs` process the way `bootstrap_fail_fast_it.rs` and
+// `bootstrap_lifecycle_it.rs` must).
+
+const APP_ERROR_PATH: &str = "/__test_app_error_5xx__";
+
+/// Distinctive marker so if this text ever leaked into the HTTP response
+/// body, this test would unmistakably catch it (mirrors
+/// `src/error/tests.rs`'s `server_error_body_never_contains_source_detail`
+/// technique).
+const APP_ERROR_SOURCE_MARKER: &str = "test-5xx-source-diagnostic-marker-77291";
+
+async fn app_error_handler() -> AppError {
+    AppError::server(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        std::io::Error::other(APP_ERROR_SOURCE_MARKER),
+    )
+}
+
+/// Reproduces [`build_router`]'s exact router + `TraceLayer` wiring, but with
+/// [`APP_ERROR_PATH`] merged in *before* `.layer(TraceLayer::new_for_http()..)`
+/// is attached, rather than calling `build_router(state).route(..)`.
+///
+/// This is not merely cosmetic: `axum::routing::Router::layer` bakes the
+/// layer into whichever routes are already registered on `path_router` at
+/// the moment it is called (it maps `this.path_router.layer(layer)` over the
+/// routes present then) — a route `.route()`-ed onto the *result* of
+/// `build_router()` is added after that point and would silently never be
+/// wrapped by `TraceLayer`, so no "request received"/"response sent" log
+/// events (and no `request_id`-carrying span) would ever be observed for it,
+/// which is exactly what this task needs to prove is correlated.
+fn build_router_with_test_error_route(state: AppState) -> Router {
+    let span_state = state.clone();
+
+    router()
+        .route(APP_ERROR_PATH, get(app_error_handler))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(move |_request: &Request<Body>| {
+                    let request_id = span_state.runtime().ids.next_id().as_i64().to_string();
+                    telemetry::request_span(&request_id)
+                })
+                .on_request(|request: &Request<Body>, _span: &Span| {
+                    tracing::info!(
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        "request received"
+                    );
+                })
+                .on_response(
+                    |response: &Response<Body>, latency: Duration, _span: &Span| {
+                        tracing::info!(
+                            status = %response.status(),
+                            latency_ms = latency.as_millis() as u64,
+                            "response sent"
+                        );
+                    },
+                ),
+        )
+        .with_state(state)
+}
+
+/// Requirements 6.4, 7.5: a handler returning `AppError::server(..)`, driven
+/// through a real HTTP request over the actual router + `TraceLayer` stack,
+/// must (a) return a response body that never contains the internal
+/// `source` detail (only the generic message), and (b) emit a diagnostic log
+/// event that carries both the same `request_id` as the request's own
+/// span and enough detail (the `source` text) to identify the failure.
+#[tokio::test]
+async fn app_error_server_hides_source_in_body_but_logs_it_correlated_with_request_id() {
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::registry().with(capture.clone());
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let state = test_state(3);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let app = build_router_with_test_error_route(state);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let response = raw_http_get(addr, APP_ERROR_PATH).await;
+    assert!(
+        response.starts_with("HTTP/1.1 500"),
+        "expected a 500 response from {APP_ERROR_PATH}, got: {response}"
+    );
+    assert!(
+        !response.contains(APP_ERROR_SOURCE_MARKER),
+        "the HTTP response body must never contain internal source detail, got: {response}"
+    );
+    assert!(
+        response.contains(GENERIC_SERVER_MESSAGE),
+        "the HTTP response body should carry the generic server message, got: {response}"
+    );
+
+    let events = capture.events.lock().unwrap();
+    let received = events
+        .iter()
+        .find(|e| e.message.contains("request received"))
+        .expect("expected a 'request received' log event");
+    let request_id = received
+        .request_id
+        .clone()
+        .expect("the 'request received' event must carry a correlating request_id");
+    assert!(!request_id.is_empty(), "request_id must not be empty");
+
+    let server_error_event = events
+        .iter()
+        .find(|e| e.message.contains("internal server error"))
+        .expect("expected a logged 5xx diagnostic event from AppError's log_if_server");
+    assert_eq!(
+        server_error_event.request_id,
+        Some(request_id),
+        "the 5xx diagnostic log must carry the same request_id as the request it belongs to"
+    );
+    let logged_error_detail = server_error_event
+        .fields
+        .get("error")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        logged_error_detail.contains(APP_ERROR_SOURCE_MARKER),
+        "expected the 5xx diagnostic log to carry the source detail needed to identify the \
+         failure, got fields: {:?}",
+        server_error_event.fields
     );
 }
 
