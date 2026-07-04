@@ -85,7 +85,7 @@
   - _Requirements: 5.3_
   - _Boundary: RuntimeContext/rng_
 
-- [ ] 5.5 (P) SigningKeyProvider 境界を実装する
+- [x] 5.5 (P) SigningKeyProvider 境界を実装する
   - 対象アクターの `Id`（5.1）を直接ラップする newtype `KeyRef(Id)` を single-key-per-actor 前提（鍵バージョン/世代を区別しない）で定義する
   - `SigningKeyProvider` trait（`KeyRef` を受け取り鍵を返す）とテスト用固定鍵実装を実装し、本番実装を actor-model が差し込む拡張点を残す
   - 単体テストでテスト用実装が固定鍵を再現的に返すことを確認できる
