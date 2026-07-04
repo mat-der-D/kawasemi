@@ -1,12 +1,23 @@
-//! Library target exposing cross-cutting runtime components (starting with
-//! `config`) so they can be unit-tested independently of the `main`
-//! binary's composition root, and reused by later tasks/specs.
+//! Library target exposing cross-cutting runtime components so they can be
+//! unit-tested independently of the `main` binary, and reused by later
+//! tasks/specs.
 //!
-//! `main.rs` remains a standalone binary crate root for now (wiring
-//! `config::load_config()` into `bootstrap()` is task 7.4's job, per
-//! core-runtime's task boundary for task 2.1) — this file intentionally
-//! adds no behavior of its own, only module registration.
+//! `bootstrap` (task 7.4's Composition Root) is exposed here — rather than
+//! staying a `main.rs`-local `mod bootstrap;` as it was through task 7.3 —
+//! for two reasons: (1) this codebase's established convention (tasks 1-7)
+//! is that testable logic lives on the `lib` target, and (2) task 7.4's own
+//! integration tests (`tests/bootstrap_lifecycle_it.rs`,
+//! `tests/bootstrap_fail_fast_it.rs`) must reach `bootstrap()` and its
+//! injectable-shutdown test seam from a separate `tests/*.rs` binary/process
+//! — see that file's module doc comment for why process isolation is
+//! required here (in short: `telemetry::init_telemetry` installs a global,
+//! install-once-per-process `tracing` subscriber, so any test exercising the
+//! full startup sequence must not share a process with
+//! `telemetry`'s own unit test that deliberately calls it twice). `main.rs`
+//! now calls `kawasemi::bootstrap::bootstrap()` instead of declaring its own
+//! `mod bootstrap;`.
 
+pub mod bootstrap;
 pub mod config;
 pub mod db;
 pub mod domain;

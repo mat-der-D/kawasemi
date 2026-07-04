@@ -131,7 +131,7 @@
   - _Boundary: Server_
   - _Depends: 7.2_
 
-- [ ] 7.4 Bootstrap composition root を実装する
+- [x] 7.4 Bootstrap composition root を実装する
   - config → telemetry → pool → migrate → runtime context → AppState → serve の順に依存を組み立て、いずれの初期化失敗も HTTP リスナー開始前に診断出力 + 非ゼロ終了に変換する
   - 統合テストで「正常時は待ち受け可能になる」「初期化失敗時は HTTP を開始せず非ゼロ終了する」ことを確認できる
   - _Requirements: 1.1, 1.2_

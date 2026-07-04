@@ -223,11 +223,37 @@ async fn os_shutdown_signal() {
 /// handler's subsequent database access, and process exit (this function's
 /// caller) tears down any sockets still open.
 pub async fn serve_with_shutdown(state: AppState, cfg: &ServerConfig) -> Result<(), ServeError> {
+    serve_with_shutdown_and_signal(state, cfg, os_shutdown_signal()).await
+}
+
+/// Test/composition-root-oriented variant of [`serve_with_shutdown`] that
+/// accepts an injectable shutdown trigger instead of always waiting for a
+/// real OS signal ([`os_shutdown_signal`]); [`serve_with_shutdown`] itself
+/// delegates here with that real signal.
+///
+/// This is `pub` (unlike the private [`drive_shutdown`] this module's own
+/// tests drive directly) because task 7.4's Bootstrap composition root needs
+/// an equivalent seam reachable from its own integration tests, which live in
+/// a separate `tests/*.rs` binary/process (see
+/// `tests/bootstrap_lifecycle_it.rs`'s module doc comment for why) and so
+/// cannot reach a `pub(crate)`-or-narrower item. Such a test spawns
+/// `crate::bootstrap::bootstrap_with_shutdown_signal` (which calls this
+/// function instead of `serve_with_shutdown`), polls the configured bind
+/// address until it accepts connections to prove "listen-ready"
+/// (Requirement 1.1), then resolves `signal` (e.g. via a `oneshot` channel,
+/// mirroring this module's own [`drive_shutdown`] tests) to trigger a clean
+/// shutdown without needing to send a real OS signal to the whole test
+/// process.
+pub async fn serve_with_shutdown_and_signal(
+    state: AppState,
+    cfg: &ServerConfig,
+    signal: impl Future<Output = ()> + Send + 'static,
+) -> Result<(), ServeError> {
     let listener = TcpListener::bind(cfg.bind_addr)
         .await
         .map_err(ServeError::Bind)?;
     let app = build_router(state.clone());
-    drive_shutdown(listener, app, state, cfg.shutdown_grace, os_shutdown_signal()).await
+    drive_shutdown(listener, app, state, cfg.shutdown_grace, signal).await
 }
 
 /// The listener-bind-independent, signal-source-independent core behind
