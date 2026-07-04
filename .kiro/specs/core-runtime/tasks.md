@@ -79,7 +79,7 @@
   - _Boundary: RuntimeContext/ids_
   - _Depends: 5.1_
 
-- [ ] 5.4 (P) Rng 境界を実装する
+- [x] 5.4 (P) Rng 境界を実装する
   - `Rng` trait と本番実装・決定的実装（シード固定）を実装する
   - 単体テストで決定的実装が同一シードで同一バイト列を再現することを確認できる
   - _Requirements: 5.3_

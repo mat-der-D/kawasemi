@@ -721,6 +721,7 @@ name = "kawasemi"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "getrandom",
  "serde",
  "serde_json",
  "sqlx",
