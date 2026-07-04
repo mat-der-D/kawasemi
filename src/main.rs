@@ -1,5 +1,6 @@
 mod bootstrap;
 mod config;
+mod telemetry;
 
 use std::process::ExitCode;
 
