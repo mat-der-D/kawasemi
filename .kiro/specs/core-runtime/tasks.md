@@ -57,7 +57,7 @@
   - _Depends: 1.2, 4.1_
 
 - [ ] 5. 非決定性注入境界（RuntimeContext）と共有ドメインプリミティブの実装
-- [ ] 5.1 (P) 共有ドメインプリミティブの正準定義を実装する
+- [x] 5.1 (P) 共有ドメインプリミティブの正準定義を実装する
   - `src/domain/primitives.rs` に、並行 spec 横断で共有される軽量プリミティブを唯一の正準定義として実装し、`src/domain/mod.rs` から再公開する
   - 識別子 `Id`（64bit 符号付き整数の newtype、生成時刻順に単調増加、serde は 10 進文字列表現、DB は `BIGINT` 列対応）を定義する。この `Id` は `IdGenerator`（5.3）や `KeyRef`（5.5）など後続コンポーネントが取り込む唯一の正準表現となる
   - `AccountRef`（`Local(Id)`/`Remote(Id)`）を、所有者情報を露出せず Account エンティティの知識を持たない純粋プリミティブとして定義する
