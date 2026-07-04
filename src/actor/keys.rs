@@ -15,11 +15,15 @@
 //!   an injected `core-runtime` random-byte boundary, PEM-encoded
 //!   (public/SPKI, private/PKCS#8 wrapped in a `Secret`) — see [`material`].
 //!
-//! `cipher` (`KeyCipher`, task 3.2), `service` (`SigningKeyService`, task
-//! 4.1), `cache` (`KeyCache`, task 4.1), and `provider`
-//! (`DbSigningKeyProvider`, task 4.2) are later tasks per design.md's File
-//! Structure Plan, and are deliberately not declared here until those tasks
-//! land.
+//! - Task 3.2 (`Boundary: KeyCipher`): private-key at-rest sealing/opening
+//!   via AEAD, keyed by a boot-config KEK and an injected-rng nonce — see
+//!   [`cipher`].
+//!
+//! `service` (`SigningKeyService`, task 4.1), `cache` (`KeyCache`, task
+//! 4.1), and `provider` (`DbSigningKeyProvider`, task 4.2) are later tasks
+//! per design.md's File Structure Plan, and are deliberately not declared
+//! here until those tasks land.
 
+pub mod cipher;
 pub mod material;
 pub mod repository;
