@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. 基盤: スキーマとドメイン型
-- [ ] 1.1 アクター/オーナー/鍵テーブルのマイグレーションを追加する
+- [x] 1.1 アクター/オーナー/鍵テーブルのマイグレーションを追加する
   - `migrations/0002_actors.sql` を作成し `owners` / `local_actors` / `actor_signing_keys` を定義する
   - `local_actors.handle` の一意制約、`actor_signing_keys` のアクター毎 active 部分一意制約、`owner_id`/`actor_id` の外部キーを設定する
   - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、3テーブルと各制約が存在する
@@ -106,3 +106,7 @@
   - _Requirements: 2.5, 3.1, 3.2, 3.3, 4.4, 4.5, 8.1, 8.4_
   - _Boundary: owner_actor_boundary_it_
   - _Depends: 6.1_
+
+## Implementation Notes
+
+- 1.1: マイグレーション/テストハーネス基盤（`src/migrate.rs` とその `tests.rs`、`src/test_harness.rs`）は core-runtime が所有し本スペックの Out of Boundary。検証用テストは `apply_migrations`/`spawn_test_app` などの公開 API 経由でのみ利用し、`tests/*_it.rs` に actor-model 独自の統合テストとして追加すること（core-runtime のプライベートなテストモジュールを直接編集しない）。
