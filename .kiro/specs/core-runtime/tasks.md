@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. プロジェクト基盤の構築
-- [ ] 1.1 Rust クレートと依存・エントリポイント骨格を作成する
+- [x] 1.1 Rust クレートと依存・エントリポイント骨格を作成する
   - `Cargo.toml` に axum / tokio / sqlx(PostgreSQL) / tracing / tracing-subscriber / tower-http / toml 等の依存を定義する
   - `src/main.rs` を作成し、後続で実装する `bootstrap()` を呼んで終了コードへ変換する最小骨格を置く
   - `cargo check` が通り、空のバイナリがビルドできる状態になる
