@@ -93,7 +93,7 @@
   - _Boundary: RuntimeContext/signing_key_
   - _Depends: 5.1_
 
-- [ ] 5.6 RuntimeContext 集約を実装する
+- [x] 5.6 RuntimeContext 集約を実装する
   - 4 つの境界を保持する `RuntimeContext` と、`production()`（本番実装）・`deterministic(seed)`（決定的実装）の構築関数を実装する
   - 単体テストで `deterministic` が同一シードで時刻/ID/乱数/鍵を再現し、`production` が本番実装で構築されることを確認できる
   - _Requirements: 5.5, 5.6_
