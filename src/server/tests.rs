@@ -23,6 +23,7 @@ use std::time::Duration;
 use sqlx::postgres::PgPoolOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id as SpanId};
 use tracing::{Event, Subscriber};
@@ -252,5 +253,194 @@ async fn trace_layer_logs_request_and_response_correlated_by_the_same_request_id
         sent[0].request_id,
         Some(request_id),
         "the 'request received' and 'response sent' events must carry the same request_id"
+    );
+}
+
+// --- Task 7.3: graceful shutdown (Requirements 1.3, 1.4, 1.5) ---
+//
+// These tests drive `drive_shutdown` directly (the private, listener- and
+// signal-source-independent core behind `serve_with_shutdown`) rather than
+// `serve_with_shutdown` itself, because `serve_with_shutdown` (a) binds its
+// own listener from `ServerConfig::bind_addr` rather than accepting a
+// pre-bound one, and (b) always waits on real OS signals. Driving
+// `drive_shutdown` directly lets these tests supply an ephemeral-port
+// listener whose address they can connect to, and an injectable
+// `oneshot::Receiver`-backed trigger instead of sending real signals to the
+// whole test process — while still exercising the exact same
+// drain/grace/force-stop/pool-release logic `serve_with_shutdown` uses in
+// production.
+
+const SLOW_PATH: &str = "/__test_slow__";
+
+/// A router carrying [`HEALTH_PATH`] plus a test-only route that sleeps for
+/// `delay` before responding, so the grace-period tests below have a
+/// request they can keep genuinely in flight for a controlled, deterministic
+/// duration. This route is never merged into the production
+/// `router()`/`build_router()` — it lives only inside this test module.
+fn router_with_slow_route(state: AppState, delay: Duration) -> Router {
+    router()
+        .route(
+            SLOW_PATH,
+            get(move || async move {
+                tokio::time::sleep(delay).await;
+                (StatusCode::OK, "slow-done")
+            }),
+        )
+        .with_state(state)
+}
+
+/// Requirements 1.3, 1.4: an in-flight request that finishes comfortably
+/// within `shutdown_grace` after the shutdown signal fires must complete
+/// successfully rather than being cut off, and `serve_with_shutdown`'s core
+/// must return `Ok` once the drain finishes.
+#[tokio::test]
+async fn in_flight_request_completes_within_grace() {
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+
+    let state = test_state(10);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let delay = Duration::from_millis(150);
+    let grace = Duration::from_millis(800);
+    let app = router_with_slow_route(state.clone(), delay);
+
+    let (tx, rx) = oneshot::channel::<()>();
+    let signal = async move {
+        let _ = rx.await;
+    };
+    let shutdown = tokio::spawn(drive_shutdown(listener, app, state.clone(), grace, signal));
+
+    let request = tokio::spawn(async move { raw_http_get(addr, SLOW_PATH).await });
+    // Give the connection time to be accepted and the slow handler to
+    // actually start running before triggering shutdown, so this genuinely
+    // exercises "in flight", not "not yet started".
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let _ = tx.send(());
+
+    let response = tokio::time::timeout(Duration::from_secs(5), request)
+        .await
+        .expect("the in-flight request must not hang")
+        .expect("request task must not panic");
+    assert!(
+        response.starts_with("HTTP/1.1 200") && response.contains("slow-done"),
+        "expected the in-flight slow request to complete successfully, got: {response}"
+    );
+
+    let result = tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .expect("serve_with_shutdown must not hang past the grace period")
+        .expect("shutdown task must not panic");
+    assert!(
+        result.is_ok(),
+        "serve_with_shutdown should return Ok when the drain completes within grace"
+    );
+
+    assert!(
+        state.pool().is_closed(),
+        "the pool must be closed once serve_with_shutdown returns"
+    );
+}
+
+/// Requirement 1.4: if the in-flight request does not finish within
+/// `shutdown_grace`, shutdown must force-stop rather than continue waiting
+/// for it — `serve_with_shutdown` must return at/near the grace deadline,
+/// not at/near the slow handler's (much longer) delay.
+#[tokio::test]
+async fn grace_exceeded_forces_stop_without_waiting_for_slow_handler() {
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+
+    let state = test_state(11);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    let delay = Duration::from_millis(600);
+    let grace = Duration::from_millis(120);
+    let app = router_with_slow_route(state.clone(), delay);
+
+    let (tx, rx) = oneshot::channel::<()>();
+    let signal = async move {
+        let _ = rx.await;
+    };
+    let shutdown = tokio::spawn(drive_shutdown(listener, app, state.clone(), grace, signal));
+
+    // Fire off the slow request but don't wait on it here: it is still
+    // in-flight when the grace period elapses, which is exactly what this
+    // test exercises. Leaving its `JoinHandle` unawaited just lets it keep
+    // running in the background; the per-test tokio runtime tears it down
+    // when the test function returns.
+    let _request = tokio::spawn(async move { raw_http_get(addr, SLOW_PATH).await });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let shutdown_started_at = tokio::time::Instant::now();
+    let _ = tx.send(());
+
+    let result = tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .expect("serve_with_shutdown must not hang waiting for the slow handler")
+        .expect("shutdown task must not panic");
+    let elapsed = shutdown_started_at.elapsed();
+
+    assert!(
+        result.is_ok(),
+        "serve_with_shutdown should still return Ok even when it force-stops"
+    );
+    assert!(
+        elapsed < delay,
+        "expected serve_with_shutdown to return well before the slow handler's \
+         {delay:?} delay by forcing a stop at the {grace:?} grace deadline; took {elapsed:?}"
+    );
+    assert!(
+        elapsed >= grace.saturating_sub(Duration::from_millis(20)),
+        "expected serve_with_shutdown to wait roughly the full grace period \
+         ({grace:?}) before forcing a stop; took only {elapsed:?}"
+    );
+
+    assert!(
+        state.pool().is_closed(),
+        "the pool must be closed even when shutdown is forced"
+    );
+}
+
+/// Requirement 1.5: once graceful shutdown completes (whether drained within
+/// grace, or forced), the database connection pool must be released.
+/// Exercised here with no in-flight request at all, isolating pool release
+/// from the drain/force-stop behavior the two tests above already cover.
+#[tokio::test]
+async fn pool_is_released_after_shutdown_completes() {
+    let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+
+    let state = test_state(12);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let app = build_router(state.clone());
+
+    assert!(
+        !state.pool().is_closed(),
+        "sanity: the pool must not already report closed before shutdown runs"
+    );
+
+    let (tx, rx) = oneshot::channel::<()>();
+    let signal = async move {
+        let _ = rx.await;
+    };
+    let grace = Duration::from_millis(200);
+    let shutdown = tokio::spawn(drive_shutdown(listener, app, state.clone(), grace, signal));
+
+    // No in-flight request: fire the shutdown signal right away.
+    let _ = tx.send(());
+
+    let result = tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .expect("serve_with_shutdown must not hang")
+        .expect("shutdown task must not panic");
+    assert!(result.is_ok());
+
+    assert!(
+        state.pool().is_closed(),
+        "expected serve_with_shutdown to close the pool before returning"
     );
 }
