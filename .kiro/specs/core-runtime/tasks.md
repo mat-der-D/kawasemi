@@ -139,7 +139,7 @@
   - _Depends: 2.1, 3.1, 4.1, 4.2, 5.6, 7.3_
 
 - [ ] 8. テストハーネスの土台
-- [ ] 8.1 DB 込み統合テストハーネスを実装する
+- [x] 8.1 DB 込み統合テストハーネスを実装する
   - テストごとに分離された DB 状態（一意 DB/スキーマ名 or テンプレート DB からの作成）を用意し、埋め込みマイグレーションを適用済みの状態で、決定的 `RuntimeContext` を用いてテスト用インスタンスを起動する `spawn_test_app()` を実装する
   - 正規の解放経路として明示的な非同期 `cleanup()` を実装し、テストコードが必ずこれを呼んでプール解放・分離 DB 破棄・listener 停止を行える状態にする
   - `Drop` はベストエフォートのみに留める（分離 DB 破棄をデタッチしたバックグラウンドタスクへ委ねる、または次回起動時の起動時スイープに委ねる）。tokio ランタイム内の同期 `Drop::drop` から async 解放処理を `block_on` して panic させない
@@ -178,3 +178,4 @@
 - 4.2: Requirement 4.5（失敗マイグレーションの特定）は、0001 が no-op のため実際の embedded `MIGRATOR` 経由では未検証（別途組み立てた `Migrator` で `MigrateError` のラップ経路のみ検証）。将来、実データマイグレーションが追加された時点で、意図的に破壊した実マイグレーションに対する end-to-end 回帰テストの追加を検討すること。
 - 6.1: `AppError::server` は 5xx の `public_message` を固定定数 `GENERIC_SERVER_MESSAGE` に限定し、呼び出し元が任意の文言を渡せる構成にしていない（Requirement 6.4 の「内部詳細を露出させない」保証を構造的に保つため）。後続タスクで 5xx エラーを生成する際はこの固定文言をそのまま使うこと（カスタム文言が必要になった場合は、`source` を経由しない安全な文言のみを許可する形で `AppError::server` 側を拡張する設計変更が必要）。
 - 6.1: 相関 ID 付きログ（Requirement 6.4 の「診断情報をログへ出力」）は `tracing::error!` で `source`/`status` を出力するのみで、`request_id` の span 付与は行っていない（7.2 が `TraceLayer`/request span を配線した時点で `tracing` の span 継承により自動的に相関される設計）。9.2 の統合テストで実際に相関 ID 付きログになることを検証する想定。
+- 8.1: `spawn_test_app`/`TestApp` は分離レベルに一意 PostgreSQL *スキーマ*（`kawasemi_test` ロールに `CREATEDB` 権限がないため DB 単位ではなくスキーマ単位、`migrate/tests.rs` の既存パターンと同様）を使い、`db::establish_pool`/`migrate::apply_migrations`/`RuntimeContext::deterministic`/`server::build_router` を素のまま再利用する。`TestApp` 自身の serve ループは `src/server.rs` の `drive_shutdown`（猶予超過で強制停止）を再利用していない — `server::serve_with_shutdown_and_signal` は呼び出し元固定アドレスをバインドし実際に bind したアドレスを返さないため、`TestApp` が並行実行用に OS 割当のエフェメラルポートを得るには再利用できなかった。そのため `TestApp` の listener には猶予超過強制停止パスが無い。9.3（`_Depends: 8.1_`）が「猶予超過で強制停止すること」（1.3/1.4）を `spawn_test_app` 経由で検証しようとすると harness 側にその挙動が無いことに気づくはずなので、9.3 の設計時に (a) `TestApp` に猶予対応のバリアントを追加する、または (b) その挙動は `src/server.rs` 自身の既存テスト（`grace_exceeded_forces_stop_without_waiting_for_slow_handler`）に委ね、9.3 では分離性側面のみ `spawn_test_app` で検証する、のいずれかを選択すること。
