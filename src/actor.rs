@@ -11,11 +11,17 @@
 //! - Task 2.2 (`Boundary: ActorRepository`): the local actor's persistence,
 //!   state transitions, and handle/id/owner-scoped lookups — see
 //!   [`repository`].
+//! - Task 2.3 (`Boundary: ActorSigningKeyRepository`): the per-actor signing
+//!   key's persistence — active-key insertion, retirement, active-public-key
+//!   lookup, and the startup bulk load of every active key — see the `keys`
+//!   submodule's [`keys::repository`].
 //!
-//! `ActorSigningKeyRepository` / `ActorService` / `ActorDirectory` / the
-//! `keys` submodule are later tasks (2.3-6.x) per design.md's File Structure
-//! Plan, and are deliberately not declared here until those tasks land.
+//! `ActorService` / `ActorDirectory` / `keys`'s `material`/`cipher`/
+//! `service`/`cache`/`provider` submodules are later tasks (3.x-6.x) per
+//! design.md's File Structure Plan, and are deliberately not declared here
+//! until those tasks land.
 
+pub mod keys;
 pub mod model;
 pub mod owner;
 pub mod repository;

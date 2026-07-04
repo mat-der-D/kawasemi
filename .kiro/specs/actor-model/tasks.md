@@ -28,7 +28,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 2.2, 7.3, 8.1, 8.2_
   - _Boundary: ActorRepository_
   - _Depends: 1.2_
-- [ ] 2.3 (P) 署名鍵の永続化を実装する
+- [x] 2.3 (P) 署名鍵の永続化を実装する
   - 有効鍵挿入・有効鍵失効・有効公開鍵取得・全有効鍵の起動時一括ロードを実装し、秘密鍵は封緘済みバイト列として格納する
   - 観測可能な完了条件: 有効鍵を挿入後に取得でき、失効操作で status が retired に遷移し、一括ロードが全有効鍵を返す
   - _Requirements: 4.1, 4.5, 5.2, 5.3, 5.4, 6.2_
@@ -111,3 +111,4 @@
 
 - 1.1: マイグレーション/テストハーネス基盤（`src/migrate.rs` とその `tests.rs`、`src/test_harness.rs`）は core-runtime が所有し本スペックの Out of Boundary。検証用テストは `apply_migrations`/`spawn_test_app` などの公開 API 経由でのみ利用し、`tests/*_it.rs` に actor-model 独自の統合テストとして追加すること（core-runtime のプライベートなテストモジュールを直接編集しない）。
 - 2.2: `insert_actor` が必要とする `PgTransaction<'a>`（`sqlx::Transaction<'a, sqlx::Postgres>` のローカル型エイリアス）は `src/actor/repository.rs` にのみ定義した（リポジトリ横断の共有型はまだ存在しない）。design.md では 2.3（`ActorSigningKeyRepository`）も `tx: &mut PgTransaction` を要求するため、2.3 実装時に同じ別名を再定義するか、共有場所（例: `src/db.rs`）へ昇格するかを判断すること。
+- 2.3: 上記の `PgTransaction` は `src/actor/keys/repository.rs` から `crate::actor::repository::PgTransaction` を再利用する形にした（別名を再定義せず、`src/actor/repository.rs` 自体は無変更）。5.1（`ActorService`）が同一トランザクションで `ActorRepository::insert_actor` と `ActorSigningKeyRepository::insert_active_key` の両方を駆動する際、この一本化された型を素直に使えるはず。また `actor_signing_keys` テーブルには `retired_at`/`updated_at` 列が無く、`retire_active_key(tx, actor_id, now)` の `now` 引数は現状永続化先が無い（設計のシグネチャ通りに受け取るのみ）。将来 retired 時刻の記録が要件化した場合はマイグレーション追加を検討すること。有効鍵重複（`actor_signing_keys_active_unique` 違反）は 5xx として扱った（要件上 4xx 化を要求する記述が無く、設計上のローテーション呼び出し順序では通常到達しないため）。
