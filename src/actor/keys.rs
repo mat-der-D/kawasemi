@@ -25,13 +25,14 @@
 //!   generates/seals/persists a key at actor-creation time and drives
 //!   at-most-one-active-key rotation, keeping [`cache`] in sync with every
 //!   write — see [`service`].
-//!
-//! `provider` (`DbSigningKeyProvider`, task 4.2) is a later task per
-//! design.md's File Structure Plan, and is deliberately not declared here
-//! until that task lands.
+//! - Task 4.2 (`Boundary: DbSigningKeyProvider`): core-runtime's
+//!   `SigningKeyProvider` production implementation — a synchronous,
+//!   read-only pass-through against [`cache`] (no DB access on the request
+//!   path) — see [`provider`].
 
 pub mod cache;
 pub mod cipher;
 pub mod material;
+pub mod provider;
 pub mod repository;
 pub mod service;
