@@ -15,17 +15,23 @@
 //!   key's persistence — active-key insertion, retirement, active-public-key
 //!   lookup, and the startup bulk load of every active key — see the `keys`
 //!   submodule's [`keys::repository`].
+//! - Task 5.1 (`Boundary: ActorService`): actor creation (handle validation
+//!   via the `Handle` type -> owner-existence check -> active-initialized
+//!   insert -> signing-key provisioning, all in one transaction) and basic
+//!   lifecycle (deactivation) — see [`service`].
 //!
-//! `ActorService` / `ActorDirectory` / `keys`'s `material`/`cipher`/
-//! `service`/`cache`/`provider` submodules are later tasks (3.x-6.x) per
-//! design.md's File Structure Plan, and are deliberately not declared here
-//! until those tasks land.
+//! `ActorDirectory` / `keys`'s `material`/`cipher`/`service`/`cache`/
+//! `provider` submodules are later/already-landed tasks per design.md's File
+//! Structure Plan; `ActorDirectory` (task 5.2) is deliberately not declared
+//! here until that task lands.
 
 pub mod keys;
 pub mod model;
 pub mod owner;
 pub mod repository;
+pub mod service;
 
 pub use model::{
     ActorPublicKey, ActorState, ActorSummary, ActorType, Handle, LocalActor, Owner, ResolvedActor,
 };
+pub use service::{ActorService, NewActor};
