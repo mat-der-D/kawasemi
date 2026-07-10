@@ -2,8 +2,9 @@
 //!
 //! Scope: this module owns only *startup* configuration (Requirement 2.6) —
 //! the values a process needs before it can begin serving: the server
-//! domain, the database connection target, and log settings. It reads a
-//! TOML file and environment variables, merges them with environment
+//! domain, the database connection target, log settings, and (as of
+//! actor-model's task 6.1) the actor-model signing-key encryption secret. It
+//! reads a TOML file and environment variables, merges them with environment
 //! variables taking precedence on conflicting fields (Requirement 2.2), and
 //! validates the result into an immutable [`AppConfig`] or a [`ConfigError`]
 //! that identifies exactly which fields are missing or malformed
@@ -16,7 +17,10 @@
 //! `database.url` is wrapped in [`Secret<String>`](secret::Secret) (task
 //! 2.2, Requirement 2.5): it can embed credentials
 //! (`postgres://user:pass@host/db`), so it must never print in plaintext
-//! via `Debug`/`Display`/log output.
+//! via `Debug`/`Display`/log output. `actor.kek` (task 6.1, actor-model's
+//! Requirement 6.1) is wrapped the same way, for the same reason: it is a
+//! Key-Encryption-Key, not a database credential, but it is exactly as
+//! secret-bearing.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -45,6 +49,13 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub log: LogConfig,
+    /// actor-model's startup secret (design.md's "起動設定に鍵暗号鍵（KEK）
+    /// の `Secret<T>` 項目を1つ追加", Requirement 6.1). core-runtime only
+    /// hosts this field (mirroring `database.url`'s precedent of a
+    /// downstream-consumed `Secret<T>` startup item) — it does not itself
+    /// know what a KEK is used for; `crate::actor::keys::cipher` is the
+    /// consumer.
+    pub actor: ActorConfig,
 }
 
 /// Server-facing startup settings.
@@ -74,6 +85,28 @@ pub struct DatabaseConfig {
     /// Timeout for acquiring a connection from the pool (consumed by task
     /// 4.1). Defaults to 5 seconds.
     pub acquire_timeout: Duration,
+}
+
+/// actor-model's startup settings: currently just the Key-Encryption-Key
+/// (KEK) that seals/opens each actor's persisted signing key at rest
+/// (design.md "Modified Files": "起動設定に鍵暗号鍵（KEK）の `Secret<T>`
+/// 項目を1つ追加"). A dedicated struct (rather than a bare field on
+/// [`AppConfig`]) mirrors this module's existing per-concern grouping
+/// (`ServerConfig`/`DatabaseConfig`/`LogConfig`) and gives the KEK its own
+/// `actor.*` dotted-path namespace (`actor.kek` -> `KAWASEMI_ACTOR_KEK`),
+/// leaving room for future actor-model startup settings without disturbing
+/// [`AppConfig`]'s own field list again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActorConfig {
+    /// Key-Encryption-Key for `crate::actor::keys::cipher::KeyCipher`'s
+    /// at-rest sealing of persisted signing keys. Required, like
+    /// `database.url`/`server.domain` — a security-critical secret has no
+    /// safe default to fall back to. Supplied as a 64-character hexadecimal
+    /// string (256 bits, see [`validate_kek`]) and wrapped in [`Secret`] so
+    /// it never prints in plaintext via `Debug`/`Display`/log output
+    /// (mirrors `DatabaseConfig::url`'s masking convention, Requirement
+    /// 2.5).
+    pub kek: Secret<[u8; 32]>,
 }
 
 /// Logging/diagnostics startup settings.
@@ -275,6 +308,8 @@ fn load_config_from(
         &mut issues,
     );
 
+    let kek = required(&source, "actor.kek", validate_kek, &mut issues);
+
     let level = optional(
         &source,
         "log.level",
@@ -312,6 +347,11 @@ fn load_config_from(
         log: LogConfig {
             level: level.expect("validated above"),
             sql_diagnostic: sql_diagnostic.expect("validated above"),
+        },
+        actor: ActorConfig {
+            kek: Secret::new(
+                kek.expect("validated above: no issues means all required fields present"),
+            ),
         },
     })
 }
@@ -375,6 +415,35 @@ fn validate_db_url(raw: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+/// Validates a Key-Encryption-Key: exactly 64 hexadecimal characters
+/// (case-insensitive), decoding to a fixed 256-bit byte array. Deliberately
+/// never echoes the raw value in error messages — a malformed value is
+/// still potentially secret-bearing input, mirroring
+/// [`validate_db_url`]'s same discipline (Requirement 2.5's masking
+/// convention extended to this field).
+///
+/// Operates on `char`s (not raw bytes) so a malformed value containing
+/// multi-byte UTF-8 characters cannot panic on a byte boundary that splits
+/// one — it is simply reported as the wrong length or a non-hex character,
+/// like any other malformed input.
+fn validate_kek(raw: &str) -> Result<[u8; 32], String> {
+    let chars: Vec<char> = raw.trim().chars().collect();
+    if chars.len() != 64 {
+        return Err(format!(
+            "must be exactly 64 hexadecimal characters (a 256-bit key), got {} character(s)",
+            chars.len()
+        ));
+    }
+
+    let mut bytes = [0u8; 32];
+    for (i, pair) in chars.chunks(2).enumerate() {
+        let hex_pair: String = pair.iter().collect();
+        bytes[i] = u8::from_str_radix(&hex_pair, 16)
+            .map_err(|_| "must contain only hexadecimal characters (0-9, a-f, A-F)".to_string())?;
+    }
+    Ok(bytes)
+}
+
 /// Merged view over a parsed TOML document and an environment-variable map,
 /// resolving a dotted field path to its raw string value with environment
 /// variables taking precedence over the TOML file (Requirement 2.2).
@@ -419,15 +488,19 @@ fn to_env_key(path: &str) -> String {
     )
 }
 
-/// Resolves and validates a required field, recording a [`ConfigIssue`] into
-/// `issues` (either `Missing` or `Malformed`) instead of short-circuiting,
-/// so multiple problems can be reported from one `load_config` call.
-fn required_string(
+/// Resolves and validates a required field of any type, recording a
+/// [`ConfigIssue`] into `issues` (either `Missing` or `Malformed`) instead of
+/// short-circuiting, so multiple problems can be reported from one
+/// `load_config` call. Generic over the validated type `T` so both a plain
+/// `String` field (via [`required_string`]) and a differently-shaped field
+/// (e.g. `actor.kek`'s `[u8; 32]`, via [`validate_kek`]) share this one
+/// implementation.
+fn required<T>(
     source: &MergedSource,
     field: &str,
-    validate: fn(&str) -> Result<String, String>,
+    validate: impl Fn(&str) -> Result<T, String>,
     issues: &mut Vec<ConfigIssue>,
-) -> Option<String> {
+) -> Option<T> {
     match source.get(field) {
         Ok(Some(raw)) => match validate(&raw) {
             Ok(v) => Some(v),
@@ -453,6 +526,18 @@ fn required_string(
             None
         }
     }
+}
+
+/// [`required`] specialized for a plain `String` field, matching this
+/// module's existing validators (`validate_domain`/`validate_db_url`), which
+/// are plain `fn(&str) -> Result<String, String>` items.
+fn required_string(
+    source: &MergedSource,
+    field: &str,
+    validate: fn(&str) -> Result<String, String>,
+    issues: &mut Vec<ConfigIssue>,
+) -> Option<String> {
+    required(source, field, validate, issues)
 }
 
 /// Resolves and validates an optional field, falling back to `default` when

@@ -14,6 +14,12 @@ fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         .collect()
 }
 
+/// A valid `actor.kek`: 64 hex characters (256 bits). Shared by every test
+/// below that needs config to load successfully (or that deliberately
+/// varies a different field), so only the field(s) actually under test
+/// differ between cases.
+const VALID_KEK_HEX: &str = "ab00cd11ef22ab00cd11ef22ab00cd11ef22ab00cd11ef22ab00cd11ef22abcd";
+
 const VALID_TOML: &str = r#"
 [server]
 domain = "toml.example"
@@ -24,6 +30,9 @@ shutdown_grace_secs = 15
 url = "postgres://toml-user:toml-pass@localhost/toml_db"
 max_connections = 7
 acquire_timeout_secs = 3
+
+[actor]
+kek = "ab00cd11ef22ab00cd11ef22ab00cd11ef22ab00cd11ef22ab00cd11ef22abcd"
 
 [log]
 level = "debug"
@@ -52,6 +61,7 @@ fn env_only_config_with_no_toml_file_is_valid() {
     let overrides = env(&[
         ("KAWASEMI_SERVER_DOMAIN", "env-only.example"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
     ]);
     let config = load_config_from(None, &overrides).expect("env-only config should be sufficient");
 
@@ -70,7 +80,10 @@ fn env_only_config_with_no_toml_file_is_valid() {
 fn missing_required_domain_aborts_with_identified_field() {
     // Requirement 2.3: missing required field (domain) is reported and
     // identifies which field is missing.
-    let overrides = env(&[("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db")]);
+    let overrides = env(&[
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+    ]);
     let err = load_config_from(None, &overrides)
         .expect_err("domain missing from both TOML and env must fail");
 
@@ -83,7 +96,10 @@ fn missing_required_domain_aborts_with_identified_field() {
 #[test]
 fn missing_required_database_url_aborts_with_identified_field() {
     // Requirement 2.3, second required field.
-    let overrides = env(&[("KAWASEMI_SERVER_DOMAIN", "example.com")]);
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+    ]);
     let err = load_config_from(None, &overrides)
         .expect_err("database url missing from both TOML and env must fail");
 
@@ -92,13 +108,29 @@ fn missing_required_database_url_aborts_with_identified_field() {
 }
 
 #[test]
+fn missing_required_kek_aborts_with_identified_field() {
+    // Requirement 6.1 (actor-model): the startup KEK is required, like
+    // `server.domain`/`database.url` — a missing value is reported, not
+    // silently defaulted to a weak/fixed key.
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("missing KEK must fail");
+
+    let missing: Vec<&str> = err.missing_fields().collect();
+    assert_eq!(missing, vec!["actor.kek"]);
+    assert!(err.malformed_fields().next().is_none());
+}
+
+#[test]
 fn multiple_missing_required_fields_are_all_reported() {
     let err = load_config_from(None, &HashMap::new())
-        .expect_err("empty config must fail on both required fields");
+        .expect_err("empty config must fail on all required fields");
 
     let mut missing: Vec<&str> = err.missing_fields().collect();
     missing.sort_unstable();
-    assert_eq!(missing, vec!["database.url", "server.domain"]);
+    assert_eq!(missing, vec!["actor.kek", "database.url", "server.domain"]);
 }
 
 #[test]
@@ -108,6 +140,7 @@ fn malformed_domain_aborts_with_identified_field() {
     let overrides = env(&[
         ("KAWASEMI_SERVER_DOMAIN", "not a domain with spaces"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
     ]);
     let err = load_config_from(None, &overrides).expect_err("malformed domain must fail");
 
@@ -124,6 +157,7 @@ fn malformed_database_url_aborts_with_identified_field_and_no_secret_leak() {
             "KAWASEMI_DATABASE_URL",
             "mysql://user:supersecret@localhost/db",
         ),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
     ]);
     let err = load_config_from(None, &overrides).expect_err("non-postgres URL must fail");
 
@@ -135,10 +169,82 @@ fn malformed_database_url_aborts_with_identified_field_and_no_secret_leak() {
 }
 
 #[test]
+fn malformed_kek_wrong_length_is_reported_as_malformed_not_missing() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", "not-64-hex-chars"),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("wrong-length KEK must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["actor.kek"]);
+    assert!(err.missing_fields().next().is_none());
+}
+
+#[test]
+fn malformed_kek_non_hex_characters_is_reported_as_malformed() {
+    let non_hex_kek = "zz".repeat(32); // 64 chars, but not valid hex
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", non_hex_kek.as_str()),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("non-hex KEK must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["actor.kek"]);
+}
+
+#[test]
+fn malformed_kek_does_not_leak_the_raw_value_in_the_error_message() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", "not-a-valid-kek-value-at-all"),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("malformed KEK must fail");
+
+    assert!(!err.to_string().contains("not-a-valid-kek-value-at-all"));
+}
+
+#[test]
+fn valid_kek_hex_decodes_to_the_expected_bytes() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+    ]);
+    let config = load_config_from(None, &overrides).expect("valid KEK must load");
+
+    let expected: [u8; 32] = [
+        0xab, 0x00, 0xcd, 0x11, 0xef, 0x22, 0xab, 0x00, 0xcd, 0x11, 0xef, 0x22, 0xab, 0x00, 0xcd,
+        0x11, 0xef, 0x22, 0xab, 0x00, 0xcd, 0x11, 0xef, 0x22, 0xab, 0x00, 0xcd, 0x11, 0xef, 0x22,
+        0xab, 0xcd,
+    ];
+    assert_eq!(config.actor.kek.expose_secret(), &expected);
+}
+
+#[test]
+fn kek_debug_output_does_not_leak_the_key_material() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+    ]);
+    let config = load_config_from(None, &overrides).expect("valid KEK must load");
+
+    let formatted = format!("{config:?}");
+    assert!(!formatted.contains(VALID_KEK_HEX));
+    assert!(!formatted.contains("ab00cd11"));
+}
+
+#[test]
 fn malformed_bind_addr_is_reported_as_malformed_not_missing() {
     let overrides = env(&[
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
         ("KAWASEMI_SERVER_BIND_ADDR", "not-an-address"),
     ]);
     let err = load_config_from(None, &overrides).expect_err("malformed bind_addr must fail");
@@ -152,6 +258,7 @@ fn malformed_log_level_is_reported_as_malformed() {
     let overrides = env(&[
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
         ("KAWASEMI_LOG_LEVEL", "verbose"),
     ]);
     let err = load_config_from(None, &overrides).expect_err("unknown log level must fail");
@@ -165,6 +272,7 @@ fn malformed_sql_diagnostic_flag_is_reported_as_malformed() {
     let overrides = env(&[
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
         ("KAWASEMI_LOG_SQL_DIAGNOSTIC", "maybe"),
     ]);
     let err = load_config_from(None, &overrides).expect_err("non-boolean flag must fail");
@@ -178,6 +286,7 @@ fn malformed_numeric_fields_are_reported_as_malformed() {
     let overrides = env(&[
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
         ("KAWASEMI_DATABASE_MAX_CONNECTIONS", "not-a-number"),
         ("KAWASEMI_SERVER_SHUTDOWN_GRACE_SECS", "soon"),
     ]);
@@ -194,8 +303,12 @@ fn malformed_numeric_fields_are_reported_as_malformed() {
 #[test]
 fn missing_and_malformed_are_distinguished_in_a_single_pass() {
     // domain missing + database.url malformed, reported together with the
-    // correct kind for each.
-    let overrides = env(&[("KAWASEMI_DATABASE_URL", "not-a-url")]);
+    // correct kind for each. KEK is supplied validly so it does not add a
+    // third, unrelated issue to this test's assertions.
+    let overrides = env(&[
+        ("KAWASEMI_DATABASE_URL", "not-a-url"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+    ]);
     let err = load_config_from(None, &overrides).expect_err("mixed issues must fail");
 
     let missing: Vec<&str> = err.missing_fields().collect();
@@ -231,4 +344,5 @@ fn config_error_display_mentions_every_issue() {
     let rendered = err.to_string();
     assert!(rendered.contains("server.domain"));
     assert!(rendered.contains("database.url"));
+    assert!(rendered.contains("actor.kek"));
 }

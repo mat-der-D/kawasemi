@@ -1,13 +1,14 @@
 //! Shared, immutable application state handle (AppState boundary,
 //! Requirements 1.1, 3.3, 5.5, 5.6).
 //!
-//! Scope: this module owns bundling the three things every downstream
+//! Scope: this module owns bundling the four things every downstream
 //! handler/service needs a shared reference to — the database connection
 //! pool (`PgPool`, established by `db::establish_pool`, task 4.1), the
-//! non-determinism injection boundaries (`RuntimeContext`, task 5.6), and
-//! the validated startup configuration (`AppConfig`, task 2.1) — behind a
-//! single handle that is cheap to clone and safe to share across concurrent
-//! axum request handlers.
+//! non-determinism injection boundaries (`RuntimeContext`, task 5.6), the
+//! validated startup configuration (`AppConfig`, task 2.1), and (as of
+//! actor-model's task 6.1) the actor-model service bundle (`ActorModule`) —
+//! behind a single handle that is cheap to clone and safe to share across
+//! concurrent axum request handlers.
 //!
 //! Per design.md's "AppState" component ("State Management": "不変（起動時構築、
 //! 以後共有のみ）" / "`Arc` 共有、内部可変性なし"), `AppState` is built once at
@@ -29,6 +30,7 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
+use crate::actor::ActorModule;
 use crate::config::AppConfig;
 use crate::runtime::RuntimeContext;
 
@@ -39,6 +41,7 @@ struct AppStateInner {
     pool: PgPool,
     runtime: RuntimeContext,
     config: AppConfig,
+    actor: ActorModule,
 }
 
 /// Immutable, cheaply-cloneable shared handle bundling the database
@@ -56,16 +59,23 @@ pub struct AppState {
 
 impl AppState {
     /// Builds an `AppState` from an already-established pool, an
-    /// already-constructed runtime context, and an already-validated
-    /// config. Callers (the Bootstrap composition root, task 7.4) are
-    /// responsible for constructing each of these first — this constructor
-    /// only bundles them.
-    pub fn new(pool: PgPool, runtime: RuntimeContext, config: AppConfig) -> Self {
+    /// already-constructed runtime context, an already-validated config,
+    /// and an already-assembled actor-model service bundle. Callers (the
+    /// Bootstrap composition root, task 7.4/6.1) are responsible for
+    /// constructing each of these first — this constructor only bundles
+    /// them.
+    pub fn new(
+        pool: PgPool,
+        runtime: RuntimeContext,
+        config: AppConfig,
+        actor: ActorModule,
+    ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
                 pool,
                 runtime,
                 config,
+                actor,
             }),
         }
     }
@@ -92,5 +102,15 @@ impl AppState {
     /// re-reading configuration itself).
     pub fn config(&self) -> &AppConfig {
         &self.inner.config
+    }
+
+    /// The shared actor-model service bundle (Requirements 6.1, 6.4):
+    /// downstream handlers (future specs, e.g. api-foundation) retrieve
+    /// `ActorService`/`SigningKeyService`/`ActorDirectory` through this one
+    /// handle rather than constructing their own, so every caller observes
+    /// the same `KeyCache`-backed signing-key supply this instance was
+    /// booted with.
+    pub fn actor(&self) -> &ActorModule {
+        &self.inner.actor
     }
 }

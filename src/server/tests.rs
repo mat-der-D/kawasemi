@@ -32,12 +32,22 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
 use super::*;
-use crate::config::{AppConfig, DatabaseConfig, LogConfig, LogLevel, Secret, ServerConfig};
+use crate::actor::build_actor_module;
+use crate::actor::keys::cache::KeyCache;
+use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
+use crate::config::{
+    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, Secret, ServerConfig,
+};
 use crate::error::{AppError, GENERIC_SERVER_MESSAGE};
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::telemetry::{REQUEST_ID_FIELD, REQUEST_SPAN_NAME};
 
 const LAZY_TEST_DB_URL: &str = "postgres://lazy-user:lazy-pw@127.0.0.1:5432/lazy-test-db";
+
+/// Fixed, non-production KEK, only ever used to construct a `KeyCipher` for
+/// `test_state`'s `ActorModule` — no real key is ever sealed/opened here
+/// (see `test_state`'s own doc comment: this suite never actually connects).
+const TEST_KEK: [u8; 32] = [5u8; 32];
 
 /// Builds an `AppState` that never touches a real database: `connect_lazy`
 /// only parses the URL and configures the pool without dialing out (mirrors
@@ -60,13 +70,19 @@ fn test_state(seed: u64) -> AppState {
             level: LogLevel::Info,
             sql_diagnostic: false,
         },
+        actor: ActorConfig {
+            kek: Secret::new(TEST_KEK),
+        },
     };
     let pool = PgPoolOptions::new()
         .max_connections(config.database.max_connections)
         .connect_lazy(LAZY_TEST_DB_URL)
         .expect("connect_lazy only parses the URL; it never opens a connection");
     let runtime = RuntimeContext::deterministic(DeterministicSeed::new(seed));
-    AppState::new(pool, runtime, config)
+    let cipher: Arc<dyn KeyCipher> =
+        Arc::new(ChaCha20Poly1305KeyCipher::new(Secret::new(TEST_KEK)));
+    let actor_module = build_actor_module(pool.clone(), runtime.clone(), cipher, KeyCache::new());
+    AppState::new(pool, runtime, config, actor_module)
 }
 
 /// Speaks a minimal raw HTTP/1.1 GET request over a fresh `TcpStream` and

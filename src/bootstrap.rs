@@ -4,12 +4,22 @@
 //! Sequences dependencies in exactly the order design.md's Bootstrap
 //! component and "起動シーケンスと安全停止" flowchart specify: config ->
 //! telemetry -> db pool -> migrate -> runtime context -> `AppState` -> serve.
-//! Any failure at any of the first four stages aborts before the HTTP
+//! Any failure at any of these pre-serve stages aborts before the HTTP
 //! listener ever starts (Requirement 1.2) and is aggregated into a single
 //! [`BootstrapError`] that retains the real underlying `*Error` (never
 //! stringly-typed), per design.md's Error Strategy: "起動時エラー
 //! （Config/Db/Migrate/Telemetry/Bootstrap）は `*Error` 型で原因を保持し、
 //! `BootstrapError` に集約して `main` が診断出力 + 非ゼロ終了に変換する".
+//!
+//! As of actor-model's task 6.1, the "runtime context" stage itself expands
+//! into: load every active signing key from the database, open each one's
+//! sealed private key via a KEK-bound `ChaCha20Poly1305KeyCipher`, warm a
+//! `KeyCache`, build the real `DbSigningKeyProvider` around it, and *then*
+//! construct `RuntimeContext` around that provider (replacing
+//! [`crate::runtime::RuntimeContext::production`]'s
+//! `FixedSigningKeyProvider` placeholder) — see [`build_actor_wiring`]. A
+//! failure at this stage surfaces as [`BootstrapError::KeySupply`], still
+//! strictly before the HTTP listener is touched.
 //!
 //! ## Diagnostic-output placement
 //! `main.rs` already turns every `Err(BootstrapError)` it receives into an
@@ -72,13 +82,20 @@
 
 use std::fmt;
 use std::future::Future;
+use std::sync::Arc;
 
 use sqlx::PgPool;
 
+use crate::actor;
+use crate::actor::ActorModule;
+use crate::actor::keys::cache::KeyCache;
+use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
+use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::config::{self, AppConfig, ConfigError};
 use crate::db::{self, DbError};
+use crate::error::AppError;
 use crate::migrate::{self, MigrateError};
-use crate::runtime::RuntimeContext;
+use crate::runtime::{RuntimeContext, SnowflakeIdGenerator, SystemClock, SystemRng};
 use crate::server::{self, ServeError};
 use crate::state::AppState;
 use crate::telemetry::{self, TelemetryError};
@@ -106,6 +123,14 @@ pub enum BootstrapError {
     /// inconsistency was detected (Requirements 4.5, 4.6), before the HTTP
     /// listener was ever touched.
     Migrate(MigrateError),
+    /// Loading actor-model's persisted signing keys (to warm the startup
+    /// `KeyCache` that backs the real `DbSigningKeyProvider`, task 6.1,
+    /// Requirement 6.1) failed — either the database read itself failed, or
+    /// a persisted key's sealed private key could not be opened (e.g. the
+    /// configured `actor.kek` does not match the KEK the key was originally
+    /// sealed under). Surfaces before the HTTP listener is ever touched,
+    /// same as every other pre-serve stage.
+    KeySupply(AppError),
     /// The HTTP listener failed to bind.
     Serve(ServeError),
 }
@@ -120,10 +145,20 @@ impl fmt::Display for BootstrapError {
                 write!(f, "startup aborted while initializing telemetry: {e}")
             }
             BootstrapError::Db(e) => {
-                write!(f, "startup aborted while establishing the database pool: {e}")
+                write!(
+                    f,
+                    "startup aborted while establishing the database pool: {e}"
+                )
             }
             BootstrapError::Migrate(e) => {
                 write!(f, "startup aborted while applying embedded migrations: {e}")
+            }
+            BootstrapError::KeySupply(e) => {
+                // `AppError` implements neither `Display` nor
+                // `std::error::Error` (see `src/error.rs`; a core-runtime
+                // type out of this task's boundary to change), so `Debug`
+                // is the best available rendering here.
+                write!(f, "startup aborted while loading actor signing keys: {e:?}")
             }
             BootstrapError::Serve(e) => {
                 write!(f, "startup aborted while starting the HTTP listener: {e}")
@@ -134,13 +169,20 @@ impl fmt::Display for BootstrapError {
 
 impl std::error::Error for BootstrapError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(match self {
-            BootstrapError::Config(e) => e,
-            BootstrapError::Telemetry(e) => e,
-            BootstrapError::Db(e) => e,
-            BootstrapError::Migrate(e) => e,
-            BootstrapError::Serve(e) => e,
-        })
+        match self {
+            BootstrapError::Config(e) => Some(e),
+            BootstrapError::Telemetry(e) => Some(e),
+            BootstrapError::Db(e) => Some(e),
+            BootstrapError::Migrate(e) => Some(e),
+            // `AppError` does not implement `std::error::Error`, so there is
+            // no `&dyn Error` to hand back here — see this variant's
+            // `Display` arm above for why. Diagnostic detail is still
+            // available via `Display`/`Debug` and the `tracing::error!`
+            // this module emits before wrapping it (see
+            // `load_key_cache_with_diagnostics`).
+            BootstrapError::KeySupply(_) => None,
+            BootstrapError::Serve(e) => Some(e),
+        }
     }
 }
 
@@ -165,6 +207,12 @@ impl From<DbError> for BootstrapError {
 impl From<MigrateError> for BootstrapError {
     fn from(e: MigrateError) -> Self {
         BootstrapError::Migrate(e)
+    }
+}
+
+impl From<AppError> for BootstrapError {
+    fn from(e: AppError) -> Self {
+        BootstrapError::KeySupply(e)
     }
 }
 
@@ -201,11 +249,73 @@ async fn apply_migrations_with_diagnostics(pool: &PgPool) -> Result<(), Bootstra
     })
 }
 
+/// Loads and opens every currently active signing key (via
+/// [`crate::actor::load_key_cache`]), logging a structured diagnostic before
+/// converting a failure into a [`BootstrapError::KeySupply`] (Requirement
+/// 6.1). Mirrors [`establish_pool_with_diagnostics`]/
+/// [`apply_migrations_with_diagnostics`]'s own `*_with_diagnostics`
+/// convention: telemetry is already initialized by the time this stage
+/// runs, so a structured `tracing::error!` is emitted here in addition to
+/// the aggregated `BootstrapError` this function returns.
+///
+/// `error = ?err` (not `%err`, this module's usual convention) because
+/// [`AppError`] implements `Debug` but not `Display` — see this module's
+/// `BootstrapError::KeySupply` `Display` arm for the same reason.
+async fn load_key_cache_with_diagnostics(
+    pool: &PgPool,
+    cipher: &dyn KeyCipher,
+) -> Result<KeyCache, BootstrapError> {
+    actor::load_key_cache(pool, cipher).await.map_err(|err| {
+        tracing::error!(error = ?err, "startup aborted while loading actor signing keys");
+        BootstrapError::KeySupply(err)
+    })
+}
+
+/// Assembles the actor-model wiring (design.md's "ActorModule(bootstrap
+/// wiring)" component, Requirements 6.1, 6.4): builds a KEK-bound
+/// `ChaCha20Poly1305KeyCipher` from `cfg.actor.kek`, warms a `KeyCache` from
+/// every currently active signing key in `pool`
+/// ([`load_key_cache_with_diagnostics`]), builds the real
+/// `DbSigningKeyProvider` around that cache, and constructs a full
+/// production `RuntimeContext` around *that* provider instead of
+/// [`RuntimeContext::production`]'s `FixedSigningKeyProvider` placeholder —
+/// this task's whole point (see `RuntimeContext::production`'s own doc
+/// comment). Finally builds the three actor-model services
+/// (`SigningKeyService`, `ActorService`, `ActorDirectory`) via
+/// [`crate::actor::build_actor_module`], bundled as an [`ActorModule`].
+///
+/// Returns the freshly built `RuntimeContext` alongside the `ActorModule`
+/// because both are needed by [`build_state`]'s final `AppState::new` call,
+/// and this is the one place a real (non-placeholder) `RuntimeContext` is
+/// constructed for the production bootstrap path.
+async fn build_actor_wiring(
+    pool: &PgPool,
+    cfg: &AppConfig,
+) -> Result<(RuntimeContext, ActorModule), BootstrapError> {
+    let cipher: Arc<dyn KeyCipher> =
+        Arc::new(ChaCha20Poly1305KeyCipher::new(cfg.actor.kek.clone()));
+
+    let cache = load_key_cache_with_diagnostics(pool, cipher.as_ref()).await?;
+    let provider = DbSigningKeyProvider::new(cache.clone());
+
+    let runtime = RuntimeContext {
+        clock: Arc::new(SystemClock::new()),
+        ids: Arc::new(SnowflakeIdGenerator::new()),
+        rng: Arc::new(SystemRng::new()),
+        keys: Arc::new(provider),
+    };
+
+    let actor_module = actor::build_actor_module(pool.clone(), runtime.clone(), cipher, cache);
+
+    Ok((runtime, actor_module))
+}
+
 /// Runs the composition sequence up to (but not including) `serve`: config
-/// -> telemetry -> db pool -> migrate -> runtime context -> `AppState`
-/// (design.md's Bootstrap component, Requirement 1.1). Any failure aborts
-/// before the next stage runs and before the HTTP listener is ever touched
-/// (Requirement 1.2).
+/// -> telemetry -> db pool -> migrate -> actor-model key supply -> runtime
+/// context -> `AppState` (design.md's Bootstrap component, Requirement 1.1;
+/// the actor-model key-supply stage is task 6.1's own addition, Requirement
+/// 6.1). Any failure aborts before the next stage runs and before the HTTP
+/// listener is ever touched (Requirement 1.2).
 ///
 /// Shared by both [`bootstrap`] and [`bootstrap_with_shutdown_signal`] so
 /// the two differ only in which `serve_with_shutdown*` variant they call
@@ -223,8 +333,13 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     let pool = establish_pool_with_diagnostics(&cfg).await?;
     apply_migrations_with_diagnostics(&pool).await?;
 
-    let runtime = RuntimeContext::production();
-    Ok(AppState::new(pool, runtime, cfg))
+    // Replaces `RuntimeContext::production()`'s `FixedSigningKeyProvider`
+    // placeholder with the real, DB-backed `DbSigningKeyProvider` (task
+    // 6.1, Requirement 6.1) and assembles the actor-model service bundle
+    // `AppState` now carries.
+    let (runtime, actor_module) = build_actor_wiring(&pool, &cfg).await?;
+
+    Ok(AppState::new(pool, runtime, cfg, actor_module))
 }
 
 /// Assembles all application dependencies and runs the server

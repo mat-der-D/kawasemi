@@ -75,6 +75,7 @@
 mod tests;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -84,7 +85,12 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::config::{AppConfig, DatabaseConfig, LogConfig, LogLevel, Secret, ServerConfig};
+use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
+use crate::actor::keys::provider::DbSigningKeyProvider;
+use crate::actor::{self, ActorModule};
+use crate::config::{
+    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, Secret, ServerConfig,
+};
 use crate::db;
 use crate::migrate;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
@@ -116,6 +122,13 @@ const DEFAULT_TEST_SEED_VALUE: u64 = 424_242;
 fn default_test_seed() -> DeterministicSeed {
     DeterministicSeed::new(DEFAULT_TEST_SEED_VALUE)
 }
+
+/// Fixed, non-production Key-Encryption-Key every [`spawn_test_app`] call
+/// uses to build its `ChaCha20Poly1305KeyCipher` (task 6.1, Requirement
+/// 6.1). Fixed rather than per-call (mirroring [`DEFAULT_TEST_SEED_VALUE`]'s
+/// own "why fixed" reasoning) since no test needs KEK uniqueness across
+/// concurrently-running `TestApp`s, only a valid one.
+const TEST_KEK: [u8; 32] = [0x42; 32];
 
 /// Resolves the shared test database's connection URL: an explicit
 /// `KAWASEMI_TEST_DATABASE_URL` override if set, otherwise
@@ -227,8 +240,25 @@ pub struct TestApp {
     /// already applied.
     pub pool: PgPool,
     /// The deterministic non-determinism injection boundaries this instance
-    /// was booted with (Requirement 8.3).
+    /// was booted with (Requirement 8.3). `runtime.keys` is a deliberate,
+    /// documented exception to "everything here is deterministic": it is
+    /// always the real, DB-backed `DbSigningKeyProvider` (task 6.1,
+    /// Requirement 6.1) built the same way `bootstrap()`'s own production
+    /// path builds one, from a `KeyCache` scoped to this instance's isolated
+    /// schema — not [`crate::runtime::signing_key::FixedSigningKeyProvider`]
+    /// (the placeholder [`RuntimeContext::deterministic`] would otherwise
+    /// use). This is what lets an integration test built on `spawn_test_app`
+    /// prove actor creation -> key supply -> rotation end to end through the
+    /// real supply boundary, not a fixed stand-in.
     pub runtime: RuntimeContext,
+    /// The actor-model service bundle this instance was booted with,
+    /// wired the same way `bootstrap()`'s own production path wires one
+    /// (`crate::actor::build_actor_module`, task 6.1): the same `KeyCache`
+    /// instance backs both this field's `SigningKeyService` and
+    /// `runtime.keys`'s `DbSigningKeyProvider`, so writes made through
+    /// `actor.signing_key_service()`/`actor.actor_service()` are
+    /// immediately observable via `runtime.keys.signing_key(..)`.
+    pub actor: ActorModule,
     /// Name of this instance's isolated PostgreSQL schema (Requirement 8.4).
     /// `Some` until whichever of [`TestApp::cleanup`] or `Drop` runs first
     /// takes it, so the schema is torn down exactly once even though `Drop`
@@ -340,7 +370,11 @@ impl Drop for TestApp {
 /// Service Interface): creates a fresh isolated PostgreSQL schema
 /// (Requirement 8.4), establishes a pool pinned to it and applies the
 /// embedded migrations against it (Requirement 8.2), builds a deterministic
-/// [`RuntimeContext`] (Requirement 8.3), and serves the real foundation
+/// [`RuntimeContext`] (Requirement 8.3) whose `keys` boundary is nonetheless
+/// the real, DB-backed `DbSigningKeyProvider` (task 6.1, Requirement 6.1 —
+/// see [`TestApp::runtime`]'s own doc comment), assembles the actor-model
+/// service bundle the same way `bootstrap()`'s production path does
+/// (`crate::actor::build_actor_module`), and serves the real foundation
 /// router ([`crate::server::build_router`]) on a freshly bound ephemeral TCP
 /// listener (Requirement 8.1) — reusing the same Bootstrap building blocks
 /// [`crate::bootstrap::bootstrap`] itself composes, rather than
@@ -371,7 +405,30 @@ pub async fn spawn_test_app() -> TestApp {
         .await
         .expect("applying embedded migrations to the isolated test schema must succeed");
 
-    let runtime = RuntimeContext::deterministic(default_test_seed());
+    // `clock`/`ids`/`rng` stay deterministic (Requirement 8.3); `keys` is
+    // swapped for the real, DB-backed `DbSigningKeyProvider` (task 6.1)
+    // instead of `RuntimeContext::deterministic`'s own seed-derived
+    // `FixedSigningKeyProvider` placeholder, so a `TestApp`'s
+    // `RuntimeContext.keys` exercises the exact same supply path
+    // `bootstrap()` wires in production (Requirements 6.1, 6.4) rather than
+    // a fixed stand-in. The freshly migrated schema starts with no signing
+    // keys at all, so the cache warm below is expected to load zero entries
+    // — `ActorService::create_actor`/`SigningKeyService::provision_key`
+    // populate it afterward through the same `KeyCache` handle.
+    let deterministic = RuntimeContext::deterministic(default_test_seed());
+    let cipher: Arc<dyn KeyCipher> =
+        Arc::new(ChaCha20Poly1305KeyCipher::new(Secret::new(TEST_KEK)));
+    let cache = actor::load_key_cache(&pool, cipher.as_ref())
+        .await
+        .expect("loading the freshly migrated (empty) signing key cache must succeed");
+    let runtime = RuntimeContext {
+        clock: deterministic.clock,
+        ids: deterministic.ids,
+        rng: deterministic.rng,
+        keys: Arc::new(DbSigningKeyProvider::new(cache.clone())),
+    };
+    let actor_module: ActorModule =
+        actor::build_actor_module(pool.clone(), runtime.clone(), cipher, cache);
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -391,9 +448,12 @@ pub async fn spawn_test_app() -> TestApp {
             level: LogLevel::Error,
             sql_diagnostic: false,
         },
+        actor: ActorConfig {
+            kek: Secret::new(TEST_KEK),
+        },
     };
 
-    let state = AppState::new(pool.clone(), runtime.clone(), config);
+    let state = AppState::new(pool.clone(), runtime.clone(), config, actor_module.clone());
     let router = server::build_router(state);
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -409,6 +469,7 @@ pub async fn spawn_test_app() -> TestApp {
         address,
         pool,
         runtime,
+        actor: actor_module,
         schema: Some(schema),
         shutdown_tx: Some(shutdown_tx),
         server_task: Some(server_task),

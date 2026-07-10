@@ -102,6 +102,15 @@ async fn assert_bootstrap_fails_fast_when_the_database_is_unreachable() {
         std::env::set_var("KAWASEMI_DATABASE_ACQUIRE_TIMEOUT_SECS", "2");
         std::env::set_var("KAWASEMI_SERVER_BIND_ADDR", DB_FAILURE_BIND_ADDR);
         std::env::set_var("KAWASEMI_LOG_LEVEL", "error");
+        // actor-model's task 6.1 startup secret (Requirement 6.1): must be
+        // valid here so config loading succeeds and this scenario actually
+        // reaches the db-pool stage (asserting `BootstrapError::Db`, not
+        // `BootstrapError::Config`). A fixed, non-production 64-hex-char
+        // value — never a real secret.
+        std::env::set_var(
+            "KAWASEMI_ACTOR_KEK",
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        );
     }
 
     assert!(

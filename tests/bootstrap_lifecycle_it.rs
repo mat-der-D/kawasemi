@@ -109,6 +109,15 @@ fn set_bootstrap_env() {
         std::env::set_var("KAWASEMI_SERVER_SHUTDOWN_GRACE_SECS", "2");
         std::env::set_var("KAWASEMI_DATABASE_URL", test_db_url());
         std::env::set_var("KAWASEMI_LOG_LEVEL", "error");
+        // actor-model's task 6.1 startup secret (Requirement 6.1): required
+        // for `config::load_config()` to succeed since this test drives a
+        // real `bootstrap()` all the way to a listen-ready server, which
+        // now also warms the actor-model signing-key cache. A fixed,
+        // non-production 64-hex-char value — never a real secret.
+        std::env::set_var(
+            "KAWASEMI_ACTOR_KEK",
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        );
     }
 }
 
@@ -117,13 +126,11 @@ async fn bind_addr_is_connectable() -> bool {
 }
 
 async fn raw_http_get(addr: &str, path: &str) -> String {
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::net::TcpStream::connect(addr),
-    )
-    .await
-    .expect("connecting to the listen-ready address must not time out")
-    .expect("connect");
+    let mut stream =
+        tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
+            .await
+            .expect("connecting to the listen-ready address must not time out")
+            .expect("connect");
     let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())

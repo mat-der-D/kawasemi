@@ -11,8 +11,11 @@
 
 use std::error::Error as _;
 
+use axum::http::StatusCode;
+
 use super::*;
 use crate::config::ConfigIssue;
+use crate::error::AppError;
 
 #[test]
 fn config_error_is_wrapped_with_source_and_display_preserved() {
@@ -65,7 +68,31 @@ fn each_bootstrap_error_variant_identifies_its_own_stage_in_display() {
     });
     assert!(config_err.to_string().contains("configuration"));
 
-    let telemetry_err =
-        BootstrapError::from(TelemetryError::InvalidFilter("bad".to_string()));
+    let telemetry_err = BootstrapError::from(TelemetryError::InvalidFilter("bad".to_string()));
     assert!(telemetry_err.to_string().contains("telemetry"));
+}
+
+/// Requirement 6.1 (actor-model, task 6.1): a failure loading/opening
+/// actor-model's persisted signing keys must aggregate into
+/// `BootstrapError::KeySupply`, identify its own stage in `Display` (like
+/// every other variant, see the test above), and -- unlike every other
+/// variant -- report `None` from `Error::source`, since `AppError` itself
+/// does not implement `std::error::Error` (see `src/error.rs`).
+#[test]
+fn key_supply_error_is_wrapped_and_identifies_its_own_stage_in_display_with_no_source_chain() {
+    let inner = AppError::server(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "sealed key would not open",
+    );
+    let err = BootstrapError::from(inner);
+
+    assert!(matches!(err, BootstrapError::KeySupply(_)));
+    assert!(
+        err.to_string().contains("actor signing keys"),
+        "BootstrapError::KeySupply's Display must identify its own stage: {err}"
+    );
+    assert!(
+        err.source().is_none(),
+        "AppError does not implement std::error::Error, so KeySupply must report no source chain"
+    );
 }

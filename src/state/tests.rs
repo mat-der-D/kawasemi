@@ -20,10 +20,21 @@ use std::time::Duration;
 use sqlx::postgres::PgPoolOptions;
 
 use super::*;
-use crate::config::{AppConfig, DatabaseConfig, LogConfig, LogLevel, Secret, ServerConfig};
+use crate::actor::keys::cache::KeyCache;
+use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
+use crate::actor::{ActorModule, build_actor_module};
+use crate::config::{
+    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, Secret, ServerConfig,
+};
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 
 const LAZY_TEST_DB_URL: &str = "postgres://lazy-user:lazy-pw@127.0.0.1:5432/lazy-test-db";
+
+/// Fixed, non-production KEK used only to construct a `KeyCipher` for these
+/// tests' `ActorModule` — no real signing key is ever generated/opened
+/// against a live database here (see `lazy_pool`'s own doc comment: this
+/// suite never actually connects).
+const TEST_KEK: [u8; 32] = [11u8; 32];
 
 fn sample_config(domain: &str, max_connections: u32) -> AppConfig {
     AppConfig {
@@ -41,6 +52,9 @@ fn sample_config(domain: &str, max_connections: u32) -> AppConfig {
             level: LogLevel::Info,
             sql_diagnostic: false,
         },
+        actor: ActorConfig {
+            kek: Secret::new(TEST_KEK),
+        },
     }
 }
 
@@ -49,6 +63,18 @@ fn lazy_pool(max_connections: u32) -> sqlx::PgPool {
         .max_connections(max_connections)
         .connect_lazy(LAZY_TEST_DB_URL)
         .expect("connect_lazy only parses the URL; it never opens a connection")
+}
+
+/// Builds an `ActorModule` sharing `pool`/`runtime`, mirroring
+/// `src/actor.rs`'s own `build_actor_module` (which these tests reuse
+/// directly rather than hand-rolling the same wiring) with a fresh, empty
+/// `KeyCache` — these tests never provision/rotate a real key, only assert
+/// on `AppState`'s own bundling/cloning behavior, so an empty cache is
+/// sufficient.
+fn sample_actor_module(pool: sqlx::PgPool, runtime: RuntimeContext) -> ActorModule {
+    let cipher: Arc<dyn KeyCipher> =
+        Arc::new(ChaCha20Poly1305KeyCipher::new(Secret::new(TEST_KEK)));
+    build_actor_module(pool, runtime, cipher, KeyCache::new())
 }
 
 /// Requirements 1.1, 3.3, 5.5, 5.6: downstream code must be able to retrieve
@@ -61,8 +87,9 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
     let runtime = RuntimeContext::deterministic(seed);
     let config = sample_config("state.example.test", 7);
     let pool = lazy_pool(config.database.max_connections);
+    let actor = sample_actor_module(pool.clone(), runtime.clone());
 
-    let state = AppState::new(pool, runtime, config.clone());
+    let state = AppState::new(pool, runtime, config.clone(), actor);
 
     // Config values are retrievable and match what was supplied.
     assert_eq!(state.config().server.domain, "state.example.test");
@@ -109,8 +136,9 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
     let runtime = RuntimeContext::deterministic(DeterministicSeed::new(1));
     let config = sample_config("clone.example.test", 3);
     let pool = lazy_pool(config.database.max_connections);
+    let actor = sample_actor_module(pool.clone(), runtime.clone());
 
-    let state = AppState::new(pool, runtime, config);
+    let state = AppState::new(pool, runtime, config, actor);
     assert_eq!(Arc::strong_count(&state.inner), 1);
 
     let cloned = state.clone();
