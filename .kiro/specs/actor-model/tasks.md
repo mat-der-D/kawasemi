@@ -71,7 +71,7 @@
   - _Requirements: 1.1, 1.3, 1.5, 1.6, 2.2, 2.3, 7.2, 7.3, 7.5_
   - _Boundary: ActorService_
   - _Depends: 2.1, 2.2, 4.1_
-- [ ] 5.2 下流向けアクター参照を実装する
+- [x] 5.2 下流向けアクター参照を実装する
   - `ActorDirectory` で管理層 `list_actors_for_owner` と、プロトコル層 `resolve_actor_by_handle`・`actor_public_key` を実装し、後二者は owner を含まない参照型のみ返す
   - 観測可能な完了条件: オーナー別一覧が当該オーナー分のみ返し、ハンドル解決・公開鍵供給の戻り値に owner 情報が含まれない
   - _Requirements: 2.5, 3.1, 3.2, 3.3, 8.1, 8.2, 8.3, 8.4_
@@ -117,3 +117,4 @@
 - 4.1: `provision_key`（呼び出し元のトランザクションに相乗り）は `KeyCache` を呼び出し元のコミット確定前に更新する（design.md のシーケンス図どおり、コミットをゲートにしていない）。呼び出し元（5.1 `ActorService::create_actor`）のトランザクションが後続失敗でロールバックした場合、キャッシュは一時的に未永続アクターの鍵を保持しうる — DB 側は正しくロールバックされる（`provision_key_write_is_rolled_back_if_the_callers_transaction_is_rolled_back` で検証済み）ため実害は限定的だが、5.1 実装時にこのレースを再確認すること。一方 `rotate_key` は自前トランザクションを `commit` した後にのみキャッシュを更新するため、この種のレースは発生しない。`rotate_key` のアクター不在チェック（`find_by_id`）とその後の retire+insert トランザクションは別ラウンドトリップ（TOCTOU の余地）だが、現状コードベースにアクター削除経路が無いため到達不能と判断（将来アクター削除が実装されたら再検証すること）。不在アクターへのローテーションは `404 Not Found`（`ErrorKind::Client`）にマップした（`ActorRepository` の重複ハンドル `409` に続く、命名された失敗条件に特定の 4xx を割り当てる先例に整合）。
 - 4.2: `DbSigningKeyProvider` は `KeyCache::get` への薄い同期パススルーのみ（`_Boundary: DbSigningKeyProvider_` のため `KeyCache` 自体は無変更）。`Debug` は `Clone` のみ導出し `Debug` は導出していない（`KeyCache` 自身が `Debug` を導出していないため）。core-runtime の `FixedSigningKeyProvider` は `Debug, Clone` 両方を導出しており非対称だが、6.1（bootstrap/AppState 配線）で `KeyCache` に `Debug` を追加する判断が必要になった場合はそちらで解消すること（本タスクの Boundary 外と判断）。`RuntimeContext` への実配線（本番 `SigningKeyProvider` としての注入）も 6.1 の範囲。
 - 5.1: `ActorService::create_actor` は `self.pool.begin()` で開いた単一トランザクションを `insert_actor` → `SigningKeyService::provision_key` の順に駆動し、明示的な `rollback()` 呼び出しではなく早期 `?` return によるトランザクションの drop に委ねている（`SigningKeyService::rotate_key` と同じ流儀）。4.1 のノートが指摘した「`provision_key` はコミット前にキャッシュを更新する」レースは 5.1 でも解消していない（設計のシーケンス図どおりの実装であり、5.1 の Boundary 外の再設計が必要なため）。`ActorService::new` は `signing_key_service: Arc<SigningKeyService>` をコンストラクタ注入で受け取る形にした。6.1（bootstrap/AppState 配線）は `SigningKeyService` を `Arc` で包んで `ActorService`/他の消費者に共有する前提で配線すること。`NewActor.handle` は `Handle`（値ではなく既に構築済みの値オブジェクト）を要求するため、ハンドル形式検証（1.6）は `Handle::new` の呼び出し側（将来の 5.2/6.1 配線や API 層）が担う。
+- 5.2: `ActorDirectory` は `PgPool` のみを保持し（`RuntimeContext` 不要、design.md のアーキテクチャ図どおり書き込みが無い）、`list_actors_for_owner`/`resolve_actor_by_handle` は `LocalActor` を `owner_id: _` で明示的に破棄する非網羅 `..` 無しの分解パターンで `ActorSummary`/`ResolvedActor` へ投影している（`model.rs` が確立した owner 非露出の実証パターンを踏襲）。`actor_public_key` は `keys::repository::find_active_public_key` への薄い委譲のみ（そちらが既に owner を含まない `ActorPublicKey` を返すため）。6.1（bootstrap/AppState 配線）は `ActorDirectory::new(pool)` を `ActorService`/`SigningKeyService` と並べて `ActorModule` に組み込む想定。

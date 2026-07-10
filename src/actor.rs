@@ -19,18 +19,23 @@
 //!   via the `Handle` type -> owner-existence check -> active-initialized
 //!   insert -> signing-key provisioning, all in one transaction) and basic
 //!   lifecycle (deactivation) — see [`service`].
+//! - Task 5.2 (`Boundary: ActorDirectory`): downstream-facing actor
+//!   reference operations — management-layer owner-scoped listing
+//!   (`list_actors_for_owner`) and protocol-layer handle resolution /
+//!   public-key supply (`resolve_actor_by_handle`, `actor_public_key`),
+//!   neither of which surfaces owner information — see [`directory`].
 //!
-//! `ActorDirectory` / `keys`'s `material`/`cipher`/`service`/`cache`/
-//! `provider` submodules are later/already-landed tasks per design.md's File
-//! Structure Plan; `ActorDirectory` (task 5.2) is deliberately not declared
-//! here until that task lands.
+//! `keys`'s `material`/`cipher`/`service`/`cache`/`provider` submodules are
+//! later/already-landed tasks per design.md's File Structure Plan.
 
+pub mod directory;
 pub mod keys;
 pub mod model;
 pub mod owner;
 pub mod repository;
 pub mod service;
 
+pub use directory::ActorDirectory;
 pub use model::{
     ActorPublicKey, ActorState, ActorSummary, ActorType, Handle, LocalActor, Owner, ResolvedActor,
 };
