@@ -19,11 +19,19 @@
 //!   via AEAD, keyed by a boot-config KEK and an injected-rng nonce — see
 //!   [`cipher`].
 //!
-//! `service` (`SigningKeyService`, task 4.1), `cache` (`KeyCache`, task
-//! 4.1), and `provider` (`DbSigningKeyProvider`, task 4.2) are later tasks
-//! per design.md's File Structure Plan, and are deliberately not declared
-//! here until those tasks land.
+//! - Task 4.1 (`Boundary: SigningKeyService, KeyCache`): the in-memory
+//!   `KeyRef` -> active-`SigningKey` store that a synchronous supply
+//!   boundary reads from — see [`cache`] — and the business service that
+//!   generates/seals/persists a key at actor-creation time and drives
+//!   at-most-one-active-key rotation, keeping [`cache`] in sync with every
+//!   write — see [`service`].
+//!
+//! `provider` (`DbSigningKeyProvider`, task 4.2) is a later task per
+//! design.md's File Structure Plan, and is deliberately not declared here
+//! until that task lands.
 
+pub mod cache;
 pub mod cipher;
 pub mod material;
 pub mod repository;
+pub mod service;
