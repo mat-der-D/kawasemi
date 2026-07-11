@@ -111,6 +111,19 @@ async fn assert_bootstrap_fails_fast_when_the_database_is_unreachable() {
             "KAWASEMI_ACTOR_KEK",
             "2222222222222222222222222222222222222222222222222222222222222222",
         );
+        // api-foundation's task 1.2 startup secrets (Requirements 2.2, 3.6):
+        // must also be valid here so config loading succeeds and this
+        // scenario actually reaches the db-pool stage (asserting
+        // `BootstrapError::Db`, not `BootstrapError::Config`). Fixed,
+        // non-production values — never real secrets.
+        std::env::set_var(
+            "KAWASEMI_OWNER_PASSWORD",
+            "bootstrap-fail-fast-it-owner-passphrase",
+        );
+        std::env::set_var(
+            "KAWASEMI_OAUTH_TOKEN_HASH_KEY",
+            "3333333333333333333333333333333333333333333333333333333333333333",
+        );
     }
 
     assert!(

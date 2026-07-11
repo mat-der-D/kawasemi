@@ -20,7 +20,14 @@
 //! via `Debug`/`Display`/log output. `actor.kek` (task 6.1, actor-model's
 //! Requirement 6.1) is wrapped the same way, for the same reason: it is a
 //! Key-Encryption-Key, not a database credential, but it is exactly as
-//! secret-bearing.
+//! secret-bearing. `owner.password` and `oauth.token_hash_key`
+//! (api-foundation's task 1.2, Requirements 2.2/3.6) extend this same
+//! discipline to two more startup secrets: the shared passphrase a later
+//! `OwnerGate` (task 4.1) compares in constant time to authenticate the
+//! single-owner operator, and the keyed hashing material a later OAuth
+//! repository layer (tasks 3.1-3.3) uses to hash client secrets,
+//! authorization codes, and access tokens before persisting them — neither
+//! may ever appear in plaintext via `Debug`/`Display`/log output either.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -56,6 +63,19 @@ pub struct AppConfig {
     /// know what a KEK is used for; `crate::actor::keys::cipher` is the
     /// consumer.
     pub actor: ActorConfig,
+    /// api-foundation's owner-authentication startup secret (design.md's
+    /// Modified Files: "起動設定にオーナー資格情報（`Secret<T>`）...の項目を
+    /// 追加", Requirement 2.2). core-runtime only hosts this field; a later
+    /// task's `OwnerGate` is the consumer (design.md's OwnerGate: "起動設定
+    /// （`Secret<T>`）のオーナー資格情報を定数時間比較で照合").
+    pub owner: OwnerConfig,
+    /// api-foundation's token-hashing startup secret (design.md's Modified
+    /// Files: "...とトークンハッシュ用素材（`Secret<T>`）の項目を追加",
+    /// Requirement 3.6). core-runtime only hosts this field; a later task's
+    /// OAuth repository layer is the consumer (design.md's Physical Data
+    /// Model: `client_secret_hash`/`code_hash`/`token_hash`, "同一規約で
+    /// ハッシュ化").
+    pub oauth: OauthConfig,
 }
 
 /// Server-facing startup settings.
@@ -107,6 +127,60 @@ pub struct ActorConfig {
     /// (mirrors `DatabaseConfig::url`'s masking convention, Requirement
     /// 2.5).
     pub kek: Secret<[u8; 32]>,
+}
+
+/// api-foundation's owner-authentication startup settings: currently just
+/// the shared secret a later `OwnerGate` (task 4.1) compares in constant
+/// time to authenticate the single human operator of this instance
+/// (design.md "Modified Files": "起動設定にオーナー資格情報（`Secret<T>`）
+/// ...の項目を追加"; OwnerGate's Responsibilities: "起動設定（`Secret<T>`）
+/// のオーナー資格情報を定数時間比較で照合（一人鯖の単一オーナー前提）").
+///
+/// Design choice (single passphrase, not username+password): this is a
+/// one-owner-per-instance server ("一人鯖前提"). design.md's OwnerGate is
+/// explicit that after this credential is verified, the authenticated
+/// owner's identity is resolved separately via actor-model's single-owner
+/// accessor (`ActorDirectory::sole_owner()`), not from anything supplied
+/// here — so the config value itself does not need to encode a username or
+/// identity, only a shared secret the owner proves knowledge of. A single
+/// `password` field is therefore sufficient and keeps this struct as
+/// minimal as `ActorConfig`'s single `kek` field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnerConfig {
+    /// Shared passphrase proving ownership. Required, like `database.url`/
+    /// `actor.kek` — a security-critical secret has no safe default to fall
+    /// back to. Wrapped in [`Secret`] so it never prints in plaintext via
+    /// `Debug`/`Display`/log output (mirrors `ActorConfig::kek`'s masking
+    /// convention, Requirement 2.5's discipline extended to this field).
+    /// Validated only for a minimal non-triviality floor (see
+    /// [`validate_owner_password`]) — unlike `actor.kek`/
+    /// `oauth.token_hash_key`, a human-chosen passphrase has no natural
+    /// fixed encoding to validate against.
+    pub password: Secret<String>,
+}
+
+/// api-foundation's OAuth startup settings: currently just the keyed
+/// hashing material a later OAuth repository layer (tasks 3.1-3.3) uses to
+/// hash client secrets, authorization codes, and access tokens before
+/// persisting them (design.md's Physical Data Model: `client_secret_hash`/
+/// `code_hash`/`token_hash` columns, "同一規約でハッシュ化"; Requirement
+/// 3.6: access token values must never reach diagnostic logs in plaintext).
+/// core-runtime only hosts this field — it does not itself know what a
+/// keyed hash is used for, mirroring `ActorConfig::kek`'s precedent of a
+/// downstream-consumed `Secret<T>` startup item.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OauthConfig {
+    /// Keyed hashing material ("pepper") for OAuth client secrets/
+    /// authorization codes/access tokens. Required, like `actor.kek` — no
+    /// safe default exists for a secret whose entire purpose is making
+    /// stored hashes unforgeable without it. Supplied as a 64-character
+    /// hexadecimal string (256 bits, see [`validate_token_hash_key`]) and
+    /// wrapped in [`Secret`] so it never prints in plaintext via
+    /// `Debug`/`Display`/log output. Mirrors `actor.kek`'s exact
+    /// shape/validation: both are fixed-length secret material for a keyed
+    /// cryptographic primitive with no natural human-typable format beyond
+    /// hex.
+    pub token_hash_key: Secret<[u8; 32]>,
 }
 
 /// Logging/diagnostics startup settings.
@@ -310,6 +384,19 @@ fn load_config_from(
 
     let kek = required(&source, "actor.kek", validate_kek, &mut issues);
 
+    let owner_password = required_string(
+        &source,
+        "owner.password",
+        validate_owner_password,
+        &mut issues,
+    );
+    let token_hash_key = required(
+        &source,
+        "oauth.token_hash_key",
+        validate_token_hash_key,
+        &mut issues,
+    );
+
     let level = optional(
         &source,
         "log.level",
@@ -351,6 +438,18 @@ fn load_config_from(
         actor: ActorConfig {
             kek: Secret::new(
                 kek.expect("validated above: no issues means all required fields present"),
+            ),
+        },
+        owner: OwnerConfig {
+            password: Secret::new(
+                owner_password
+                    .expect("validated above: no issues means all required fields present"),
+            ),
+        },
+        oauth: OauthConfig {
+            token_hash_key: Secret::new(
+                token_hash_key
+                    .expect("validated above: no issues means all required fields present"),
             ),
         },
     })
@@ -422,11 +521,40 @@ fn validate_db_url(raw: &str) -> Result<String, String> {
 /// [`validate_db_url`]'s same discipline (Requirement 2.5's masking
 /// convention extended to this field).
 ///
+/// Delegates its parsing rule to [`validate_hex_256_bits`], shared with
+/// [`validate_token_hash_key`]: both fields are fixed-length secret material
+/// for a keyed cryptographic primitive with no natural human-typable format
+/// beyond hex, so the validation logic itself has nothing field-specific
+/// left to differ on — only these doc comments (and the dotted config path
+/// each is registered under) do.
+fn validate_kek(raw: &str) -> Result<[u8; 32], String> {
+    validate_hex_256_bits(raw)
+}
+
+/// Validates OAuth token-hashing material: exactly 64 hexadecimal characters
+/// (case-insensitive), decoding to a fixed 256-bit byte array. Deliberately
+/// never echoes the raw value in error messages, mirroring
+/// [`validate_kek`]'s same discipline (Requirement 3.6: this key exists
+/// specifically so tokens are never stored/logged in plaintext, so it must
+/// not itself leak into a diagnostic message on malformed input).
+///
+/// See [`validate_kek`]'s doc comment for why this shares
+/// [`validate_hex_256_bits`] rather than duplicating the parsing loop.
+fn validate_token_hash_key(raw: &str) -> Result<[u8; 32], String> {
+    validate_hex_256_bits(raw)
+}
+
+/// Decodes exactly 64 hexadecimal characters (case-insensitive) into a
+/// fixed 256-bit byte array. Shared parsing rule for [`validate_kek`] and
+/// [`validate_token_hash_key`] (see their doc comments for why sharing this
+/// helper, rather than importing one validator into the other's module,
+/// keeps the two concerns decoupled while still avoiding duplicated logic).
+///
 /// Operates on `char`s (not raw bytes) so a malformed value containing
 /// multi-byte UTF-8 characters cannot panic on a byte boundary that splits
 /// one — it is simply reported as the wrong length or a non-hex character,
 /// like any other malformed input.
-fn validate_kek(raw: &str) -> Result<[u8; 32], String> {
+fn validate_hex_256_bits(raw: &str) -> Result<[u8; 32], String> {
     let chars: Vec<char> = raw.trim().chars().collect();
     if chars.len() != 64 {
         return Err(format!(
@@ -442,6 +570,28 @@ fn validate_kek(raw: &str) -> Result<[u8; 32], String> {
             .map_err(|_| "must contain only hexadecimal characters (0-9, a-f, A-F)".to_string())?;
     }
     Ok(bytes)
+}
+
+/// Validates the owner's shared passphrase: non-empty and at least 8
+/// characters after trimming. Deliberately never echoes the raw value in
+/// error messages, mirroring [`validate_db_url`]/[`validate_kek`]'s same
+/// discipline — a malformed (e.g. too-short) password is still
+/// secret-bearing input.
+///
+/// Unlike `actor.kek`/`oauth.token_hash_key`, a human-chosen passphrase has
+/// no natural fixed encoding to validate structurally; the 8-character
+/// floor only catches obviously-trivial misconfiguration (e.g. a
+/// placeholder like `"x"` left in a config file) and is not a substitute
+/// for the owner choosing a genuinely strong passphrase.
+fn validate_owner_password(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("must not be empty".to_string());
+    }
+    if trimmed.chars().count() < 8 {
+        return Err("must be at least 8 characters".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 /// Merged view over a parsed TOML document and an environment-variable map,

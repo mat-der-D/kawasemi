@@ -20,6 +20,18 @@ fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
 /// differ between cases.
 const VALID_KEK_HEX: &str = "ab00cd11ef22ab00cd11ef22ab00cd11ef22ab00cd11ef22ab00cd11ef22abcd";
 
+/// A valid `owner.password`: an arbitrary passphrase meeting
+/// [`super::validate_owner_password`]'s minimum-length rule. Shared the same
+/// way [`VALID_KEK_HEX`] is.
+const VALID_OWNER_PASSWORD: &str = "correct-horse-battery-staple";
+
+/// A valid `oauth.token_hash_key`: 64 hex characters (256 bits), distinct
+/// from [`VALID_KEK_HEX`] so tests can tell the two fields apart if one were
+/// accidentally read in place of the other. Shared the same way
+/// [`VALID_KEK_HEX`] is.
+const VALID_TOKEN_HASH_KEY_HEX: &str =
+    "11aa22bb33cc44dd11aa22bb33cc44dd11aa22bb33cc44dd11aa22bb33cc44dd";
+
 const VALID_TOML: &str = r#"
 [server]
 domain = "toml.example"
@@ -33,6 +45,12 @@ acquire_timeout_secs = 3
 
 [actor]
 kek = "ab00cd11ef22ab00cd11ef22ab00cd11ef22ab00cd11ef22ab00cd11ef22abcd"
+
+[owner]
+password = "toml-owner-passphrase"
+
+[oauth]
+token_hash_key = "11aa22bb33cc44dd11aa22bb33cc44dd11aa22bb33cc44dd11aa22bb33cc44dd"
 
 [log]
 level = "debug"
@@ -62,6 +80,8 @@ fn env_only_config_with_no_toml_file_is_valid() {
         ("KAWASEMI_SERVER_DOMAIN", "env-only.example"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let config = load_config_from(None, &overrides).expect("env-only config should be sufficient");
 
@@ -83,6 +103,8 @@ fn missing_required_domain_aborts_with_identified_field() {
     let overrides = env(&[
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let err = load_config_from(None, &overrides)
         .expect_err("domain missing from both TOML and env must fail");
@@ -99,6 +121,8 @@ fn missing_required_database_url_aborts_with_identified_field() {
     let overrides = env(&[
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let err = load_config_from(None, &overrides)
         .expect_err("database url missing from both TOML and env must fail");
@@ -115,11 +139,47 @@ fn missing_required_kek_aborts_with_identified_field() {
     let overrides = env(&[
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let err = load_config_from(None, &overrides).expect_err("missing KEK must fail");
 
     let missing: Vec<&str> = err.missing_fields().collect();
     assert_eq!(missing, vec!["actor.kek"]);
+    assert!(err.malformed_fields().next().is_none());
+}
+
+#[test]
+fn missing_required_owner_password_aborts_with_identified_field() {
+    // Mirrors missing_required_kek_aborts_with_identified_field: the owner
+    // credential is required, like the other startup secrets — a missing
+    // value is reported, not silently defaulted (there is no safe default
+    // for "the passphrase that proves you are the server owner").
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("missing owner password must fail");
+
+    let missing: Vec<&str> = err.missing_fields().collect();
+    assert_eq!(missing, vec!["owner.password"]);
+    assert!(err.malformed_fields().next().is_none());
+}
+
+#[test]
+fn missing_required_token_hash_key_aborts_with_identified_field() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("missing token hash key must fail");
+
+    let missing: Vec<&str> = err.missing_fields().collect();
+    assert_eq!(missing, vec!["oauth.token_hash_key"]);
     assert!(err.malformed_fields().next().is_none());
 }
 
@@ -130,7 +190,16 @@ fn multiple_missing_required_fields_are_all_reported() {
 
     let mut missing: Vec<&str> = err.missing_fields().collect();
     missing.sort_unstable();
-    assert_eq!(missing, vec!["actor.kek", "database.url", "server.domain"]);
+    assert_eq!(
+        missing,
+        vec![
+            "actor.kek",
+            "database.url",
+            "oauth.token_hash_key",
+            "owner.password",
+            "server.domain",
+        ]
+    );
 }
 
 #[test]
@@ -141,6 +210,8 @@ fn malformed_domain_aborts_with_identified_field() {
         ("KAWASEMI_SERVER_DOMAIN", "not a domain with spaces"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let err = load_config_from(None, &overrides).expect_err("malformed domain must fail");
 
@@ -158,6 +229,8 @@ fn malformed_database_url_aborts_with_identified_field_and_no_secret_leak() {
             "mysql://user:supersecret@localhost/db",
         ),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let err = load_config_from(None, &overrides).expect_err("non-postgres URL must fail");
 
@@ -174,6 +247,8 @@ fn malformed_kek_wrong_length_is_reported_as_malformed_not_missing() {
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", "not-64-hex-chars"),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let err = load_config_from(None, &overrides).expect_err("wrong-length KEK must fail");
 
@@ -189,6 +264,8 @@ fn malformed_kek_non_hex_characters_is_reported_as_malformed() {
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", non_hex_kek.as_str()),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let err = load_config_from(None, &overrides).expect_err("non-hex KEK must fail");
 
@@ -202,6 +279,8 @@ fn malformed_kek_does_not_leak_the_raw_value_in_the_error_message() {
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", "not-a-valid-kek-value-at-all"),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let err = load_config_from(None, &overrides).expect_err("malformed KEK must fail");
 
@@ -214,6 +293,8 @@ fn valid_kek_hex_decodes_to_the_expected_bytes() {
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let config = load_config_from(None, &overrides).expect("valid KEK must load");
 
@@ -231,6 +312,8 @@ fn kek_debug_output_does_not_leak_the_key_material() {
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let config = load_config_from(None, &overrides).expect("valid KEK must load");
 
@@ -245,6 +328,8 @@ fn malformed_bind_addr_is_reported_as_malformed_not_missing() {
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
         ("KAWASEMI_SERVER_BIND_ADDR", "not-an-address"),
     ]);
     let err = load_config_from(None, &overrides).expect_err("malformed bind_addr must fail");
@@ -259,6 +344,8 @@ fn malformed_log_level_is_reported_as_malformed() {
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
         ("KAWASEMI_LOG_LEVEL", "verbose"),
     ]);
     let err = load_config_from(None, &overrides).expect_err("unknown log level must fail");
@@ -273,6 +360,8 @@ fn malformed_sql_diagnostic_flag_is_reported_as_malformed() {
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
         ("KAWASEMI_LOG_SQL_DIAGNOSTIC", "maybe"),
     ]);
     let err = load_config_from(None, &overrides).expect_err("non-boolean flag must fail");
@@ -287,6 +376,8 @@ fn malformed_numeric_fields_are_reported_as_malformed() {
         ("KAWASEMI_SERVER_DOMAIN", "example.com"),
         ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
         ("KAWASEMI_DATABASE_MAX_CONNECTIONS", "not-a-number"),
         ("KAWASEMI_SERVER_SHUTDOWN_GRACE_SECS", "soon"),
     ]);
@@ -308,6 +399,8 @@ fn missing_and_malformed_are_distinguished_in_a_single_pass() {
     let overrides = env(&[
         ("KAWASEMI_DATABASE_URL", "not-a-url"),
         ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
     ]);
     let err = load_config_from(None, &overrides).expect_err("mixed issues must fail");
 
@@ -334,6 +427,18 @@ fn fully_specified_toml_loads_without_env_overrides() {
     );
     assert_eq!(config.database.max_connections, 7);
     assert_eq!(config.database.acquire_timeout, Duration::from_secs(3));
+    assert_eq!(
+        config.owner.password.expose_secret().as_str(),
+        "toml-owner-passphrase"
+    );
+    assert_eq!(
+        config.oauth.token_hash_key.expose_secret(),
+        &[
+            0x11, 0xaa, 0x22, 0xbb, 0x33, 0xcc, 0x44, 0xdd, 0x11, 0xaa, 0x22, 0xbb, 0x33, 0xcc,
+            0x44, 0xdd, 0x11, 0xaa, 0x22, 0xbb, 0x33, 0xcc, 0x44, 0xdd, 0x11, 0xaa, 0x22, 0xbb,
+            0x33, 0xcc, 0x44, 0xdd,
+        ]
+    );
     assert_eq!(config.log.level, LogLevel::Debug);
     assert!(config.log.sql_diagnostic);
 }
@@ -345,4 +450,171 @@ fn config_error_display_mentions_every_issue() {
     assert!(rendered.contains("server.domain"));
     assert!(rendered.contains("database.url"));
     assert!(rendered.contains("actor.kek"));
+    assert!(rendered.contains("owner.password"));
+    assert!(rendered.contains("oauth.token_hash_key"));
+}
+
+#[test]
+fn malformed_owner_password_too_short_is_reported_as_malformed_not_missing() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", "short"),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("too-short owner password must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["owner.password"]);
+    assert!(err.missing_fields().next().is_none());
+}
+
+#[test]
+fn malformed_owner_password_empty_is_reported_as_malformed() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", "   "),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("blank owner password must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["owner.password"]);
+}
+
+#[test]
+fn malformed_owner_password_does_not_leak_the_raw_value_in_the_error_message() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", "sh0rt!!"), // distinctive, but < 8 chars
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("too-short owner password must fail");
+
+    assert!(!err.to_string().contains("sh0rt!!"));
+}
+
+#[test]
+fn valid_owner_password_round_trips_through_expose_secret() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+    ]);
+    let config = load_config_from(None, &overrides).expect("valid owner password must load");
+
+    assert_eq!(
+        config.owner.password.expose_secret().as_str(),
+        VALID_OWNER_PASSWORD
+    );
+}
+
+#[test]
+fn owner_password_debug_output_does_not_leak_the_password() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+    ]);
+    let config = load_config_from(None, &overrides).expect("valid owner password must load");
+
+    let formatted = format!("{config:?}");
+    assert!(!formatted.contains(VALID_OWNER_PASSWORD));
+}
+
+#[test]
+fn malformed_token_hash_key_wrong_length_is_reported_as_malformed_not_missing() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", "not-64-hex-chars"),
+    ]);
+    let err =
+        load_config_from(None, &overrides).expect_err("wrong-length token hash key must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["oauth.token_hash_key"]);
+    assert!(err.missing_fields().next().is_none());
+}
+
+#[test]
+fn malformed_token_hash_key_non_hex_characters_is_reported_as_malformed() {
+    let non_hex_key = "zz".repeat(32); // 64 chars, but not valid hex
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", non_hex_key.as_str()),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("non-hex token hash key must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["oauth.token_hash_key"]);
+}
+
+#[test]
+fn malformed_token_hash_key_does_not_leak_the_raw_value_in_the_error_message() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        (
+            "KAWASEMI_OAUTH_TOKEN_HASH_KEY",
+            "not-a-valid-token-hash-key-at-all",
+        ),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("malformed token hash key must fail");
+
+    assert!(
+        !err.to_string()
+            .contains("not-a-valid-token-hash-key-at-all")
+    );
+}
+
+#[test]
+fn valid_token_hash_key_hex_decodes_to_the_expected_bytes() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+    ]);
+    let config = load_config_from(None, &overrides).expect("valid token hash key must load");
+
+    let expected: [u8; 32] = [
+        0x11, 0xaa, 0x22, 0xbb, 0x33, 0xcc, 0x44, 0xdd, 0x11, 0xaa, 0x22, 0xbb, 0x33, 0xcc, 0x44,
+        0xdd, 0x11, 0xaa, 0x22, 0xbb, 0x33, 0xcc, 0x44, 0xdd, 0x11, 0xaa, 0x22, 0xbb, 0x33, 0xcc,
+        0x44, 0xdd,
+    ];
+    assert_eq!(config.oauth.token_hash_key.expose_secret(), &expected);
+}
+
+#[test]
+fn token_hash_key_debug_output_does_not_leak_the_key_material() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+    ]);
+    let config = load_config_from(None, &overrides).expect("valid token hash key must load");
+
+    let formatted = format!("{config:?}");
+    assert!(!formatted.contains(VALID_TOKEN_HASH_KEY_HEX));
+    assert!(!formatted.contains("11aa22bb"));
 }

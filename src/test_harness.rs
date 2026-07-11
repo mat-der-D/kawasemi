@@ -89,7 +89,8 @@ use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::actor::{self, ActorModule};
 use crate::config::{
-    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, Secret, ServerConfig,
+    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, OauthConfig, OwnerConfig, Secret,
+    ServerConfig,
 };
 use crate::db;
 use crate::migrate;
@@ -129,6 +130,16 @@ fn default_test_seed() -> DeterministicSeed {
 /// own "why fixed" reasoning) since no test needs KEK uniqueness across
 /// concurrently-running `TestApp`s, only a valid one.
 const TEST_KEK: [u8; 32] = [0x42; 32];
+
+/// Fixed, non-production owner passphrase every [`spawn_test_app`] call uses
+/// (api-foundation task 1.2, Requirement 2.2). Fixed rather than per-call,
+/// mirroring [`TEST_KEK`]'s own "why fixed" reasoning.
+const TEST_OWNER_PASSWORD: &str = "test-harness-owner-passphrase";
+
+/// Fixed, non-production OAuth token-hashing key every [`spawn_test_app`]
+/// call uses (api-foundation task 1.2, Requirement 3.6). Fixed rather than
+/// per-call, mirroring [`TEST_KEK`]'s own "why fixed" reasoning.
+const TEST_TOKEN_HASH_KEY: [u8; 32] = [0x24; 32];
 
 /// Resolves the shared test database's connection URL: an explicit
 /// `KAWASEMI_TEST_DATABASE_URL` override if set, otherwise
@@ -450,6 +461,12 @@ pub async fn spawn_test_app() -> TestApp {
         },
         actor: ActorConfig {
             kek: Secret::new(TEST_KEK),
+        },
+        owner: OwnerConfig {
+            password: Secret::new(TEST_OWNER_PASSWORD.to_string()),
+        },
+        oauth: OauthConfig {
+            token_hash_key: Secret::new(TEST_TOKEN_HASH_KEY),
         },
     };
 

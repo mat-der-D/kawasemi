@@ -118,6 +118,18 @@ fn set_bootstrap_env() {
             "KAWASEMI_ACTOR_KEK",
             "1111111111111111111111111111111111111111111111111111111111111111",
         );
+        // api-foundation's task 1.2 startup secrets (Requirements 2.2, 3.6):
+        // required for `config::load_config()` to succeed for the same
+        // reason as `KAWASEMI_ACTOR_KEK` above. Fixed, non-production
+        // values — never real secrets.
+        std::env::set_var(
+            "KAWASEMI_OWNER_PASSWORD",
+            "bootstrap-lifecycle-it-owner-passphrase",
+        );
+        std::env::set_var(
+            "KAWASEMI_OAUTH_TOKEN_HASH_KEY",
+            "4444444444444444444444444444444444444444444444444444444444444444",
+        );
     }
 }
 

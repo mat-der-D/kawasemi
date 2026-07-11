@@ -36,7 +36,8 @@ use crate::actor::build_actor_module;
 use crate::actor::keys::cache::KeyCache;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::config::{
-    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, Secret, ServerConfig,
+    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, OauthConfig, OwnerConfig, Secret,
+    ServerConfig,
 };
 use crate::error::{AppError, GENERIC_SERVER_MESSAGE};
 use crate::runtime::{DeterministicSeed, RuntimeContext};
@@ -48,6 +49,15 @@ const LAZY_TEST_DB_URL: &str = "postgres://lazy-user:lazy-pw@127.0.0.1:5432/lazy
 /// `test_state`'s `ActorModule` — no real key is ever sealed/opened here
 /// (see `test_state`'s own doc comment: this suite never actually connects).
 const TEST_KEK: [u8; 32] = [5u8; 32];
+
+/// Fixed, non-production owner passphrase for [`test_state`] (api-foundation
+/// task 1.2, Requirement 2.2). Mirrors [`TEST_KEK`]'s "why fixed" reasoning.
+const TEST_OWNER_PASSWORD: &str = "server-test-owner-passphrase";
+
+/// Fixed, non-production OAuth token-hashing key for [`test_state`]
+/// (api-foundation task 1.2, Requirement 3.6). Mirrors [`TEST_KEK`]'s "why
+/// fixed" reasoning.
+const TEST_TOKEN_HASH_KEY: [u8; 32] = [7u8; 32];
 
 /// Builds an `AppState` that never touches a real database: `connect_lazy`
 /// only parses the URL and configures the pool without dialing out (mirrors
@@ -72,6 +82,12 @@ fn test_state(seed: u64) -> AppState {
         },
         actor: ActorConfig {
             kek: Secret::new(TEST_KEK),
+        },
+        owner: OwnerConfig {
+            password: Secret::new(TEST_OWNER_PASSWORD.to_string()),
+        },
+        oauth: OauthConfig {
+            token_hash_key: Secret::new(TEST_TOKEN_HASH_KEY),
         },
     };
     let pool = PgPoolOptions::new()
