@@ -87,7 +87,7 @@
   - _Boundary: ActorModule, Bootstrap, AppState, Config_
   - _Depends: 4.2, 5.1, 5.2_
 
-- [x] 7. 検証
+- [ ] 7. 検証
 - [x] 7.1 (P) アクターライフサイクルの統合テスト
   - 作成（active＋鍵1つ）、重複ハンドル拒否、無効化後の状態判別を `spawn_test_app` 上で検証する
   - 観測可能な完了条件: 上記シナリオがグリーンで、無効化後に解決で Deactivated が判別できる
