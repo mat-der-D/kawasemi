@@ -1,6 +1,6 @@
 # Project Structure
 
-> 注: 本プロジェクトは初期段階（まだ実装コードが無い）。ここでは設計方針（`docs/`）から導かれる**意図された構成原則**を記す。実装が進んだら実体に合わせて Sync する。
+> 実装が進行中（`core-runtime` / `actor-model` スペックの主要タスクが実装済み）。以下は実コードから確認された構成原則。
 
 ## Organization Philosophy
 
@@ -26,6 +26,12 @@ clock / id generator / RNG / 署名鍵は具体実装に直接依存させず、
 ### バックエンド一体配信
 フロント（React）のビルド済み資産・DB マイグレーション・SPA 配信はバックエンドバイナリに同梱する前提で構成する（別 Web サーバーを構造に持ち込まない）。
 
+## テストレイアウト
+
+- **単体テスト**：実装ファイルと同階層の `tests.rs` サブモジュールに置く（例：`src/actor/service.rs` → `src/actor/service/tests.rs`）。`#[cfg(test)] mod tests;` で親から宣言する。
+- **統合テスト**：`tests/` 直下、ファイル名は `_it.rs` サフィックス（例：`tests/actor_lifecycle_it.rs`）。DB込みの実起動インスタンスを要する検証はここに置く。
+- **TestHarness**：`src/test_harness.rs` の `spawn_test_app` が bootstrap と同じ構成要素（`db::establish_pool` / `migrate::apply_migrations` / `runtime::RuntimeContext::deterministic` / `state::AppState::new` / `server::build_router`）を再利用して実インスタンスを起動する。`bootstrap::bootstrap` 自体を直接再利用しないのは、待受アドレスを呼び出し側に返さないため。統合テストは `bootstrap` を再実装せず、この harness 経由で実体を起動する。
+
 ## Spec & Steering Layout
 
 - ステアリング（プロジェクト全体ルール）：`.kiro/steering/`
@@ -36,7 +42,8 @@ clock / id generator / RNG / 署名鍵は具体実装に直接依存させず、
 
 - Rust：標準慣習（モジュール/関数 `snake_case`、型/トレイト `PascalCase`）。
 - TypeScript/React：標準慣習（コンポーネント `PascalCase`）。
-- 実装が始まったら、確立した命名パターンをここに具体例つきで追記する。
+- 統合テストファイル：`<対象>_it.rs`（例：`bootstrap_lifecycle_it.rs` / `owner_actor_boundary_it.rs`）。
+- フロント実装はまだ無し。着手時に確立した命名パターンをここに追記する。
 
 ## Rust コーディング規約
 
