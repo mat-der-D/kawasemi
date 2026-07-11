@@ -24,6 +24,7 @@ pub mod db;
 pub mod domain;
 pub mod error;
 pub mod migrate;
+pub mod oauth;
 pub mod runtime;
 pub mod server;
 pub mod state;
