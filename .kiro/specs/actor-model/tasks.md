@@ -87,7 +87,7 @@
   - _Boundary: ActorModule, Bootstrap, AppState, Config_
   - _Depends: 4.2, 5.1, 5.2_
 
-- [ ] 7. 検証
+- [x] 7. 検証
 - [x] 7.1 (P) アクターライフサイクルの統合テスト
   - 作成（active＋鍵1つ）、重複ハンドル拒否、無効化後の状態判別を `spawn_test_app` 上で検証する
   - 観測可能な完了条件: 上記シナリオがグリーンで、無効化後に解決で Deactivated が判別できる
@@ -100,7 +100,7 @@
   - _Requirements: 4.1, 4.3, 5.1, 5.2, 5.3, 5.5, 6.2, 6.3, 6.4_
   - _Boundary: signing_key_it_
   - _Depends: 6.1_
-- [ ] 7.3 (P) オーナー↔アクター境界の統合テスト
+- [x] 7.3 (P) オーナー↔アクター境界の統合テスト
   - 管理層一覧がオーナー別に正しく、プロトコル層参照（ハンドル解決・公開鍵供給）に owner 情報が一切現れないこと、秘密鍵がログ/参照型/DB 平文に現れないことを検証する
   - 観測可能な完了条件: プロトコル経路の戻り値・ログに owner と平文秘密鍵が含まれず、管理層一覧のみが owner 別対応を返す
   - _Requirements: 2.5, 3.1, 3.2, 3.3, 4.4, 4.5, 8.1, 8.4_
@@ -119,3 +119,4 @@
 - 5.1: `ActorService::create_actor` は `self.pool.begin()` で開いた単一トランザクションを `insert_actor` → `SigningKeyService::provision_key` の順に駆動し、明示的な `rollback()` 呼び出しではなく早期 `?` return によるトランザクションの drop に委ねている（`SigningKeyService::rotate_key` と同じ流儀）。4.1 のノートが指摘した「`provision_key` はコミット前にキャッシュを更新する」レースは 5.1 でも解消していない（設計のシーケンス図どおりの実装であり、5.1 の Boundary 外の再設計が必要なため）。`ActorService::new` は `signing_key_service: Arc<SigningKeyService>` をコンストラクタ注入で受け取る形にした。6.1（bootstrap/AppState 配線）は `SigningKeyService` を `Arc` で包んで `ActorService`/他の消費者に共有する前提で配線すること。`NewActor.handle` は `Handle`（値ではなく既に構築済みの値オブジェクト）を要求するため、ハンドル形式検証（1.6）は `Handle::new` の呼び出し側（将来の 5.2/6.1 配線や API 層）が担う。
 - 5.2: `ActorDirectory` は `PgPool` のみを保持し（`RuntimeContext` 不要、design.md のアーキテクチャ図どおり書き込みが無い）、`list_actors_for_owner`/`resolve_actor_by_handle` は `LocalActor` を `owner_id: _` で明示的に破棄する非網羅 `..` 無しの分解パターンで `ActorSummary`/`ResolvedActor` へ投影している（`model.rs` が確立した owner 非露出の実証パターンを踏襲）。`actor_public_key` は `keys::repository::find_active_public_key` への薄い委譲のみ（そちらが既に owner を含まない `ActorPublicKey` を返すため）。6.1（bootstrap/AppState 配線）は `ActorDirectory::new(pool)` を `ActorService`/`SigningKeyService` と並べて `ActorModule` に組み込む想定。
 - 6.1: KEK は `AppConfig.actor.kek: Secret<[u8; 32]>`（新設 `ActorConfig` 構造体、`actor.kek` ドット path → 環境変数 `KAWASEMI_ACTOR_KEK`、64桁16進文字列を必須フィールドとして検証、`validate_kek`）として配線した。`bootstrap.rs::build_state()` はプール確立・マイグレーション後に `load_key_cache_with_diagnostics`（新規）で全有効鍵をロード→`ChaCha20Poly1305KeyCipher::open`→`KeyCache::from_entries` で温め、`DbSigningKeyProvider::new(cache.clone())` を `RuntimeContext { clock, ids, rng, keys }` の `keys` に直接注入する（`RuntimeContext::production()` は本番経路では**呼ばない** — その `FixedSigningKeyProvider` プレースホルダは意図的にバイパスされる。placeholder 自体は temporarily 残置され `src/runtime.rs` のテスト/デフォルト用途にのみ使われる）。鍵ロード失敗は新設 `BootstrapError::KeySupply(AppError)` に集約（`AppError` は `Display`/`std::error::Error` を実装しないため `Debug` でレンダリング、`source()` は `None`）。`AppState` は `actor: ActorModule` フィールドを追加し `pub fn actor(&self) -> &ActorModule` で公開、`AppState::new` のシグネチャに `actor: ActorModule` 引数が増えた（`src/test_harness.rs`/`src/server/tests.rs`/両 `tests/bootstrap_*_it.rs` はこの新シグネチャと新必須環境変数 `KAWASEMI_ACTOR_KEK` に追随済み）。後続タスク（7.1-7.3 の統合テスト等）はこの `AppState::actor()` 経由で `ActorService`/`SigningKeyService`/`ActorDirectory` を取得すること。
+- 7.1-7.3: 検証グループ全体は `spawn_test_app` 経由で `AppState::actor()` の公開 API のみを駆動する統合テスト3本（`tests/actor_lifecycle_it.rs`, `tests/signing_key_it.rs`, `tests/owner_actor_boundary_it.rs`）として完了。7.2 は退役鍵の `status` 確認に `keys::repository` に公開関数が無いため一時的な生 SQL 読み取りを使用（`load_all_active` は active のみを返すため）。7.3 のレビューで指摘: このファイルのドキュメントコメントは「ログキャプチャ用テスト基盤が存在しない」と述べているが、実際には `src/telemetry/tests.rs` に `Capture`（`tracing_subscriber::Layer`）が存在する（ただし `#[cfg(test)]` で `telemetry` モジュール内に閉じており統合テストクレートから到達不能なため、結論自体は変わらない）。またアクター作成/ローテーション経路 (`src/actor.rs`/`src/actor/**`) には現状ログ出力呼び出しが一つも無いため、ログキャプチャテストを追加しても実質的な追加カバレッジは乏しい。将来ログ出力が追加された場合はこの点を再検討すること。
