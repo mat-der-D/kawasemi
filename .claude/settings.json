@@ -2,5 +2,19 @@
   "enabledPlugins": {
     "superpowers@claude-plugins-official": true,
     "rust-analyzer-lsp@claude-plugins-official": true
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/cargo-test-stop.sh",
+            "timeout": 180,
+            "statusMessage": "Running cargo fmt / clippy / test..."
+          }
+        ]
+      }
+    ]
   }
 }
