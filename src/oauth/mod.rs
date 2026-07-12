@@ -16,6 +16,8 @@
 //! exist yet because none of its dependencies (repositories, service,
 //! middleware) have been implemented yet.
 
+pub mod app_repository;
+pub mod hash;
 pub mod model;
 pub mod pkce;
 pub mod scope;

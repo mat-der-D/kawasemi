@@ -39,7 +39,7 @@
   - _Depends: 2.1_
 
 - [ ] 3. OAuth データ層
-- [ ] 3.1 (P) OAuth アプリケーションリポジトリを実装する
+- [x] 3.1 (P) OAuth アプリケーションリポジトリを実装する
   - アプリ登録（クライアント識別子/シークレット採番・リダイレクト URI と要求スコープの保管）と取得を実装し、`client_secret` はトークン/認可コードと同一規約でハッシュ化して `client_secret_hash` に保存し、平文は登録応答時のみ返却して以降は永続化・ログ出力しない
   - 資格情報検証は提示されたシークレットをハッシュ化した上でハッシュ同士の定数時間比較により行う
   - 識別子/乱数は core-runtime の決定性境界から取得する
@@ -179,3 +179,8 @@
   - 同一入力で安定したゴールデン比較が成立し、意図的な差分が箇所特定で検出されることを確認できる
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
   - _Depends: 8.1_
+
+## Implementation Notes
+
+- Task 3.1: `src/oauth/hash.rs` を新設し、`keyed_hash`/`verify_keyed_hash`（HMAC-SHA256, `OauthConfig.token_hash_key` で鍵付け、`subtle::ConstantTimeEq` で定数時間比較）を共有プリミティブとして提供した。`client_secret_hash`/`code_hash`/`token_hash` は migrations/0003_oauth.sql のコメントで「同一規約でハッシュ保存」と明記されているため、タスク 3.2 (`code_repository.rs`) と 3.3 (`token_repository.rs`) はこのハッシュ関数を再導出せずそのまま再利用すること。
+- Task 3.1: `model::OauthApp`（タスク 2.1）は `client_secret: Secret<String>` の単一フィールドのみを持ち、`AccessToken::token_hash` のような別ハッシュフィールドがない。平文を返せない `find_app_by_client_id` はこのため `NO_PLAINTEXT_SECRET_SENTINEL`（`app_repository.rs` でエクスポート）で埋めている。後続でこの型不整合を根本解決する場合は `model.rs`（タスク 2.1、レビュー済み）へのフィールド追加が必要になる点に留意。
