@@ -74,15 +74,15 @@ async fn server_error_public_message_is_generic_regardless_of_source_content() {
     // trying a second, differently-worded source and checking the body is
     // byte-for-byte identical in both cases.
     let err_a = AppError::server(StatusCode::BAD_GATEWAY, std::io::Error::other("failure A"));
-    let err_b = AppError::server(StatusCode::BAD_GATEWAY, std::io::Error::other("wildly different failure B"));
+    let err_b = AppError::server(
+        StatusCode::BAD_GATEWAY,
+        std::io::Error::other("wildly different failure B"),
+    );
 
     let text_a = body_text(err_a.into_response()).await;
     let text_b = body_text(err_b.into_response()).await;
 
-    assert_eq!(
-        text_a, text_b,
-        "5xx body must not vary with source content"
-    );
+    assert_eq!(text_a, text_b, "5xx body must not vary with source content");
 }
 
 #[tokio::test]
@@ -117,7 +117,8 @@ async fn into_response_with_still_logs_server_errors() {
         std::io::Error::other("db pool exhausted"),
     );
 
-    let response = err.into_response_with(|error| (error.status, "custom-5xx-body").into_response());
+    let response =
+        err.into_response_with(|error| (error.status, "custom-5xx-body").into_response());
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let text = body_text(response).await;
@@ -132,6 +133,9 @@ fn client_constructor_never_carries_a_source() {
 
 #[test]
 fn server_constructor_always_carries_the_given_source() {
-    let err = AppError::server(StatusCode::INTERNAL_SERVER_ERROR, std::io::Error::other("boom"));
+    let err = AppError::server(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        std::io::Error::other("boom"),
+    );
     assert!(err.source.is_some());
 }

@@ -91,7 +91,9 @@ async fn column_is_not_null(pool: &sqlx::PgPool, table: &str, column: &str) -> b
     .bind(column)
     .fetch_one(pool)
     .await
-    .unwrap_or_else(|err| panic!("querying information_schema.columns for {table}.{column} must succeed: {err:?}"))
+    .unwrap_or_else(|err| {
+        panic!("querying information_schema.columns for {table}.{column} must succeed: {err:?}")
+    })
     .get("is_nullable");
     is_nullable == "NO"
 }
@@ -244,7 +246,10 @@ async fn migrated_test_app_has_oauth_tables_with_constraints() {
     .await
     .expect_err("inserting an authorization code referencing a non-existent app must fail");
     assert_eq!(
-        sqlstate(&missing_app_err, "missing app FK insert (authorization code)"),
+        sqlstate(
+            &missing_app_err,
+            "missing app FK insert (authorization code)"
+        ),
         "23503",
         "oauth_authorization_codes.app_id must be enforced as a foreign key into oauth_applications"
     );
@@ -260,7 +265,10 @@ async fn migrated_test_app_has_oauth_tables_with_constraints() {
     .await
     .expect_err("inserting an authorization code with a NULL actor_id must fail");
     assert_eq!(
-        sqlstate(&null_actor_code_err, "null actor_id insert (authorization code)"),
+        sqlstate(
+            &null_actor_code_err,
+            "null actor_id insert (authorization code)"
+        ),
         "23502",
         "oauth_authorization_codes.actor_id must reject NULL (NOT NULL)"
     );
@@ -322,7 +330,10 @@ async fn migrated_test_app_has_oauth_tables_with_constraints() {
     .await
     .expect_err("inserting an access token referencing a non-existent app must fail");
     assert_eq!(
-        sqlstate(&missing_app_token_err, "missing app FK insert (access token)"),
+        sqlstate(
+            &missing_app_token_err,
+            "missing app FK insert (access token)"
+        ),
         "23503",
         "oauth_access_tokens.app_id must be enforced as a foreign key into oauth_applications"
     );

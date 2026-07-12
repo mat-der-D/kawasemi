@@ -52,11 +52,17 @@ async fn insert_actor_persists_a_row_findable_by_handle_and_id() {
     let actor_id = app.runtime.ids.next_id();
     let actor = sample_actor(owner_id, actor_id, "alice", now);
 
-    let mut tx = app.pool.begin().await.expect("opening a transaction must succeed");
+    let mut tx = app
+        .pool
+        .begin()
+        .await
+        .expect("opening a transaction must succeed");
     insert_actor(&mut tx, &actor)
         .await
         .expect("insert_actor must succeed for a fresh handle/id");
-    tx.commit().await.expect("committing the transaction must succeed");
+    tx.commit()
+        .await
+        .expect("committing the transaction must succeed");
 
     let by_handle = find_by_handle(&app.pool, &actor.handle)
         .await
@@ -88,15 +94,25 @@ async fn insert_actor_rejects_duplicate_handle_with_a_client_error() {
 
     let first_id = app.runtime.ids.next_id();
     let first_actor = sample_actor(owner_id, first_id, "bob", now);
-    let mut tx = app.pool.begin().await.expect("opening a transaction must succeed");
+    let mut tx = app
+        .pool
+        .begin()
+        .await
+        .expect("opening a transaction must succeed");
     insert_actor(&mut tx, &first_actor)
         .await
         .expect("first insert_actor must succeed");
-    tx.commit().await.expect("committing the first transaction must succeed");
+    tx.commit()
+        .await
+        .expect("committing the first transaction must succeed");
 
     let second_id = app.runtime.ids.next_id();
     let second_actor = sample_actor(owner_id, second_id, "bob", now);
-    let mut tx2 = app.pool.begin().await.expect("opening a second transaction must succeed");
+    let mut tx2 = app
+        .pool
+        .begin()
+        .await
+        .expect("opening a second transaction must succeed");
     let err = insert_actor(&mut tx2, &second_actor)
         .await
         .expect_err("inserting a duplicate handle must be rejected");
@@ -147,7 +163,11 @@ async fn list_by_owner_returns_only_that_owners_actors() {
     let b1 = sample_actor(owner_b, app.runtime.ids.next_id(), "b_one", now);
 
     for actor in [&a1, &a2, &b1] {
-        let mut tx = app.pool.begin().await.expect("opening a transaction must succeed");
+        let mut tx = app
+            .pool
+            .begin()
+            .await
+            .expect("opening a transaction must succeed");
         insert_actor(&mut tx, actor)
             .await
             .expect("insert_actor must succeed");
@@ -208,7 +228,11 @@ async fn update_state_transitions_state_and_updated_at_and_reports_true() {
 
     let actor_id = app.runtime.ids.next_id();
     let actor = sample_actor(owner_id, actor_id, "carol", now);
-    let mut tx = app.pool.begin().await.expect("opening a transaction must succeed");
+    let mut tx = app
+        .pool
+        .begin()
+        .await
+        .expect("opening a transaction must succeed");
     insert_actor(&mut tx, &actor)
         .await
         .expect("insert_actor must succeed");
@@ -218,7 +242,10 @@ async fn update_state_transitions_state_and_updated_at_and_reports_true() {
     let updated = update_state(&app.pool, actor_id, ActorState::Deactivated, later)
         .await
         .expect("update_state must succeed for an existing actor");
-    assert!(updated, "update_state must report true when a row was updated");
+    assert!(
+        updated,
+        "update_state must report true when a row was updated"
+    );
 
     let found = find_by_id(&app.pool, actor_id)
         .await

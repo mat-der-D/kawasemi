@@ -181,11 +181,11 @@ fn row_to_local_actor(row: LocalActorRow) -> LocalActor {
 /// occur given `IdGenerator`'s uniqueness contract) becomes a `Server` (5xx)
 /// `AppError`.
 fn map_insert_error(source: sqlx::Error) -> AppError {
-    if let Some(db_error) = source.as_database_error() {
-        if db_error.is_unique_violation() && db_error.constraint() == Some(HANDLE_UNIQUE_CONSTRAINT)
-        {
-            return AppError::client(StatusCode::CONFLICT, "handle is already in use");
-        }
+    if let Some(db_error) = source.as_database_error()
+        && db_error.is_unique_violation()
+        && db_error.constraint() == Some(HANDLE_UNIQUE_CONSTRAINT)
+    {
+        return AppError::client(StatusCode::CONFLICT, "handle is already in use");
     }
     AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
 }
@@ -227,7 +227,10 @@ pub async fn insert_actor(tx: &mut PgTransaction<'_>, actor: &LocalActor) -> Res
 /// Returns `Ok(None)` (not an error) when no row matches `handle` — mirrors
 /// `OwnerRepository::find_owner`'s "does this exist" contract at this data
 /// layer.
-pub async fn find_by_handle(pool: &PgPool, handle: &Handle) -> Result<Option<LocalActor>, AppError> {
+pub async fn find_by_handle(
+    pool: &PgPool,
+    handle: &Handle,
+) -> Result<Option<LocalActor>, AppError> {
     let row: Option<LocalActorRow> = sqlx::query_as(
         "SELECT id, owner_id, handle, actor_type, display_name, summary, state, created_at, updated_at \
          FROM local_actors WHERE handle = $1",

@@ -31,7 +31,10 @@ async fn create_owner_persists_a_row_that_find_owner_returns_unchanged() {
     let created = create_owner(&app.pool, id, now)
         .await
         .expect("create_owner must succeed for a fresh id");
-    assert_eq!(created.id, id, "the stored owner must carry the id the caller minted");
+    assert_eq!(
+        created.id, id,
+        "the stored owner must carry the id the caller minted"
+    );
 
     let found = find_owner(&app.pool, id)
         .await

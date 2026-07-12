@@ -72,9 +72,7 @@ impl<'de> Deserialize<'de> for Id {
     {
         let raw = String::deserialize(deserializer)?;
         raw.parse::<i64>().map(Id).map_err(|err| {
-            serde::de::Error::custom(format!(
-                "invalid Id decimal string {raw:?}: {err}"
-            ))
+            serde::de::Error::custom(format!("invalid Id decimal string {raw:?}: {err}"))
         })
     }
 }

@@ -142,7 +142,11 @@ impl ActorService {
     /// field) and matching how bootstrap wiring (task 6.1, out of this
     /// task's boundary) is expected to hand a single, shared
     /// `SigningKeyService` instance to multiple consumers.
-    pub fn new(pool: PgPool, runtime: RuntimeContext, signing_key_service: Arc<SigningKeyService>) -> Self {
+    pub fn new(
+        pool: PgPool,
+        runtime: RuntimeContext,
+        signing_key_service: Arc<SigningKeyService>,
+    ) -> Self {
         Self {
             pool,
             runtime,

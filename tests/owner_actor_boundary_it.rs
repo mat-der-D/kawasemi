@@ -52,9 +52,7 @@
 
 use kawasemi::actor::keys::repository::load_all_active;
 use kawasemi::actor::owner::create_owner;
-use kawasemi::actor::{
-    ActorPublicKey, ActorSummary, ActorType, Handle, NewActor, ResolvedActor,
-};
+use kawasemi::actor::{ActorPublicKey, ActorSummary, ActorType, Handle, NewActor, ResolvedActor};
 use kawasemi::runtime::KeyRef;
 use kawasemi::test_harness::spawn_test_app;
 
@@ -90,19 +88,31 @@ async fn list_actors_for_owner_returns_only_that_owners_actors() {
     let actor_a1 = app
         .actor
         .actor_service()
-        .create_actor(make_actor(owner_a, "boundary_owner_a_one", "Owner A Actor One"))
+        .create_actor(make_actor(
+            owner_a,
+            "boundary_owner_a_one",
+            "Owner A Actor One",
+        ))
         .await
         .expect("creating owner A's first actor must succeed");
     let actor_a2 = app
         .actor
         .actor_service()
-        .create_actor(make_actor(owner_a, "boundary_owner_a_two", "Owner A Actor Two"))
+        .create_actor(make_actor(
+            owner_a,
+            "boundary_owner_a_two",
+            "Owner A Actor Two",
+        ))
         .await
         .expect("creating owner A's second actor must succeed");
     let actor_b1 = app
         .actor
         .actor_service()
-        .create_actor(make_actor(owner_b, "boundary_owner_b_one", "Owner B Actor One"))
+        .create_actor(make_actor(
+            owner_b,
+            "boundary_owner_b_one",
+            "Owner B Actor One",
+        ))
         .await
         .expect("creating owner B's actor must succeed");
 
@@ -476,5 +486,7 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
     }
-    haystack.windows(needle.len()).any(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }

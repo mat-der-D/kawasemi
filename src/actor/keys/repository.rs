@@ -255,11 +255,13 @@ pub async fn find_active_public_key(
     .await
     .map_err(|source| AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source))?;
 
-    Ok(row.map(|(actor_id, key_id, public_key_pem)| ActorPublicKey {
-        actor_id: Id::from_i64(actor_id),
-        key_id: Id::from_i64(key_id),
-        public_key_pem,
-    }))
+    Ok(
+        row.map(|(actor_id, key_id, public_key_pem)| ActorPublicKey {
+            actor_id: Id::from_i64(actor_id),
+            key_id: Id::from_i64(key_id),
+            public_key_pem,
+        }),
+    )
 }
 
 /// Returns every currently-active signing key across all actors, for
