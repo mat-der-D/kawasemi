@@ -17,6 +17,7 @@
 //! middleware) have been implemented yet.
 
 pub mod app_repository;
+pub mod code_repository;
 pub mod hash;
 pub mod model;
 pub mod pkce;

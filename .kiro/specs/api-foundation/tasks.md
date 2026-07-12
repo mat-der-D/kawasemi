@@ -48,7 +48,7 @@
   - _Boundary: OauthAppRepository_
   - _Depends: 1.1, 2.1_
 
-- [ ] 3.2 (P) 認可コードリポジトリを実装する
+- [x] 3.2 (P) 認可コードリポジトリを実装する
   - 短命認可コードの挿入と、「未消費かつ未期限切れ」を条件とする原子的な単回消費を実装し、選択アクターと承認スコパと任意 PKCE をコードに保持する
   - 消費済みまたは期限切れコードは交換に使えないことを統合テストで確認できる
   - _Requirements: 2.5, 3.1, 3.2_
@@ -184,3 +184,5 @@
 
 - Task 3.1: `src/oauth/hash.rs` を新設し、`keyed_hash`/`verify_keyed_hash`（HMAC-SHA256, `OauthConfig.token_hash_key` で鍵付け、`subtle::ConstantTimeEq` で定数時間比較）を共有プリミティブとして提供した。`client_secret_hash`/`code_hash`/`token_hash` は migrations/0003_oauth.sql のコメントで「同一規約でハッシュ保存」と明記されているため、タスク 3.2 (`code_repository.rs`) と 3.3 (`token_repository.rs`) はこのハッシュ関数を再導出せずそのまま再利用すること。
 - Task 3.1: `model::OauthApp`（タスク 2.1）は `client_secret: Secret<String>` の単一フィールドのみを持ち、`AccessToken::token_hash` のような別ハッシュフィールドがない。平文を返せない `find_app_by_client_id` はこのため `NO_PLAINTEXT_SECRET_SENTINEL`（`app_repository.rs` でエクスポート）で埋めている。後続でこの型不整合を根本解決する場合は `model.rs`（タスク 2.1、レビュー済み）へのフィールド追加が必要になる点に留意。
+- Task 3.2: `model::PkceChallenge`（タスク 2.1 のプレースホルダ型、`AuthorizationCode::pkce` が実際に保持する型）は `challenge: String` のみで `method` フィールドを持たない（`pkce::PkceChallenge`（タスク 2.3、`method: PkceMethod` を持つ「本物」）とは別の型）。`oauth_authorization_codes.pkce_method` 列に対応する値がドメイン型に無いため、`code_repository.rs` は `pkce::PkceMethod` の唯一のバリアントである固定文字列 `"S256"` を PKCE 有無に連動して書き込む（3.1 の `NO_PLAINTEXT_SECRET_SENTINEL` と同型の判断）。根本解決は `model.rs` への `method` フィールド追加（タスク 2.1 の再訪）が必要。
+- Task 3.2: `code_hash`/`token_hash` は主キー参照（`WHERE code_hash = $1` 等）であり、`app_repository.rs::verify_app_credentials` のように「別途取得した2つのハッシュ値を比較する」操作ではないため、`hash.rs::verify_keyed_hash`（定数時間比較）は不要で `keyed_hash` のみで十分——タスク 3.3 (`token_repository.rs::resolve_token`) も同じ主キー/一意索引ルックアップ形状であれば同じ判断が成り立つ可能性があるが、失効チェック等ルックアップ後の追加ロジックがあるため個別に検討すること。
