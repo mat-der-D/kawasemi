@@ -71,7 +71,7 @@
   - _Boundary: OwnerGate_
   - _Depends: 1.2_
 
-- [ ] 4.2 OAuth サービス（登録・コード発行・トークン交換/失効）を実装する
+- [x] 4.2 OAuth サービス（登録・コード発行・トークン交換/失効）を実装する
   - アプリ登録（必須/形式/スコープ検証）、認可コード発行（クライアント/リダイレクト URI/スコープ検証と選択アクター・承認スコープ・任意 PKCE のバインド）、トークン交換（コード単回消費・資格情報/URI 一致・PKCE 整合検証）、トークン失効を業務として集約する
   - 識別子/乱数/時刻は決定性境界から取得する
   - 不正なクライアント/URI/スコープ/コードが拒否され、正常系でアクターとスコープを保持したコードとトークンが発行されることを統合テストで確認できる
@@ -189,3 +189,6 @@
 - Task 4.1: `ActorDirectory::sole_owner()`（design.md が上流追加要求として明記していたアクセサ）を `src/actor/directory.rs` に追加した。実装は `SELECT id, created_at FROM owners`（`LIMIT` なし・`fetch_all`）で 0 件/複数件の両方を単一クエリで検出し、両ケースとも `AppError::server`（5xx）に倒す。`.first()` で黙って先頭を選ぶことは絶対にしないこと——一人鯖前提で `owners` テーブルは厳密に1件のみを想定する不変条件違反として扱う。
 - Task 4.1: `owner_gate.rs` の署名付きセッションクッキーは、専用の署名鍵を新設せず既存の `OauthConfig.token_hash_key` を `hash.rs::keyed_hash`/`verify_keyed_hash` 経由で再利用している（`src/config.rs` の変更はタスク境界外のため）。この鍵は他に `client_secret`/認可コード/アクセストークンのハッシュにも使われており、ローテーションが結合される点に留意——専用鍵への分離は範囲外・将来の別タスク。
 - Task 4.1: `owner_gate.rs` が所有するのは署名付きクッキー**値**のエンコード/デコード（`encode_session_cookie`/`decode_session_cookie`）のみで、実際の `Set-Cookie` ヘッダ（`HttpOnly`/`SameSite`/`Secure` 属性)組み立てはタスク 5.2 (`authorize_endpoint.rs`) の責務として残している。design.md の Service Interface が `OwnerSession`/クッキー値を返す形（HTTP ヘッダそのものではない）である点、および Contracts が `Service [x]` のみ（`API [x]` なし）である点から導いた判断。タスク 5.2 実装時はこの前提（クッキー名・属性の組み立てがまだ存在しない）を踏まえること。
+- Task 4.2: タスク 2.1/2.2/2.3 が「後続タスクへ委ねる」と明記していた `model::ScopeSet`（プレースホルダ・裸の `BTreeSet<String>`）↔ 実装の `scope::ScopeSet`（`crate::oauth::ScopeSet` として再エクスポート、語彙検証・`is_satisfied_by` 判定を持つ）、および `model::PkceChallenge`（プレースホルダ・`challenge: String` のみ）↔ 実装の `pkce::PkceChallenge`（`crate::oauth::PkceChallenge` として再エクスポート、`method: PkceMethod` を持つ）の橋渡しを `service.rs` に実装した。`model.rs`/`scope.rs`/`pkce.rs` は無変更。今後 `model::ScopeSet`/`model::PkceChallenge` を扱う後続タスク（5.x エンドポイント層等）は `service.rs` のこの変換関数（scope 変換・PKCE 再構成ロジック）を再利用し、変換ロジックを再発明しないこと。
+- Task 4.2: `exchange_token` はクライアント資格情報の検証を `code_repository::consume_code`（単回消費）より先に行うため、誤ったクライアント資格情報はコードを消費しない。ただし `consume_code` の後でしか redirect_uri/PKCE 不整合を検知できない（`code_repository` に消費なしの peek API が無いため）ので、redirect_uri 不一致や PKCE 不整合の場合でもコードは消費済みになる（クライアントは新しいコードで再試行が必要）。これは `code_repository`（タスク 3.2、レビュー済み）の API 形状に起因する制約であり、実世界の OAuth サーバーの一般的挙動とも整合するためレビューで許容された判断。`code_repository` に peek API を追加する場合はこの制約を再検討すること。
+- Task 4.2: スコープの「承認スコープ ⊆ アプリ登録スコープ」内包チェックは `issue_authorization_code` にのみ実装し、`exchange_token` では独立検証しない（トークン交換はコードに既にバインドされたスコープをそのまま引き継ぐのみで、独自のスコープ入力を持たないため）。`actor_id` を無条件に信頼するのと同じ設計判断。
