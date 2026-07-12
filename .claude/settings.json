@@ -10,7 +10,7 @@
           {
             "type": "command",
             "command": "bash .claude/hooks/cargo-test-stop.sh",
-            "timeout": 180,
+            "timeout": 600,
             "statusMessage": "Running cargo fmt / clippy / test..."
           }
         ]
