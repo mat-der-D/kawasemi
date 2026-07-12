@@ -20,6 +20,7 @@ pub mod app_repository;
 pub mod code_repository;
 pub mod hash;
 pub mod model;
+pub mod owner_gate;
 pub mod pkce;
 pub mod scope;
 pub mod token_repository;

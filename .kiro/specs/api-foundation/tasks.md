@@ -63,7 +63,7 @@
   - _Depends: 1.1, 2.1_
 
 - [ ] 4. OAuth サービス層
-- [ ] 4.1 オーナー認証ゲートを実装する
+- [x] 4.1 オーナー認証ゲートを実装する
   - 起動設定のオーナー資格情報を定数時間比較で照合し、認証成功時に actor-model のオーナーディレクトリが提供する単一オーナー取得アクセサ（一人鯖前提でインスタンスに厳密に1件のみ存在する owners 行を返すアクセサ）を呼び出して `owner_id` を解決し、短命オーナーセッションを発行する最小ゲートを実装する
   - 発行したオーナーセッションは署名付き HttpOnly Cookie（`SameSite=Lax` または `Strict`、TLS 配信時は `Secure`）として運搬する
   - 正しい資格情報でセッションが得られて署名付き Cookie が発行され、誤った資格情報が拒否されることを単体テストで確認できる
@@ -186,3 +186,6 @@
 - Task 3.1: `model::OauthApp`（タスク 2.1）は `client_secret: Secret<String>` の単一フィールドのみを持ち、`AccessToken::token_hash` のような別ハッシュフィールドがない。平文を返せない `find_app_by_client_id` はこのため `NO_PLAINTEXT_SECRET_SENTINEL`（`app_repository.rs` でエクスポート）で埋めている。後続でこの型不整合を根本解決する場合は `model.rs`（タスク 2.1、レビュー済み）へのフィールド追加が必要になる点に留意。
 - Task 3.2: `model::PkceChallenge`（タスク 2.1 のプレースホルダ型、`AuthorizationCode::pkce` が実際に保持する型）は `challenge: String` のみで `method` フィールドを持たない（`pkce::PkceChallenge`（タスク 2.3、`method: PkceMethod` を持つ「本物」）とは別の型）。`oauth_authorization_codes.pkce_method` 列に対応する値がドメイン型に無いため、`code_repository.rs` は `pkce::PkceMethod` の唯一のバリアントである固定文字列 `"S256"` を PKCE 有無に連動して書き込む（3.1 の `NO_PLAINTEXT_SECRET_SENTINEL` と同型の判断）。根本解決は `model.rs` への `method` フィールド追加（タスク 2.1 の再訪）が必要。
 - Task 3.2: `code_hash`/`token_hash` は主キー参照（`WHERE code_hash = $1` 等）であり、`app_repository.rs::verify_app_credentials` のように「別途取得した2つのハッシュ値を比較する」操作ではないため、`hash.rs::verify_keyed_hash`（定数時間比較）は不要で `keyed_hash` のみで十分——タスク 3.3 (`token_repository.rs::resolve_token`) も同じ主キー/一意索引ルックアップ形状であれば同じ判断が成り立つ可能性があるが、失効チェック等ルックアップ後の追加ロジックがあるため個別に検討すること。
+- Task 4.1: `ActorDirectory::sole_owner()`（design.md が上流追加要求として明記していたアクセサ）を `src/actor/directory.rs` に追加した。実装は `SELECT id, created_at FROM owners`（`LIMIT` なし・`fetch_all`）で 0 件/複数件の両方を単一クエリで検出し、両ケースとも `AppError::server`（5xx）に倒す。`.first()` で黙って先頭を選ぶことは絶対にしないこと——一人鯖前提で `owners` テーブルは厳密に1件のみを想定する不変条件違反として扱う。
+- Task 4.1: `owner_gate.rs` の署名付きセッションクッキーは、専用の署名鍵を新設せず既存の `OauthConfig.token_hash_key` を `hash.rs::keyed_hash`/`verify_keyed_hash` 経由で再利用している（`src/config.rs` の変更はタスク境界外のため）。この鍵は他に `client_secret`/認可コード/アクセストークンのハッシュにも使われており、ローテーションが結合される点に留意——専用鍵への分離は範囲外・将来の別タスク。
+- Task 4.1: `owner_gate.rs` が所有するのは署名付きクッキー**値**のエンコード/デコード（`encode_session_cookie`/`decode_session_cookie`）のみで、実際の `Set-Cookie` ヘッダ（`HttpOnly`/`SameSite`/`Secure` 属性)組み立てはタスク 5.2 (`authorize_endpoint.rs`) の責務として残している。design.md の Service Interface が `OwnerSession`/クッキー値を返す形（HTTP ヘッダそのものではない）である点、および Contracts が `Service [x]` のみ（`API [x]` なし）である点から導いた判断。タスク 5.2 実装時はこの前提（クッキー名・属性の組み立てがまだ存在しない）を踏まえること。

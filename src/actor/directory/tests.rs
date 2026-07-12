@@ -21,6 +21,7 @@
 //! projects an actor's active key material and reports "not found" when
 //! there is none (Requirements 3.1, 8.3).
 
+use axum::http::StatusCode;
 use time::OffsetDateTime;
 
 use super::ActorDirectory;
@@ -29,6 +30,7 @@ use crate::actor::model::{ActorState, ActorType, Handle, LocalActor};
 use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
 use crate::domain::Id;
+use crate::error::ErrorKind;
 use crate::test_harness::spawn_test_app;
 
 /// Creates a real owner fixture.
@@ -349,6 +351,75 @@ async fn actor_public_key_returns_none_for_an_actor_with_no_active_key() {
         .await
         .expect("actor_public_key must succeed even with no active key");
     assert!(public_key.is_none());
+
+    app.cleanup().await;
+}
+
+// --- sole_owner (api-foundation task 4.1's upstream addition to this
+// already-implemented/reviewed component; design.md's OwnerGate
+// Responsibilities: "actor-model の単一オーナー取得アクセサ
+// （`ActorDirectory::sole_owner()` 相当）...一人鯖前提でインスタンスに厳密に
+// 1件のみ存在する `owners` 行を返す") ---
+
+/// The common case: exactly one `owners` row exists, and `sole_owner`
+/// returns it.
+#[tokio::test]
+async fn sole_owner_returns_the_single_existing_owner() {
+    let app = spawn_test_app().await;
+    let directory = ActorDirectory::new(app.pool.clone());
+
+    let owner_id = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+    create_owner_fixture(&app.pool, owner_id, now).await;
+
+    let owner = directory
+        .sole_owner()
+        .await
+        .expect("sole_owner must succeed when exactly one owner row exists");
+    assert_eq!(owner.id, owner_id);
+    assert_eq!(owner.created_at, now);
+
+    app.cleanup().await;
+}
+
+/// Zero `owners` rows (an un-bootstrapped instance) violates the
+/// single-owner-per-instance invariant: `sole_owner` must report a `Server`
+/// (5xx) `AppError`, never treat this as "no owner found" (`Ok(None)`) —
+/// this component's contract for `sole_owner` is "there must be exactly
+/// one", not an absence-tolerant lookup like `resolve_actor_by_handle`.
+#[tokio::test]
+async fn sole_owner_reports_a_server_error_when_no_owner_exists() {
+    let app = spawn_test_app().await;
+    let directory = ActorDirectory::new(app.pool.clone());
+
+    let err = directory
+        .sole_owner()
+        .await
+        .expect_err("sole_owner must reject zero owner rows as an invariant violation");
+    assert_eq!(err.kind, ErrorKind::Server);
+    assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    app.cleanup().await;
+}
+
+/// More than one `owners` row (data corruption / a defect that let a second
+/// owner be provisioned) likewise violates the invariant and must report a
+/// `Server` (5xx) `AppError`, not silently pick one via `.first()`.
+#[tokio::test]
+async fn sole_owner_reports_a_server_error_when_more_than_one_owner_exists() {
+    let app = spawn_test_app().await;
+    let directory = ActorDirectory::new(app.pool.clone());
+
+    let now = app.runtime.clock.now();
+    create_owner_fixture(&app.pool, app.runtime.ids.next_id(), now).await;
+    create_owner_fixture(&app.pool, app.runtime.ids.next_id(), now).await;
+
+    let err = directory
+        .sole_owner()
+        .await
+        .expect_err("sole_owner must reject more than one owner row as an invariant violation");
+    assert_eq!(err.kind, ErrorKind::Server);
+    assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
 
     app.cleanup().await;
 }
