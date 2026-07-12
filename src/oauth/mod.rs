@@ -22,6 +22,7 @@ pub mod hash;
 pub mod model;
 pub mod pkce;
 pub mod scope;
+pub mod token_repository;
 
 pub use model::{AccessToken, AuthorizationCode, OauthApp, OwnerSession, RequestActorContext};
 pub use pkce::{PkceChallenge, PkceMethod, verify_pkce};
