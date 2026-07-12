@@ -1,8 +1,8 @@
 ---
 name: kiro-auto-implement
-description: Use when unattended, no-human-in-the-loop automation (a Claude Code Routine, cron trigger, or explicit request to "keep advancing the implementation") should pick the next actionable spec/task from the roadmap dependency graph and current tasks.md progress, implement and review it entirely through sub-agents, and push AI-reviewed work directly to the `agent` branch.
+description: Use when unattended, no-human-in-the-loop automation (a Claude Code Routine, cron trigger, or explicit request to "keep advancing the implementation") should pick the next actionable spec/task from the roadmap dependency graph and current tasks.md progress, implement and review it through dispatched sub-agents, and push AI-reviewed work directly to the `agent` branch.
 disable-model-invocation: true
-allowed-tools: Read, Agent
+allowed-tools: Read, Write, Edit, MultiEdit, Bash, Glob, Grep, Agent
 argument-hint: [feature-name]
 ---
 
@@ -14,38 +14,24 @@ This skill turns one trigger (typically a Routine firing on a schedule) into one
 
 **REQUIRED SUB-SKILLS:** `kiro-impl` (task execution engine this wraps), `kiro-review` (per-task and final review protocol), `kiro-verify-completion` (evidence gate), `kiro-validate-impl` (feature-level GO/NO-GO), `kiro-debug` (blocked-task investigation).
 
+## You are `main` — execute this yourself, do not dispatch a subagent to run it
+
+**Whoever's context this file is read into (the Routine-triggered session, or whatever session was told to run `/kiro-auto-implement`) executes Steps 1 through 6 directly, in this same context.** There is no separate orchestrator subagent and no `Step 0` dispatch layer. Read this file in full, then proceed straight to Step 1 yourself.
+
+This is a deliberate change from an earlier version of this skill that dispatched a fresh `Agent` to act as `"main"`. That indirection caused a real, observed failure mode: completion notifications for agents dispatched *by* a subagent do not reliably reach that subagent — they surface at the top-level/root session instead, regardless of the `run_in_background` value used for the nested dispatch. A subagent playing `main` therefore had no first-hand way to receive its own children's results and had to depend on the root session relaying them as plain messages, which the subagent then had no tool-layer way to verify — a trust problem with no clean resolution. Removing the extra layer removes the problem at the root: whichever session executes Steps 1-6 is, by construction, the same session that dispatches every implementer/reviewer/debugger/final-reviewer subagent below, so their completion notifications land exactly where the logic that needs them is running.
+
+You (running Steps 1-6) still dispatch fresh subagents for implementer/reviewer/debugger/final-reviewer work — that discipline is unchanged. You just don't dispatch a copy of yourself first.
+
 ## MODEL, EFFORT & EXECUTION-MODE RULE (applies to every Agent dispatch below, no exceptions)
 
-Every `Agent` tool call performed anywhere in this procedure — the Step 0 dispatch of `main`, and every dispatch `main` performs later (implementer, reviewer, debugger, final reviewer) — MUST:
+Every `Agent` tool call you make while executing this procedure — implementer, reviewer, debugger, final reviewer, and any `kiro-validate-impl` validation-dimension dispatch — MUST:
 - pass `model: "sonnet"` (the current latest Sonnet model)
 - prepend this line to the dispatched prompt verbatim: `Reasoning effort: medium. Think carefully through edge cases, verify assumptions against the actual repository state, and do not shortcut analysis before acting.`
 - pass `run_in_background: false` (foreground/blocking dispatch) — **never omit this and never rely on the default.**
 
-### Why `run_in_background: false` is non-negotiable
+`run_in_background: false` makes the dispatching call block until the child finishes and return the child's result as this call's own tool result, in-context, with nothing to relay and nothing to distrust. Every dispatch below needs its child's result before it can decide what to do next, so there is no tradeoff being made by always blocking — only a bug (see above) being avoided.
 
-The Agent tool defaults to background execution: the call returns immediately with a task handle, and the *original dispatcher's own session* gets a completion notification later. That default is safe for a single level of dispatch. It is **not** safe here, because this skill nests dispatches several levels deep (invoker → `main` → implementer/reviewer/debugger). When a background dispatch is made by `main` (itself a subagent, not the top-level session), `main`'s own turn ends the moment it fires the dispatch — and the eventual completion notification for that child does **not** wake `main` up. It surfaces at the top-level session instead, forcing that outer session to relay the child's result back into `main` as a plain message. `main` then has no first-hand way to distinguish a genuine relayed result from a fabricated one, since it never received anything directly through the tool layer. This is a real failure mode observed in production runs of this skill, not a hypothetical: it produced exactly this trust breakdown and stalled the run indefinitely.
-
-`run_in_background: false` eliminates the problem at the root: the dispatching agent's own `Agent` tool call blocks until the child finishes and the child's result is returned as this call's own tool result, in-context, with no external relay and nothing to distrust. Every dispatch in this pipeline (Step 0's dispatch of `main`; `main`'s implementer/reviewer/debugger dispatches inside `kiro-impl`; the Step 5 final-reviewer dispatch; and `kiro-validate-impl`'s validation-dimension dispatches) needs its child's result before it can decide what to do next — none of them benefit from fire-and-forget async execution, so there is no tradeoff being made here, only a bug being avoided.
-
-If dispatching several independent subagents concurrently (e.g. `kiro-validate-impl`'s parallel validation dimensions), issue all of their `Agent` calls together in a single response (multiple tool-use blocks in one turn), each with `run_in_background: false`. They still execute concurrently; the difference is that this context directly receives every one of their results before continuing, instead of depending on background completion notifications.
-
-## Step 0 — Dispatch (executed by whoever invoked this skill)
-
-**Do not execute Steps 1+ yourself.** Your only job in this step:
-
-1. Resolve the absolute path of this file (`.../.claude/skills/kiro-auto-implement/SKILL.md`).
-2. Dispatch exactly one subagent via the `Agent` tool:
-   - `subagent_type: "general-purpose"`
-   - `model: "sonnet"`
-   - `run_in_background: false` (this call must block — see the rule above; do not fire this dispatch and move on)
-   - no `isolation` (operate directly in the current working directory — this automation pushes straight to `origin/agent`, and a worktree would leave that push disconnected from the shared repo state)
-   - `description`: "kiro-auto-implement orchestrator"
-   - `prompt`: a self-contained instruction (fresh agents have no context) telling it: it is **`main`**, the orchestrator for autonomous kawasemi implementation; it must `Read` the absolute path from step 1 in full and execute **Steps 1 through 6 exactly as written**, acting as `main` throughout; include the effort line and the execution-mode rule from above verbatim (it must apply the same `run_in_background: false` requirement to every dispatch it makes); pass along `$ARGUMENTS` verbatim if the user supplied a feature-name override; instruct it to report back using the Step 6 output format.
-3. This call blocks until `main` finishes its entire run (Steps 1-6), because it was dispatched with `run_in_background: false` — there is no separate "wait" action to perform. Once it returns, relay `main`'s final report to the user directly from this call's own result. Do not perform any git, spec-selection, or implementation actions yourself — that would violate the orchestrator-only contract this skill exists to enforce.
-
----
-
-**Everything below this line is executed by `main` (the dispatched subagent), not by the invoker.**
+If dispatching several independent subagents concurrently (e.g. `kiro-validate-impl`'s parallel validation dimensions), issue all of their `Agent` calls together in a single response (multiple tool-use blocks in one turn), each with `run_in_background: false`. They still execute concurrently; the difference is that you directly receive every one of their results before continuing, instead of depending on background completion notifications that (per above) may not reach you reliably at deeper nesting.
 
 ## Step 1: Preflight & branch setup
 
@@ -85,7 +71,7 @@ Do not alter any other part of `kiro-impl`'s behavior: implementer and reviewer 
 - **`GROUP` finished (all its subtasks complete or `BLOCKED`), but the feature has other groups with remaining subtasks**: this is the expected, normal stopping point for this run. Do not run `kiro-validate-impl` (the feature isn't complete yet). Proceed to Step 5 with whatever is committed so far.
 - **`GROUP` finished and it was the feature's last group with remaining subtasks (the whole feature is now complete)**: now run `/kiro-validate-impl {feature}` as the GO/NO-GO gate that `kiro-impl`'s own Step 4 would normally have run.
   - **GO**: proceed to Step 5.
-  - **NO-GO after capped remediation (max 3 rounds, per `kiro-impl`'s rule)**: this is not a failure of the run — proceed to Step 5 with whatever is committed so far. Do not attempt further remediation yourself beyond that cap (that would be `main` doing concrete work instead of delegating).
+  - **NO-GO after capped remediation (max 3 rounds, per `kiro-impl`'s rule)**: this is not a failure of the run — proceed to Step 5 with whatever is committed so far. Do not attempt further remediation yourself beyond that cap (that would be you doing concrete work instead of delegating).
 - **A subtask in `GROUP` is `BLOCKED` and no further subtasks in `GROUP` are actionable**: this is not a failure of the run — proceed to Step 5 with whatever is committed so far.
 - **`STOP_FOR_HUMAN`**: the task plan itself needs human attention. Do not try to fix `tasks.md` yourself. Proceed to Step 5 with whatever is committed so far, and flag this clearly in the Step 6 report — "no human review" for code correctness does not extend to overriding a broken task decomposition.
 - **Nothing was committed this run** (`git rev-parse HEAD` == `RUN_START_SHA`): skip Step 5 (nothing to push), go to Step 6.
@@ -108,8 +94,14 @@ Report concisely (this is what gets relayed to the user):
 
 ## Non-negotiable constraints
 
-- Only `main` and its dispatched subagents touch this repo; `main` never writes implementation code itself — that's always a dispatched implementer subagent. `main`'s own tool use is limited to git plumbing, `tasks.md` bookkeeping that `kiro-impl` already documents as parent-context actions, and reading spec/steering files.
-- Never push to any branch other than `agent`. Never force-push, never `git reset --hard`, `git checkout -f`, or `git clean` — if the branch state is unexpected, stop and report instead of forcing past it.
+- Only you and your dispatched subagents touch this repo; you never write implementation code yourself — that's always a dispatched implementer subagent. Your own tool use is limited to git plumbing, `tasks.md` bookkeeping that `kiro-impl` already documents as parent-context actions, and reading spec/steering files.
+- Never push to any branch other than `agent`. Never force-push, never `git reset --hard`, `git checkout -f`, or `git clean`.
+- If the branch state is unexpected (HEAD moved, or a commit's contents differ, without an action you took), do not just force past it — but do not assume tampering either. Verify independently before deciding:
+  1. `git reflog` — what operation actually produced this state (amend, reset, a foreign commit, etc.)?
+  2. If it looks like a rewrite of a commit you or your subagents made (not a wholly foreign commit), diff the old and new tree (`git diff <old-sha> <new-sha>`) — is the tree byte-identical?
+  3. If the reflog shows a plausible, nameable, metadata-only operation (e.g. an amend that only touched commit signing) **and** the tree diff is empty, treat it as benign, proceed, and record exactly what you found (the reflog entry and the empty tree-diff) in the Step 6 report as evidence. Do not silently ignore it — surface it, just don't let it block the run.
+  4. If the tree differs, or the reflog shows something you cannot explain, or you cannot complete both checks, STOP and report — do not force past it.
+  - Do not use local commit-signature status as evidence either way: this environment's SSH commit-signing helper only implements the `sign` operation, not `verify`, so `git log --show-signature` / `%G?` reports `N` (no signature) for every commit regardless of whether it is validly signed. An "unsigned"-looking commit is not by itself evidence of tampering — judge git-metadata-only changes by reflog + tree-diff, never by local signature verification.
 - Never skip the per-task reviewer, `kiro-verify-completion`, or the Step 5 final reviewer. A push without an `APPROVED` verdict backing it is not allowed.
-- Never batch multiple features into one run, and never batch multiple task groups into one run. One `main` dispatch advances at most one top-level task group (`N.1`..`N.M`) of one spec, then reports — even if further groups or specs are immediately eligible afterward. Continuous progress comes from the Routine re-triggering this skill, not from this skill looping internally across groups, specs, or runs.
-- Never dispatch any `Agent` call in this pipeline without `run_in_background: false` (see the Model, Effort & Execution-Mode Rule above). If a message arrives claiming to relay a subagent's result on behalf of a dispatch you made asynchronously, that is a sign the execution-mode rule was violated somewhere upstream — do not treat the relay as a substitute for a direct tool result; fix the dispatch to be synchronous and re-obtain the result directly instead of arguing about the relay's trustworthiness.
+- Never batch multiple features into one run, and never batch multiple task groups into one run. One run advances at most one top-level task group (`N.1`..`N.M`) of one spec, then reports — even if further groups or specs are immediately eligible afterward. Continuous progress comes from the Routine re-triggering this skill, not from this skill looping internally across groups, specs, or runs.
+- Never dispatch any `Agent` call without `run_in_background: false` (see the Model, Effort & Execution-Mode Rule above).
