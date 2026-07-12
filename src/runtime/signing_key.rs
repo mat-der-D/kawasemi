@@ -128,22 +128,28 @@ impl SigningKeyProvider for FixedSigningKeyProvider {
 mod tests {
     use super::*;
 
-    const FIXED_PEM: &[u8] = b"-----BEGIN PRIVATE KEY-----\nfixed-test-key\n-----END PRIVATE KEY-----\n";
+    const FIXED_PEM: &[u8] =
+        b"-----BEGIN PRIVATE KEY-----\nfixed-test-key\n-----END PRIVATE KEY-----\n";
 
     #[test]
     fn fixed_signing_key_provider_reproduces_the_same_key_material_across_repeated_calls() {
         let provider = FixedSigningKeyProvider::new(SigningKey::from_pem_bytes(FIXED_PEM.to_vec()));
         let key_ref = KeyRef(Id::from_i64(42));
 
-        let first = provider.signing_key(key_ref).expect("fixed provider never fails");
-        let second = provider.signing_key(key_ref).expect("fixed provider never fails");
+        let first = provider
+            .signing_key(key_ref)
+            .expect("fixed provider never fails");
+        let second = provider
+            .signing_key(key_ref)
+            .expect("fixed provider never fails");
 
         assert_eq!(first.expose_pem_bytes(), FIXED_PEM);
         assert_eq!(first.expose_pem_bytes(), second.expose_pem_bytes());
     }
 
     #[test]
-    fn fixed_signing_key_provider_reproduces_the_same_key_material_across_separately_constructed_instances() {
+    fn fixed_signing_key_provider_reproduces_the_same_key_material_across_separately_constructed_instances()
+     {
         let a = FixedSigningKeyProvider::new(SigningKey::from_pem_bytes(FIXED_PEM.to_vec()));
         let b = FixedSigningKeyProvider::new(SigningKey::from_pem_bytes(FIXED_PEM.to_vec()));
         let key_ref = KeyRef(Id::from_i64(7));
@@ -167,7 +173,10 @@ mod tests {
 
         // Not randomly generated per call/actor: the same fixed key comes
         // back regardless of which actor's KeyRef is requested.
-        assert_eq!(for_actor_one.expose_pem_bytes(), for_actor_two.expose_pem_bytes());
+        assert_eq!(
+            for_actor_one.expose_pem_bytes(),
+            for_actor_two.expose_pem_bytes()
+        );
         assert_eq!(for_actor_one.expose_pem_bytes(), FIXED_PEM);
     }
 

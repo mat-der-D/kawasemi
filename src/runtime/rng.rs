@@ -56,7 +56,11 @@ impl SeededRng {
         // xorshift64 is undefined for a zero state (it would only ever
         // produce zero), so substitute a fixed nonzero constant in that one
         // case while remaining fully deterministic for the given seed.
-        let state = if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed };
+        let state = if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        };
         Self {
             state: AtomicU64::new(state),
         }

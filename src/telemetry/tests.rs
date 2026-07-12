@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
 use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::Layer;
+use tracing_subscriber::layer::{Context, SubscriberExt};
 
 use super::*;
 use crate::config::LogLevel;
@@ -41,7 +41,8 @@ struct FieldMap(HashMap<String, String>);
 
 impl Visit for FieldMap {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.0.insert(field.name().to_string(), format!("{value:?}"));
+        self.0
+            .insert(field.name().to_string(), format!("{value:?}"));
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
@@ -220,7 +221,11 @@ fn request_span_uses_the_canonical_name_and_carries_the_request_id_field() {
     drop(span.enter());
 
     let spans = capture.spans.lock().unwrap();
-    assert_eq!(spans.len(), 1, "request_span should create exactly one span");
+    assert_eq!(
+        spans.len(),
+        1,
+        "request_span should create exactly one span"
+    );
     assert_eq!(spans[0].name, REQUEST_SPAN_NAME);
     assert_eq!(
         spans[0].fields.get(REQUEST_ID_FIELD).map(String::as_str),
@@ -250,8 +255,8 @@ fn init_telemetry_installs_a_global_subscriber_exactly_once() {
     let second = init_telemetry(&cfg);
     match second {
         Err(TelemetryError::AlreadyInitialized(_)) => {}
-        other => panic!(
-            "a second init_telemetry call must fail as AlreadyInitialized, got: {other:?}"
-        ),
+        other => {
+            panic!("a second init_telemetry call must fail as AlreadyInitialized, got: {other:?}")
+        }
     }
 }

@@ -147,7 +147,11 @@ async fn list_actors_for_owner_returns_only_that_owners_actors() {
         .expect("list_actors_for_owner must succeed for owner A");
     owner_a_summaries.sort_by_key(|s| s.id);
 
-    assert_eq!(owner_a_summaries.len(), 2, "must return exactly owner A's two actors");
+    assert_eq!(
+        owner_a_summaries.len(),
+        2,
+        "must return exactly owner A's two actors"
+    );
     let ids: Vec<Id> = owner_a_summaries.iter().map(|s| s.id).collect();
     assert!(ids.contains(&a1.id));
     assert!(ids.contains(&a2.id));
@@ -293,7 +297,15 @@ async fn actor_public_key_returns_active_public_key_when_present() {
     let actor_id = app.runtime.ids.next_id();
     let now = app.runtime.clock.now();
     create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_id, "keyed_bob", ActorState::Active, now).await;
+    insert_actor_fixture(
+        &app.pool,
+        owner_id,
+        actor_id,
+        "keyed_bob",
+        ActorState::Active,
+        now,
+    )
+    .await;
 
     let key_id = app.runtime.ids.next_id();
     let key = insert_active_key_fixture(&app.pool, key_id, actor_id, now).await;
@@ -322,8 +334,15 @@ async fn actor_public_key_returns_none_for_an_actor_with_no_active_key() {
     let actor_id = app.runtime.ids.next_id();
     let now = app.runtime.clock.now();
     create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_id, "keyless_carol", ActorState::Active, now)
-        .await;
+    insert_actor_fixture(
+        &app.pool,
+        owner_id,
+        actor_id,
+        "keyless_carol",
+        ActorState::Active,
+        now,
+    )
+    .await;
 
     let public_key = directory
         .actor_public_key(actor_id)

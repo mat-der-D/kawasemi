@@ -196,9 +196,17 @@ mod tests {
 
     #[test]
     fn handle_new_rejects_disallowed_characters() {
-        for bad in ["alice bot", "alice@bot", "alice.bot", "アリス", "alice-bot", "alice/bot"] {
-            let err = Handle::new(bad)
-                .expect_err(&format!("handle {bad:?} with disallowed characters must be rejected"));
+        for bad in [
+            "alice bot",
+            "alice@bot",
+            "alice.bot",
+            "アリス",
+            "alice-bot",
+            "alice/bot",
+        ] {
+            let err = Handle::new(bad).expect_err(&format!(
+                "handle {bad:?} with disallowed characters must be rejected"
+            ));
             assert_eq!(err.status, StatusCode::BAD_REQUEST);
         }
     }

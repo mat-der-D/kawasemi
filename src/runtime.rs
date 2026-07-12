@@ -106,7 +106,8 @@ impl RuntimeContext {
         // fixed base time offset by the seed (in seconds) is sufficient;
         // this also keeps the fixed time within `OffsetDateTime`'s valid
         // range for arbitrary `u64` seeds.
-        let fixed_time = OffsetDateTime::UNIX_EPOCH + Duration::seconds((seed.0 % 1_000_000_000) as i64);
+        let fixed_time =
+            OffsetDateTime::UNIX_EPOCH + Duration::seconds((seed.0 % 1_000_000_000) as i64);
         Self {
             clock: Arc::new(FixedClock::new(fixed_time)),
             ids: Arc::new(SeqIdGenerator::new(seed.0 as i64)),
@@ -141,8 +142,14 @@ mod context_tests {
         assert_eq!(buf_a, buf_b);
 
         let key_ref = KeyRef(Id::from_i64(7));
-        let key_a = a.keys.signing_key(key_ref).expect("deterministic provider never fails");
-        let key_b = b.keys.signing_key(key_ref).expect("deterministic provider never fails");
+        let key_a = a
+            .keys
+            .signing_key(key_ref)
+            .expect("deterministic provider never fails");
+        let key_b = b
+            .keys
+            .signing_key(key_ref)
+            .expect("deterministic provider never fails");
         assert_eq!(key_a.expose_pem_bytes(), key_b.expose_pem_bytes());
     }
 

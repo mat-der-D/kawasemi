@@ -20,8 +20,8 @@
 use time::OffsetDateTime;
 
 use super::{
-    SigningKeyStatus, StoredSigningKey, find_active_public_key, insert_active_key,
-    load_all_active, retire_active_key,
+    SigningKeyStatus, StoredSigningKey, find_active_public_key, insert_active_key, load_all_active,
+    retire_active_key,
 };
 use crate::actor::model::{ActorState, ActorType, Handle, LocalActor};
 use crate::actor::owner::create_owner;
@@ -175,9 +175,7 @@ async fn retire_active_key_transitions_status_and_allows_a_new_active_key() {
     insert_active_key(&mut tx, &old_key)
         .await
         .expect("inserting the initial active key must succeed");
-    tx.commit()
-        .await
-        .expect("committing must succeed");
+    tx.commit().await.expect("committing must succeed");
 
     let later = now + time::Duration::seconds(60);
     let mut tx = app
@@ -214,9 +212,7 @@ async fn retire_active_key_transitions_status_and_allows_a_new_active_key() {
     insert_active_key(&mut tx, &new_key)
         .await
         .expect("inserting a new active key after retirement must succeed");
-    tx.commit()
-        .await
-        .expect("committing must succeed");
+    tx.commit().await.expect("committing must succeed");
 
     let public_key = find_active_public_key(&app.pool, actor_id)
         .await
@@ -265,9 +261,7 @@ async fn insert_active_key_rejects_a_second_simultaneous_active_key_for_the_same
     insert_active_key(&mut tx, &first_key)
         .await
         .expect("inserting the first active key must succeed");
-    tx.commit()
-        .await
-        .expect("committing must succeed");
+    tx.commit().await.expect("committing must succeed");
 
     let second_key_id = app.runtime.ids.next_id();
     let second_key = sample_key(second_key_id, actor_id, now);
@@ -318,9 +312,7 @@ async fn retire_active_key_is_a_no_op_success_for_an_actor_with_no_active_key() 
     retire_active_key(&mut tx, actor_id, now)
         .await
         .expect("retire_active_key must succeed even when there is no active key to retire");
-    tx.commit()
-        .await
-        .expect("committing must succeed");
+    tx.commit().await.expect("committing must succeed");
 
     app.cleanup().await;
 }

@@ -52,13 +52,11 @@ fn should_run_against_real_database(test_name: &str) -> bool {
 }
 
 async fn raw_http_get(addr: std::net::SocketAddr, path: &str) -> String {
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::net::TcpStream::connect(addr),
-    )
-    .await
-    .expect("connecting to spawn_test_app's address must not time out")
-    .expect("connect");
+    let mut stream =
+        tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
+            .await
+            .expect("connecting to spawn_test_app's address must not time out")
+            .expect("connect");
     let request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
     stream
         .write_all(request.as_bytes())
@@ -165,13 +163,11 @@ async fn spawn_test_app_isolates_database_state_between_instances() {
         .await
         .expect("creating a table in app_a's isolated schema must succeed");
 
-    let visible_in_b = sqlx::query(
-        "SELECT to_regclass('isolation_probe') IS NOT NULL AS visible",
-    )
-    .fetch_one(&app_b.pool)
-    .await
-    .expect("app_b must be able to run the visibility probe query")
-    .get::<bool, _>("visible");
+    let visible_in_b = sqlx::query("SELECT to_regclass('isolation_probe') IS NOT NULL AS visible")
+        .fetch_one(&app_b.pool)
+        .await
+        .expect("app_b must be able to run the visibility probe query")
+        .get::<bool, _>("visible");
 
     assert!(
         !visible_in_b,
