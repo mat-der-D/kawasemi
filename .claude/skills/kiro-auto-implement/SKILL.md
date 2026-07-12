@@ -18,13 +18,14 @@ This skill turns one trigger (typically a Routine firing on a schedule) into one
 
 **Whoever's context this file is read into (the Routine-triggered session, or whatever session was told to run `/kiro-auto-implement`) executes Steps 1 through 6 directly, in this same context.** There is no separate orchestrator subagent and no `Step 0` dispatch layer. Read this file in full, then proceed straight to Step 1 yourself.
 
-This is a deliberate change from an earlier version of this skill that dispatched a fresh `Agent` to act as `"main"`. That indirection caused a real, observed failure mode: completion notifications for agents dispatched *by* a subagent do not reliably reach that subagent — they surface at the top-level/root session instead, regardless of the `run_in_background` value used for the nested dispatch. A subagent playing `main` therefore had no first-hand way to receive its own children's results and had to depend on the root session relaying them as plain messages, which the subagent then had no tool-layer way to verify — a trust problem with no clean resolution. Removing the extra layer removes the problem at the root: whichever session executes Steps 1-6 is, by construction, the same session that dispatches every implementer/reviewer/debugger/final-reviewer subagent below, so their completion notifications land exactly where the logic that needs them is running.
+This is a deliberate change from an earlier version of this skill that dispatched a fresh `Agent` to act as `"main"`. That indirection caused a real, observed failure mode: completion notifications for agents dispatched _by_ a subagent do not reliably reach that subagent — they surface at the top-level/root session instead, regardless of the `run_in_background` value used for the nested dispatch. A subagent playing `main` therefore had no first-hand way to receive its own children's results and had to depend on the root session relaying them as plain messages, which the subagent then had no tool-layer way to verify — a trust problem with no clean resolution. Removing the extra layer removes the problem at the root: whichever session executes Steps 1-6 is, by construction, the same session that dispatches every implementer/reviewer/debugger/final-reviewer subagent below, so their completion notifications land exactly where the logic that needs them is running.
 
 You (running Steps 1-6) still dispatch fresh subagents for implementer/reviewer/debugger/final-reviewer work — that discipline is unchanged. You just don't dispatch a copy of yourself first.
 
 ## MODEL, EFFORT & EXECUTION-MODE RULE (applies to every Agent dispatch below, no exceptions)
 
 Every `Agent` tool call you make while executing this procedure — implementer, reviewer, debugger, final reviewer, and any `kiro-validate-impl` validation-dimension dispatch — MUST:
+
 - pass `model: "sonnet"` (the current latest Sonnet model)
 - prepend this line to the dispatched prompt verbatim: `Reasoning effort: medium. Think carefully through edge cases, verify assumptions against the actual repository state, and do not shortcut analysis before acting.`
 - pass `run_in_background: false` (foreground/blocking dispatch) — **never omit this and never rely on the default.**
@@ -62,7 +63,7 @@ A whole feature (11-26 subtasks across specs seen so far) is too large a unit fo
 1. Read `.kiro/specs/<feature>/tasks.md`. Task IDs are `N` (top-level group heading, not directly executable) and `N.M` (actionable subtask). Find the **first** top-level group `N` that has at least one subtask `N.M` which is not yet `[x]` and has no `_Blocked:_` annotation. Call this `GROUP`. This run works on `GROUP` only — never subtasks from any other group, even if individually eligible (e.g. a `(P)` task in a later group).
 2. Invoke the `kiro-impl` skill for the chosen feature in **autonomous mode** (fresh-subagent-per-task dispatch discipline — do not switch to manual/main-context mode), with these modifications to its documented procedure:
    - Restrict the task queue built in `kiro-impl`'s "Build task queue" step to subtasks whose ID starts with `GROUP.` (e.g. `2.1`, `2.2`, ...). Ignore other groups' tasks entirely for this run, even ones with satisfied dependencies.
-   - Skip `kiro-impl`'s own Step 4 ("Final Validation") entirely. Whether `kiro-validate-impl` runs at all is decided by this skill's Step 4 below, based on whether the *whole feature* — not just `GROUP` — is complete after this run.
+   - Skip `kiro-impl`'s own Step 4 ("Final Validation") entirely. Whether `kiro-validate-impl` runs at all is decided by this skill's Step 4 below, based on whether the _whole feature_ — not just `GROUP` — is complete after this run.
 
 Do not alter any other part of `kiro-impl`'s behavior: implementer and reviewer are still fresh subagents dispatched per task (apply the Model, Effort & Execution-Mode Rule above to those dispatches too), `kiro-review` and `kiro-verify-completion` still gate every task, and `kiro-debug` still handles `BLOCKED`/rejection-round-3 per its existing bounded-retry rules. Within this restricted queue, `kiro-impl` runs until its own natural stop: every subtask in `GROUP` is complete or `BLOCKED`, or `STOP_FOR_HUMAN` is raised.
 
@@ -86,6 +87,7 @@ Do not alter any other part of `kiro-impl`'s behavior: implementer and reviewer 
 ## Step 6: Report
 
 Report concisely (this is what gets relayed to the user):
+
 - Feature selected and why (or why none was eligible), and which group (`GROUP`) this run worked on.
 - Tasks completed this run (task IDs + one-line descriptions), with commit SHAs.
 - Whether the feature is now fully complete or groups remain for a future run.
