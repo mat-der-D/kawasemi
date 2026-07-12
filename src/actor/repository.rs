@@ -181,11 +181,11 @@ fn row_to_local_actor(row: LocalActorRow) -> LocalActor {
 /// occur given `IdGenerator`'s uniqueness contract) becomes a `Server` (5xx)
 /// `AppError`.
 fn map_insert_error(source: sqlx::Error) -> AppError {
-    if let Some(db_error) = source.as_database_error() {
-        if db_error.is_unique_violation() && db_error.constraint() == Some(HANDLE_UNIQUE_CONSTRAINT)
-        {
-            return AppError::client(StatusCode::CONFLICT, "handle is already in use");
-        }
+    if let Some(db_error) = source.as_database_error()
+        && db_error.is_unique_violation()
+        && db_error.constraint() == Some(HANDLE_UNIQUE_CONSTRAINT)
+    {
+        return AppError::client(StatusCode::CONFLICT, "handle is already in use");
     }
     AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
 }
