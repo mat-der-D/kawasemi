@@ -87,7 +87,7 @@
   - _Boundary: AppsEndpoint_
   - _Depends: 4.2_
 
-- [ ] 5.2 認可・承認画面・アクター選択エンドポイントを実装する
+- [x] 5.2 認可・承認画面・アクター選択エンドポイントを実装する
   - 認可エンドポイントで GET 時にオーナー認証を要求し、actor-model のオーナー別アクター一覧を承認画面に提示する。承認画面はオーナーセッションに紐づく CSRF トークンをフォームへ埋め込んで描画する
   - POST 時に選択アクター・承認スコープ・CSRF トークンを受け取り、CSRF トークンがオーナーセッションのものと一致することを検証してから認可コードを発行・登録 URI へリダイレクトする。不一致時は認可コードを発行せず 403 相当の Mastodon 互換エラーで拒否する。承認拒否は OAuth 準拠のアクセス拒否を返す
   - これは OAuth サービス・オーナーゲート・アクターディレクトリを束ねる横断結線であり、明示的な統合作業として扱う
@@ -194,3 +194,5 @@
 - Task 4.2: スコープの「承認スコープ ⊆ アプリ登録スコープ」内包チェックは `issue_authorization_code` にのみ実装し、`exchange_token` では独立検証しない（トークン交換はコードに既にバインドされたスコープをそのまま引き継ぐのみで、独自のスコープ入力を持たないため）。`actor_id` を無条件に信頼するのと同じ設計判断。
 - Task 5.1: `apps_endpoint.rs::verify_credentials` は `OauthService`（タスク 4.2）を経由せず `app_repository::verify_app_credentials` を直接呼ぶ。`OauthService` の task-4.2 インターフェースに verify 系メソッドが無く、レビュー済みの `service.rs` をこのタスクの境界外で拡張したくないための判断（レビューで許容）。将来 `OauthService` の表面を広げてこのバイパスを解消する場合は `service.rs` 側の再訪が必要。
 - Task 5.1: `GET /api/v1/apps/verify_credentials` は design.md の API Contract 表が書く「Bearer」ではなく HTTP Basic 認証（`client_id:client_secret`）で資格情報を受け取る。Requirement 1.5 はトランスポート手段を規定しておらず、本 spec には client_credentials グラントのトークン発行経路が無いため（レビューで許容・design.md 側の記述誤りと判断）。design.md の当該行は将来「HTTP Basic (client_id:client_secret)」に修正すべき（未実施）。
+- Task 5.2: `authorize_endpoint.rs` はログイン画面と承認画面の両方を単一の GET/POST `/oauth/authorize` に束ね、セッションクッキーの有無/有効性で分岐する（design.md のファイル構成計画に別のログインエンドポイントが無いため）。元の認可要求パラメータ（client_id/redirect_uri/scope/response_type）はログイン→承認の往復をまたいで hidden フィールドで運ぶが、コード発行直前に登録済みアプリに対して再検証し、hidden フィールドを無条件に信頼しない。選択アクターは必ず `list_actors_for_owner` の結果に含まれることを確認してからコード発行する（クライアント供給の actor_id を無条件に信頼しない）。CSRF トークンはオーナーセッションに束縛した HMAC 値で、保存不要・定数時間比較。レビューでこれらのセキュリティ境界は健全と確認済み。
+- Task 5.2: `state` パラメータ・PKCE の `authorize_endpoint.rs` 側フォワーディングは本タスクの要求範囲（2.1–2.4）外のため未実装（PKCE 自体は 2.6/3.3 で `code_repository`/`pkce.rs` が別途対応）。オーナーセッションクッキーは承認判断後もローテーションしない（10分の短命 TTL で許容、レビューで非ブロッキングと判断）。CSRF トークンはリクエスト単位ではなくセッション単位で束縛（spec の文言上は許容範囲、将来のタスクで再検討の余地ありとレビューで指摘）。
