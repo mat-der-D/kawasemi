@@ -16,6 +16,13 @@
 //!   [`pagination`]. No endpoint or router in this spec consumes it (this
 //!   spec has no list endpoints); downstream feature specs call it
 //!   directly from their own list endpoints.
+//! - Task 6.3 (`Boundary: RateLimit`): a genuine `tower::Layer`/
+//!   `tower::Service` that attaches `X-RateLimit-*` headers to every
+//!   response and returns a Mastodon-compatible 429 once a `Clock`-derived
+//!   fixed window is exhausted — see [`ratelimit`]. Proven here only via a
+//!   minimal test-only router driven with `tower::ServiceExt::oneshot`;
+//!   wiring it into the live production router is task 7.1's job.
 
 pub mod error;
 pub mod pagination;
+pub mod ratelimit;
