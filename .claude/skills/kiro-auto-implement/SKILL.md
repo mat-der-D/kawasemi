@@ -1,7 +1,7 @@
 ---
 name: kiro-auto-implement
 description: Use when unattended, no-human-in-the-loop automation (a Claude Code Routine, cron trigger, or explicit request to "keep advancing the implementation") should pick the next actionable spec/task from the roadmap dependency graph and current tasks.md progress, implement and review it through dispatched sub-agents, and push AI-reviewed work directly to the `agent` branch.
-disable-model-invocation: true
+disable-model-invocation: false 
 allowed-tools: Read, Write, Edit, MultiEdit, Bash, Glob, Grep, Agent
 argument-hint: [feature-name]
 ---
