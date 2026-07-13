@@ -18,6 +18,7 @@
 //! `mod bootstrap;`.
 
 pub mod actor;
+pub mod api;
 pub mod bootstrap;
 pub mod config;
 pub mod db;
