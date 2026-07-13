@@ -27,6 +27,7 @@ pub mod pkce;
 pub mod scope;
 pub mod service;
 pub mod templates;
+pub mod token_endpoint;
 pub mod token_repository;
 
 pub use model::{AccessToken, AuthorizationCode, OauthApp, OwnerSession, RequestActorContext};
