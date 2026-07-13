@@ -1,12 +1,13 @@
 //! Shared, immutable application state handle (AppState boundary,
 //! Requirements 1.1, 3.3, 5.5, 5.6).
 //!
-//! Scope: this module owns bundling the four things every downstream
+//! Scope: this module owns bundling the things every downstream
 //! handler/service needs a shared reference to — the database connection
 //! pool (`PgPool`, established by `db::establish_pool`, task 4.1), the
 //! non-determinism injection boundaries (`RuntimeContext`, task 5.6), the
-//! validated startup configuration (`AppConfig`, task 2.1), and (as of
-//! actor-model's task 6.1) the actor-model service bundle (`ActorModule`) —
+//! validated startup configuration (`AppConfig`, task 2.1), the actor-model
+//! service bundle (`ActorModule`, actor-model task 6.1), and (as of
+//! api-foundation's task 7.1) the OAuth service bundle (`OauthModule`) —
 //! behind a single handle that is cheap to clone and safe to share across
 //! concurrent axum request handlers.
 //!
@@ -32,6 +33,7 @@ use sqlx::PgPool;
 
 use crate::actor::ActorModule;
 use crate::config::AppConfig;
+use crate::oauth::OauthModule;
 use crate::runtime::RuntimeContext;
 
 /// The data `AppState` bundles, held behind a single `Arc` so cloning the
@@ -42,6 +44,7 @@ struct AppStateInner {
     runtime: RuntimeContext,
     config: AppConfig,
     actor: ActorModule,
+    oauth: OauthModule,
 }
 
 /// Immutable, cheaply-cloneable shared handle bundling the database
@@ -59,16 +62,18 @@ pub struct AppState {
 
 impl AppState {
     /// Builds an `AppState` from an already-established pool, an
-    /// already-constructed runtime context, an already-validated config,
-    /// and an already-assembled actor-model service bundle. Callers (the
-    /// Bootstrap composition root, task 7.4/6.1) are responsible for
-    /// constructing each of these first — this constructor only bundles
-    /// them.
+    /// already-constructed runtime context, an already-validated config, an
+    /// already-assembled actor-model service bundle, and an
+    /// already-assembled OAuth service bundle (task 7.1, api-foundation's
+    /// `OauthModule`). Callers (the Bootstrap composition root, task 7.4/6.1
+    /// and 7.1) are responsible for constructing each of these first — this
+    /// constructor only bundles them.
     pub fn new(
         pool: PgPool,
         runtime: RuntimeContext,
         config: AppConfig,
         actor: ActorModule,
+        oauth: OauthModule,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -76,6 +81,7 @@ impl AppState {
                 runtime,
                 config,
                 actor,
+                oauth,
             }),
         }
     }
@@ -112,5 +118,14 @@ impl AppState {
     /// booted with.
     pub fn actor(&self) -> &ActorModule {
         &self.inner.actor
+    }
+
+    /// The shared OAuth service bundle (task 7.1, Requirements 1.1, 2.1,
+    /// 3.1, 5.1): downstream handlers (`src/server.rs`'s OAuth endpoint
+    /// wiring, and the Bearer auth middleware via `AuthState`) retrieve the
+    /// one shared `OauthService`/pool/token-hash-key/owner-credential handle
+    /// through this accessor rather than each constructing their own.
+    pub fn oauth(&self) -> &OauthModule {
+        &self.inner.oauth
     }
 }

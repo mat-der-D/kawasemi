@@ -142,7 +142,7 @@
 #[cfg(test)]
 mod tests;
 
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRef, FromRequestParts};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode, header};
 
@@ -160,7 +160,8 @@ use sqlx::postgres::PgPool;
 const UNAUTHENTICATED_MESSAGE: &str = "the access token is missing, invalid, or has been revoked";
 
 /// Caller-facing message for insufficient scope (Requirements 4.2, 4.3).
-const INSUFFICIENT_SCOPE_MESSAGE: &str = "this action requires a scope the access token was not granted";
+const INSUFFICIENT_SCOPE_MESSAGE: &str =
+    "this action requires a scope the access token was not granted";
 
 /// Converts a placeholder [`model::ScopeSet`] (as carried by
 /// `RequestActorContext.scopes`) into the real [`scope::ScopeSet`] so
@@ -233,7 +234,10 @@ pub fn require_authenticated(
 /// never reimplemented here. `required` is the *required* set (`self` in
 /// `is_satisfied_by`'s own signature); `ctx.scopes` (bridged to a real
 /// `scope::ScopeSet` via `to_real_scopes`) is the *granted* set.
-pub fn require_scope(ctx: &RequestActorContext, required: &scope::ScopeSet) -> Result<(), AppError> {
+pub fn require_scope(
+    ctx: &RequestActorContext,
+    required: &scope::ScopeSet,
+) -> Result<(), AppError> {
     let granted = to_real_scopes(&ctx.scopes)?;
     if required.is_satisfied_by(&granted) {
         Ok(())
@@ -262,10 +266,23 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 
 /// The minimal state [`OptionalActor`]/[`RequiredActor`] need (see this
 /// module's doc comment, "Axum integration shape") — `&PgPool` and
-/// `&TokenHashKey`, nothing more, since `AppState` cannot carry OAuth wiring
-/// yet (task 7.1's job). A later task is free to either mount routes using
-/// this state directly, or bridge it from a wider `AppState` via
-/// `axum::extract::FromRef`; this module does not need to guess which.
+/// `&TokenHashKey`, nothing more.
+///
+/// Task 7.1 bridges this from the wider `crate::state::AppState` via
+/// `impl axum::extract::FromRef<AppState> for AuthState` (`src/server.rs`),
+/// which is exactly why [`OptionalActor`]/[`RequiredActor`] below implement
+/// `FromRequestParts<S>` generically over any `S: AuthState: FromRef<S>`
+/// rather than only `FromRequestParts<AuthState>`: `axum::extract::State<T>`
+/// gets this same "derive a narrower state from a wider one via `FromRef`"
+/// promotion for free from axum itself, but a hand-written extractor like
+/// `OptionalActor`/`RequiredActor` (which is not `State<T>`) does not — it
+/// has to ask for the promotion explicitly, which is what the `where
+/// AuthState: FromRef<S>` bound on each impl below does. This is what lets
+/// these two extractors be used directly inside a handler mounted on
+/// `Router<AppState>` (task 7.1's production router), not only inside this
+/// module's own `AuthState`-only test router (`tests.rs`'s `test_router`,
+/// which keeps working unchanged: `AuthState: FromRef<AuthState>` holds via
+/// axum-core's blanket reflexive `impl<T: Clone> FromRef<T> for T`).
 #[derive(Clone)]
 pub struct AuthState {
     pub pool: PgPool,
@@ -279,15 +296,18 @@ pub struct AuthState {
 /// [`authenticate`]'s doc comment).
 pub struct OptionalActor(pub Option<RequestActorContext>);
 
-impl FromRequestParts<AuthState> for OptionalActor {
+impl<S> FromRequestParts<S> for OptionalActor
+where
+    AuthState: FromRef<S>,
+    S: Send + Sync,
+{
     type Rejection = AppError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AuthState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let auth_state = AuthState::from_ref(state);
         let bearer = bearer_token(&parts.headers);
-        let ctx = authenticate(&state.pool, &state.token_hash_key, bearer.as_deref()).await?;
+        let ctx = authenticate(&auth_state.pool, &auth_state.token_hash_key, bearer.as_deref())
+            .await?;
         Ok(OptionalActor(ctx))
     }
 }
@@ -299,13 +319,14 @@ impl FromRequestParts<AuthState> for OptionalActor {
 /// [`require_authenticated`] — no separate resolution logic.
 pub struct RequiredActor(pub RequestActorContext);
 
-impl FromRequestParts<AuthState> for RequiredActor {
+impl<S> FromRequestParts<S> for RequiredActor
+where
+    AuthState: FromRef<S>,
+    S: Send + Sync,
+{
     type Rejection = AppError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AuthState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let OptionalActor(ctx) = OptionalActor::from_request_parts(parts, state).await?;
         Ok(RequiredActor(require_authenticated(ctx)?))
     }

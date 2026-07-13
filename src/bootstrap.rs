@@ -95,6 +95,7 @@ use crate::config::{self, AppConfig, ConfigError};
 use crate::db::{self, DbError};
 use crate::error::AppError;
 use crate::migrate::{self, MigrateError};
+use crate::oauth::OauthModule;
 use crate::runtime::{RuntimeContext, SnowflakeIdGenerator, SystemClock, SystemRng};
 use crate::server::{self, ServeError};
 use crate::state::AppState;
@@ -339,7 +340,37 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     // `AppState` now carries.
     let (runtime, actor_module) = build_actor_wiring(&pool, &cfg).await?;
 
-    Ok(AppState::new(pool, runtime, cfg, actor_module))
+    // Assembles the OAuth service bundle (task 7.1, api-foundation's
+    // Requirements 1.1, 2.1, 3.1, 5.1): builds the one shared `OauthService`
+    // from the same `pool`/`runtime` every other composition-root component
+    // shares, plus the startup-configured `oauth.token_hash_key`/
+    // `owner.password` secrets (task 1.2) `OauthModule` needs.
+    //
+    // CONCERN (documented judgment call): `cookie_secure` is hardcoded to
+    // `false` here. design.md's Security Considerations call for the
+    // owner-session cookie's `Secure` attribute "TLS 配信時" (when served
+    // over TLS), but `AppConfig`/`ServerConfig` (`src/config.rs`) has no
+    // TLS-termination setting at all — this crate's own HTTP listener
+    // (`src/server.rs`) never terminates TLS itself, and Modified Files for
+    // this task does not list `src/config.rs`, so adding one is out of this
+    // task's boundary. `false` is the conservative choice: a single-owner
+    // instance commonly sits behind a reverse proxy terminating TLS in
+    // front of a plain-HTTP origin, and a `Secure` cookie would silently
+    // break owner login entirely on such a deployment (browsers refuse to
+    // send `Secure` cookies over a plain-HTTP connection), whereas omitting
+    // `Secure` only weakens (not breaks) a deployment that *is* served
+    // directly over TLS. A future task adding TLS-awareness to
+    // `ServerConfig` should flip this to that setting instead of a fixed
+    // constant.
+    let oauth_module = OauthModule::new(
+        pool.clone(),
+        runtime.clone(),
+        cfg.oauth.token_hash_key.clone(),
+        cfg.owner.clone(),
+        false,
+    );
+
+    Ok(AppState::new(pool, runtime, cfg, actor_module, oauth_module))
 }
 
 /// Assembles all application dependencies and runs the server

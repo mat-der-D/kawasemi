@@ -40,6 +40,7 @@ use crate::config::{
     ServerConfig,
 };
 use crate::error::{AppError, GENERIC_SERVER_MESSAGE};
+use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::telemetry::{REQUEST_ID_FIELD, REQUEST_SPAN_NAME};
 
@@ -98,7 +99,14 @@ fn test_state(seed: u64) -> AppState {
     let cipher: Arc<dyn KeyCipher> =
         Arc::new(ChaCha20Poly1305KeyCipher::new(Secret::new(TEST_KEK)));
     let actor_module = build_actor_module(pool.clone(), runtime.clone(), cipher, KeyCache::new());
-    AppState::new(pool, runtime, config, actor_module)
+    let oauth_module = OauthModule::new(
+        pool.clone(),
+        runtime.clone(),
+        config.oauth.token_hash_key.clone(),
+        config.owner.clone(),
+        false,
+    );
+    AppState::new(pool, runtime, config, actor_module, oauth_module)
 }
 
 /// Speaks a minimal raw HTTP/1.1 GET request over a fresh `TcpStream` and

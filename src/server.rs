@@ -45,9 +45,10 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
+use axum::extract::FromRef;
 use axum::http::{Request, Response, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
@@ -55,9 +56,92 @@ use tokio::sync::oneshot;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
+use crate::api::ratelimit::{RateLimitPolicy, rate_limit_layer};
 use crate::config::ServerConfig;
+use crate::oauth::apps_endpoint::{self, AppsEndpointState};
+use crate::oauth::authorize_endpoint::{self, AuthorizeEndpointState};
+use crate::oauth::middleware::AuthState;
+use crate::oauth::token_endpoint::{self, TokenEndpointState};
 use crate::state::AppState;
 use crate::telemetry;
+
+/// `POST /api/v1/apps` / `GET /api/v1/apps/verify_credentials` path
+/// (design.md's API Contract table, api-foundation task 5.1).
+const APPS_PATH: &str = "/api/v1/apps";
+const APPS_VERIFY_CREDENTIALS_PATH: &str = "/api/v1/apps/verify_credentials";
+/// `GET`/`POST /oauth/authorize` path (task 5.2).
+const AUTHORIZE_PATH: &str = "/oauth/authorize";
+/// `POST /oauth/token` / `POST /oauth/revoke` paths (task 5.3).
+const TOKEN_PATH: &str = "/oauth/token";
+const REVOKE_PATH: &str = "/oauth/revoke";
+
+/// Rate-limit policy applied to the whole router (task 7.1, api-foundation
+/// Requirements 8.1-8.4): a single-owner deployment ("一人鯖前提") has
+/// exactly one legitimate caller class, so this is a generous fixed-window
+/// limit — Requirement 8.4 explicitly sanctions a loose real value as long
+/// as the header shape/computation convention (`crate::api::ratelimit`,
+/// already reviewed, task 6.3) stays consistent, which this wiring
+/// preserves unchanged.
+const RATE_LIMIT_PER_WINDOW: u32 = 300;
+const RATE_LIMIT_WINDOW: time::Duration = time::Duration::seconds(60);
+
+/// Bridges `crate::state::AppState` to [`AuthState`] (task 7.1): lets the
+/// Bearer auth extractors (`oauth::middleware::OptionalActor`/
+/// `RequiredActor`) be used directly inside a handler mounted on
+/// `Router<AppState>` — see `middleware.rs`'s own doc comment ("Axum
+/// integration shape") for why those extractors need this bridge spelled
+/// out explicitly rather than getting it automatically the way
+/// `axum::extract::State<T>` does.
+impl FromRef<AppState> for AuthState {
+    fn from_ref(state: &AppState) -> Self {
+        AuthState {
+            pool: state.pool().clone(),
+            token_hash_key: state.oauth().token_hash_key().clone(),
+        }
+    }
+}
+
+/// Bridges `AppState` to [`AppsEndpointState`] (task 7.1, `_Boundary:
+/// AppsEndpoint_`'s own "not `AppState`" judgment call, resolved here by
+/// deriving one from the other via `FromRef` rather than editing
+/// `apps_endpoint.rs`'s already-reviewed state type).
+impl FromRef<AppState> for AppsEndpointState {
+    fn from_ref(state: &AppState) -> Self {
+        AppsEndpointState {
+            service: state.oauth().service().clone(),
+            pool: state.pool().clone(),
+            token_hash_key: state.oauth().token_hash_key().clone(),
+        }
+    }
+}
+
+/// Bridges `AppState` to [`AuthorizeEndpointState`] (task 7.1), mirroring
+/// [`AppsEndpointState`]'s own `FromRef` bridge above.
+impl FromRef<AppState> for AuthorizeEndpointState {
+    fn from_ref(state: &AppState) -> Self {
+        AuthorizeEndpointState {
+            service: state.oauth().service().clone(),
+            pool: state.pool().clone(),
+            owner_credential: state.oauth().owner_credential().clone(),
+            directory: state.actor().directory().clone(),
+            token_hash_key: state.oauth().token_hash_key().clone(),
+            runtime: state.runtime().clone(),
+            cookie_secure: state.oauth().cookie_secure(),
+        }
+    }
+}
+
+/// Bridges `AppState` to [`TokenEndpointState`] (task 7.1), mirroring
+/// [`AppsEndpointState`]'s own `FromRef` bridge above.
+impl FromRef<AppState> for TokenEndpointState {
+    fn from_ref(state: &AppState) -> Self {
+        TokenEndpointState {
+            service: state.oauth().service().clone(),
+            pool: state.pool().clone(),
+            token_hash_key: state.oauth().token_hash_key().clone(),
+        }
+    }
+}
 
 /// Path of the minimal liveness route this task adds (Requirement 1.1).
 pub const HEALTH_PATH: &str = "/health";
@@ -74,30 +158,73 @@ async fn health() -> impl IntoResponse {
     (StatusCode::OK, axum::Json(HealthBody { status: "ok" }))
 }
 
-/// Builds the foundation `Router<AppState>` (Requirement 1.1): the minimal
-/// `GET /health` liveness route, plus the mount point later specs extend by
+/// Builds the foundation `Router<AppState>` (Requirement 1.1, and — as of
+/// task 7.1 — api-foundation Requirements 1.1, 2.1, 3.1, 5.1): the minimal
+/// `GET /health` liveness route, the four OAuth endpoints
+/// (`apps`/`authorize`/`token`/`revoke`, tasks 5.1-5.3, mounted here per
+/// design.md's "Modified Files" entry for this file: "ルータに OAuth/apps
+/// エンドポイントを mount"), plus the mount point later specs extend by
 /// `.merge()`/`.nest()`-ing their own routes onto the returned value
 /// *before* a caller finalizes it with [`build_router`]'s `.with_state()`
 /// step (routes must share the `AppState` state type to merge cleanly).
+/// Each OAuth handler's own small state type (`AppsEndpointState`/
+/// `AuthorizeEndpointState`/`TokenEndpointState`) is derived from `AppState`
+/// automatically via the `impl axum::extract::FromRef<AppState>` blocks
+/// above — no separate `.with_state()`/`.merge()` per route group is
+/// needed.
 ///
 /// Deliberately does not attach [`TraceLayer`] itself: middleware that needs
 /// to close over a concrete `AppState` value (to draw `request_id`s from its
 /// `RuntimeContext`, see module docs) can only be attached once a concrete
 /// `AppState` is available, which is [`build_router`]'s job.
 pub fn router() -> Router<AppState> {
-    Router::new().route(HEALTH_PATH, get(health))
+    Router::new()
+        .route(HEALTH_PATH, get(health))
+        .route(APPS_PATH, post(apps_endpoint::register_app))
+        .route(
+            APPS_VERIFY_CREDENTIALS_PATH,
+            get(apps_endpoint::verify_credentials),
+        )
+        .route(
+            AUTHORIZE_PATH,
+            get(authorize_endpoint::authorize_get).post(authorize_endpoint::authorize_post),
+        )
+        .route(TOKEN_PATH, post(token_endpoint::exchange_token))
+        .route(REVOKE_PATH, post(token_endpoint::revoke_token))
 }
 
 /// Builds the complete, ready-to-serve foundation router (Requirements 1.1,
-/// 7.2): [`router`]'s routes, with [`tower_http::trace::TraceLayer`]
-/// attached so every request/response is logged inside a
-/// [`crate::telemetry::request_span`] carrying a `request_id` drawn from
-/// `state`'s `RuntimeContext` (see module docs), and `state` applied so the
-/// result is a plain `Router` ready for [`axum::serve`].
+/// 7.2; api-foundation Requirements 7.1-7.5, 8.1-8.4): [`router`]'s routes,
+/// with the `X-RateLimit-*`-attaching rate-limit layer (task 6.3's
+/// [`rate_limit_layer`], applied here per design.md's "Modified Files"
+/// entry for this file: "横断レイヤー（エラー変換・RL）を全 API に適用する
+/// 装着点を用意") and [`tower_http::trace::TraceLayer`] attached so every
+/// request/response is logged inside a [`crate::telemetry::request_span`]
+/// carrying a `request_id` drawn from `state`'s `RuntimeContext` (see module
+/// docs), and `state` applied so the result is a plain `Router` ready for
+/// [`axum::serve`].
+///
+/// Mastodon-compatible error-body conversion (task 6.1's
+/// `crate::api::error::mastodon_error_body`) needs no separate layer here:
+/// it is wired in as `crate::error::AppError`'s own default
+/// `IntoResponse` (see `src/error.rs`'s doc comment), so every handler that
+/// reports failures as a plain `AppError` — every OAuth endpoint above, and
+/// any future handler — renders through it automatically.
+///
+/// Rate-limiting is applied *inside* `TraceLayer` (added first here, then
+/// wrapped by `TraceLayer` below) so a rate-limited (429) response is still
+/// logged the same way any other response is, consistent with
+/// Requirement 8.1's "レート制限の対象応答" covering the over-limit response
+/// too.
 pub fn build_router(state: AppState) -> Router {
     let span_state = state.clone();
+    let rate_limit_clock = state.runtime().clock.clone();
 
     router()
+        .layer(rate_limit_layer(
+            rate_limit_clock,
+            RateLimitPolicy::new(RATE_LIMIT_PER_WINDOW, RATE_LIMIT_WINDOW),
+        ))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(move |_request: &Request<Body>| {

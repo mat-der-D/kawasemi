@@ -27,6 +27,7 @@ use crate::config::{
     ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, OauthConfig, OwnerConfig, Secret,
     ServerConfig,
 };
+use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 
 const LAZY_TEST_DB_URL: &str = "postgres://lazy-user:lazy-pw@127.0.0.1:5432/lazy-test-db";
@@ -94,6 +95,21 @@ fn sample_actor_module(pool: sqlx::PgPool, runtime: RuntimeContext) -> ActorModu
     build_actor_module(pool, runtime, cipher, KeyCache::new())
 }
 
+/// Builds an `OauthModule` from `config`'s own `oauth.token_hash_key`/
+/// `owner.password` (task 7.1) — these tests never touch a real database
+/// (see this module's own doc comment), and `OauthModule::new` only stores
+/// `pool`/`runtime`/the secret material, matching `sample_actor_module`'s
+/// identical "no real I/O" property.
+fn sample_oauth_module(pool: sqlx::PgPool, runtime: RuntimeContext, config: &AppConfig) -> OauthModule {
+    OauthModule::new(
+        pool,
+        runtime,
+        config.oauth.token_hash_key.clone(),
+        config.owner.clone(),
+        false,
+    )
+}
+
 /// Requirements 1.1, 3.3, 5.5, 5.6: downstream code must be able to retrieve
 /// the pool, the injection boundaries (via `RuntimeContext`), and the
 /// validated config values from `AppState`, unchanged from what was passed
@@ -105,8 +121,9 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
     let config = sample_config("state.example.test", 7);
     let pool = lazy_pool(config.database.max_connections);
     let actor = sample_actor_module(pool.clone(), runtime.clone());
+    let oauth = sample_oauth_module(pool.clone(), runtime.clone(), &config);
 
-    let state = AppState::new(pool, runtime, config.clone(), actor);
+    let state = AppState::new(pool, runtime, config.clone(), actor, oauth);
 
     // Config values are retrievable and match what was supplied.
     assert_eq!(state.config().server.domain, "state.example.test");
@@ -154,8 +171,9 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
     let config = sample_config("clone.example.test", 3);
     let pool = lazy_pool(config.database.max_connections);
     let actor = sample_actor_module(pool.clone(), runtime.clone());
+    let oauth = sample_oauth_module(pool.clone(), runtime.clone(), &config);
 
-    let state = AppState::new(pool, runtime, config, actor);
+    let state = AppState::new(pool, runtime, config, actor, oauth);
     assert_eq!(Arc::strong_count(&state.inner), 1);
 
     let cloned = state.clone();

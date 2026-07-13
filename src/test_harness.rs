@@ -94,6 +94,7 @@ use crate::config::{
 };
 use crate::db;
 use crate::migrate;
+use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::server;
 use crate::state::AppState;
@@ -270,6 +271,17 @@ pub struct TestApp {
     /// `actor.signing_key_service()`/`actor.actor_service()` are
     /// immediately observable via `runtime.keys.signing_key(..)`.
     pub actor: ActorModule,
+    /// The fully-assembled `AppState` this instance is serving (task 7.1):
+    /// the exact same value passed to [`crate::server::build_router`] below,
+    /// exposed so a caller's own integration test can build additional
+    /// `AppState`-compatible test-only routers (mirroring
+    /// `src/server/tests.rs`'s established "merge a test-only route onto
+    /// `router()`, then `.with_state(state)`" technique) against the real,
+    /// running instance's exact composition-root wiring — e.g. to prove the
+    /// Bearer auth middleware's `AuthState: FromRef<AppState>` bridge
+    /// (`src/server.rs`) works, without needing a second, separately-wired
+    /// `AppState` reconstructed field-by-field.
+    pub state: AppState,
     /// Name of this instance's isolated PostgreSQL schema (Requirement 8.4).
     /// `Some` until whichever of [`TestApp::cleanup`] or `Drop` runs first
     /// takes it, so the schema is torn down exactly once even though `Drop`
@@ -470,8 +482,28 @@ pub async fn spawn_test_app() -> TestApp {
         },
     };
 
-    let state = AppState::new(pool.clone(), runtime.clone(), config, actor_module.clone());
-    let router = server::build_router(state);
+    // Assembles the OAuth service bundle (task 7.1) the same way
+    // `bootstrap()`'s production path does (`OauthModule::new`), from this
+    // instance's own fixed, non-production `oauth.token_hash_key`/
+    // `owner.password` (see `config` above). `cookie_secure: false` mirrors
+    // `bootstrap.rs`'s own production default (this test harness never
+    // serves over TLS either).
+    let oauth_module = OauthModule::new(
+        pool.clone(),
+        runtime.clone(),
+        config.oauth.token_hash_key.clone(),
+        config.owner.clone(),
+        false,
+    );
+
+    let state = AppState::new(
+        pool.clone(),
+        runtime.clone(),
+        config,
+        actor_module.clone(),
+        oauth_module,
+    );
+    let router = server::build_router(state.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let server_task = tokio::spawn(async move {
@@ -487,6 +519,7 @@ pub async fn spawn_test_app() -> TestApp {
         pool,
         runtime,
         actor: actor_module,
+        state,
         schema: Some(schema),
         shutdown_tx: Some(shutdown_tx),
         server_task: Some(server_task),

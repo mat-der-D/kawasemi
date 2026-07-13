@@ -15,6 +15,23 @@
 //! wire format, such as a Mastodon-compatible error envelope, without
 //! redefining the conversion end-to-end (Requirement 6.5).
 //!
+//! ## Router-wide default is api-foundation's Mastodon-compatible renderer
+//! (task 7.1, api-foundation Requirement 7.4)
+//! [`AppError`]'s own [`IntoResponse`] impl renders through
+//! [`crate::api::error::mastodon_error_body`] rather than [`default_response`]
+//! — see that function's own doc comment ("Usage:
+//! `app_error.into_response_with(mastodon_error_body)`. Wiring this in as
+//! the router-wide default...is task 7.1's job") for why this is the
+//! intended way to apply api-foundation's error body cross-cuttingly to
+//! every endpoint without editing each handler individually: every handler
+//! in this crate reports failures as a plain `AppError` (via `?`), so
+//! whichever renderer this one blanket `impl IntoResponse for AppError`
+//! delegates to is automatically what the *entire* router (present and
+//! future) responds with. `default_response` remains available (and
+//! exercised by this module's own tests via `into_response_with`) for a
+//! caller that explicitly wants the bare `{"error": public_message}` shape
+//! instead.
+//!
 //! This module does not open or manage the `request_id`-carrying span
 //! itself — that is `crate::telemetry`'s `request_span`, wired into the
 //! request pipeline by a later task (7.2). A 5xx log emitted from here
@@ -165,6 +182,11 @@ pub fn default_response(error: &AppError) -> Response {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        self.into_response_with(default_response)
+        // See this module's doc comment ("Router-wide default is
+        // api-foundation's Mastodon-compatible renderer") for why this
+        // delegates to `crate::api::error::mastodon_error_body` instead of
+        // this module's own `default_response` (task 7.1, api-foundation
+        // Requirement 7.4).
+        self.into_response_with(crate::api::error::mastodon_error_body)
     }
 }
