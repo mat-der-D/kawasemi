@@ -21,6 +21,7 @@ pub mod apps_endpoint;
 pub mod authorize_endpoint;
 pub mod code_repository;
 pub mod hash;
+pub mod middleware;
 pub mod model;
 pub mod owner_gate;
 pub mod pkce;
@@ -30,6 +31,7 @@ pub mod templates;
 pub mod token_endpoint;
 pub mod token_repository;
 
+pub use middleware::{authenticate, require_authenticated, require_scope};
 pub use model::{AccessToken, AuthorizationCode, OauthApp, OwnerSession, RequestActorContext};
 pub use pkce::{PkceChallenge, PkceMethod, verify_pkce};
 pub use scope::{Scope, ScopeSet};
