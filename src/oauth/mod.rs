@@ -17,6 +17,7 @@
 //! middleware) have been implemented yet.
 
 pub mod app_repository;
+pub mod apps_endpoint;
 pub mod code_repository;
 pub mod hash;
 pub mod model;

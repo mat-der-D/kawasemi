@@ -80,7 +80,7 @@
   - _Depends: 2.2, 2.3, 3.1, 3.2, 3.3_
 
 - [ ] 5. OAuth エンドポイント層
-- [ ] 5.1 apps エンドポイントを実装する
+- [x] 5.1 apps エンドポイントを実装する
   - アプリ登録エンドポイントと資格情報検証エンドポイントを実装し、登録応答にクライアント資格情報を含め、検証応答に公開情報を返す
   - 必須欠落/形式不正は互換エラー、無効資格情報は認証エラーになることを統合テストで確認できる
   - _Requirements: 1.1, 1.2, 1.5_
@@ -192,3 +192,5 @@
 - Task 4.2: タスク 2.1/2.2/2.3 が「後続タスクへ委ねる」と明記していた `model::ScopeSet`（プレースホルダ・裸の `BTreeSet<String>`）↔ 実装の `scope::ScopeSet`（`crate::oauth::ScopeSet` として再エクスポート、語彙検証・`is_satisfied_by` 判定を持つ）、および `model::PkceChallenge`（プレースホルダ・`challenge: String` のみ）↔ 実装の `pkce::PkceChallenge`（`crate::oauth::PkceChallenge` として再エクスポート、`method: PkceMethod` を持つ）の橋渡しを `service.rs` に実装した。`model.rs`/`scope.rs`/`pkce.rs` は無変更。今後 `model::ScopeSet`/`model::PkceChallenge` を扱う後続タスク（5.x エンドポイント層等）は `service.rs` のこの変換関数（scope 変換・PKCE 再構成ロジック）を再利用し、変換ロジックを再発明しないこと。
 - Task 4.2: `exchange_token` はクライアント資格情報の検証を `code_repository::consume_code`（単回消費）より先に行うため、誤ったクライアント資格情報はコードを消費しない。ただし `consume_code` の後でしか redirect_uri/PKCE 不整合を検知できない（`code_repository` に消費なしの peek API が無いため）ので、redirect_uri 不一致や PKCE 不整合の場合でもコードは消費済みになる（クライアントは新しいコードで再試行が必要）。これは `code_repository`（タスク 3.2、レビュー済み）の API 形状に起因する制約であり、実世界の OAuth サーバーの一般的挙動とも整合するためレビューで許容された判断。`code_repository` に peek API を追加する場合はこの制約を再検討すること。
 - Task 4.2: スコープの「承認スコープ ⊆ アプリ登録スコープ」内包チェックは `issue_authorization_code` にのみ実装し、`exchange_token` では独立検証しない（トークン交換はコードに既にバインドされたスコープをそのまま引き継ぐのみで、独自のスコープ入力を持たないため）。`actor_id` を無条件に信頼するのと同じ設計判断。
+- Task 5.1: `apps_endpoint.rs::verify_credentials` は `OauthService`（タスク 4.2）を経由せず `app_repository::verify_app_credentials` を直接呼ぶ。`OauthService` の task-4.2 インターフェースに verify 系メソッドが無く、レビュー済みの `service.rs` をこのタスクの境界外で拡張したくないための判断（レビューで許容）。将来 `OauthService` の表面を広げてこのバイパスを解消する場合は `service.rs` 側の再訪が必要。
+- Task 5.1: `GET /api/v1/apps/verify_credentials` は design.md の API Contract 表が書く「Bearer」ではなく HTTP Basic 認証（`client_id:client_secret`）で資格情報を受け取る。Requirement 1.5 はトランスポート手段を規定しておらず、本 spec には client_credentials グラントのトークン発行経路が無いため（レビューで許容・design.md 側の記述誤りと判断）。design.md の当該行は将来「HTTP Basic (client_id:client_secret)」に修正すべき（未実施）。
