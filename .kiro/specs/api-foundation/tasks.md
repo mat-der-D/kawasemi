@@ -139,7 +139,7 @@
   - _Depends: 5.1, 5.2, 5.3, 6.1, 6.3, 6.4_
 
 - [ ] 8. 契約テストハーネス
-- [ ] 8.1 エンティティ契約テストハーネスを実装する
+- [x] 8.1 エンティティ契約テストハーネスを実装する
   - 決定的な非決定性境界の上でエンティティ JSON 応答を生成し、ゴールデンとの比較で不一致箇所を特定報告し、実クライアントのキャプチャをフィクスチャとして登録できる基盤を、後続 spec が契約を足す拡張点として実装する。個別エンティティ契約の中身は所有しない
   - 同一決定的境界で同一ゴールデンが再現され、差分が箇所特定で報告されることを確認できる
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
@@ -196,4 +196,7 @@
 - Task 5.1: `GET /api/v1/apps/verify_credentials` は design.md の API Contract 表が書く「Bearer」ではなく HTTP Basic 認証（`client_id:client_secret`）で資格情報を受け取る。Requirement 1.5 はトランスポート手段を規定しておらず、本 spec には client_credentials グラントのトークン発行経路が無いため（レビューで許容・design.md 側の記述誤りと判断）。design.md の当該行は将来「HTTP Basic (client_id:client_secret)」に修正すべき（未実施）。
 - Task 5.2: `authorize_endpoint.rs` はログイン画面と承認画面の両方を単一の GET/POST `/oauth/authorize` に束ね、セッションクッキーの有無/有効性で分岐する（design.md のファイル構成計画に別のログインエンドポイントが無いため）。元の認可要求パラメータ（client_id/redirect_uri/scope/response_type）はログイン→承認の往復をまたいで hidden フィールドで運ぶが、コード発行直前に登録済みアプリに対して再検証し、hidden フィールドを無条件に信頼しない。選択アクターは必ず `list_actors_for_owner` の結果に含まれることを確認してからコード発行する（クライアント供給の actor_id を無条件に信頼しない）。CSRF トークンはオーナーセッションに束縛した HMAC 値で、保存不要・定数時間比較。レビューでこれらのセキュリティ境界は健全と確認済み。
 - Task 5.2: `state` パラメータ・PKCE の `authorize_endpoint.rs` 側フォワーディングは本タスクの要求範囲（2.1–2.4）外のため未実装（PKCE 自体は 2.6/3.3 で `code_repository`/`pkce.rs` が別途対応）。オーナーセッションクッキーは承認判断後もローテーションしない（10分の短命 TTL で許容、レビューで非ブロッキングと判断）。CSRF トークンはリクエスト単位ではなくセッション単位で束縛（spec の文言上は許容範囲、将来のタスクで再検討の余地ありとレビューで指摘）。
-- Task 5.3: `OauthService::revoke_token`（タスク 4.2、レビュー済み）はクライアント資格情報を検証せず無条件に冪等（RFC 7009 §2.2）。`token_endpoint.rs` はこれを補うため `app_repository::verify_app_credentials` を直接呼び、資格情報検証をパスしない限り `revoke_token` へ到達しないガードを endpoint 層に実装した（タスク 5.1 の `AppsEndpoint::verify_credentials` と同型の `OauthService` バイパス判断）。トークンの `app_id` が認証済みクライアントのものと一致するかまでは追加検証していない（RFC 上 SHOULD であり MUST ではないため許容、レビューで非ブロッキングと判断）。トークン交換のクライアント資格情報不正は（`exchange_token` 側の既存挙動を維持し）400 で応答し 401 へは意図的に再区分しない（design.md の API Contract 表が同エンドポイントに 400/401 双方を許容として記載しているため、レビューで許容）。
+- Task 5.3: `OauthService::revoke_token`（タスク 4.2、レビュー済み）はクライアント資格情報を検証せず無条件に冪等(RFC 7009 §2.2)。`token_endpoint.rs` はこれを補うため `app_repository::verify_app_credentials` を直接呼び、資格情報検証をパスしない限り `revoke_token` へ到達しないガードを endpoint 層に実装した（タスク 5.1 の `AppsEndpoint::verify_credentials` と同型の `OauthService` バイパス判断）。トークンの `app_id` が認証済みクライアントのものと一致するかまでは追加検証していない（RFC 上 SHOULD であり MUST ではないため許容、レビューで非ブロッキングと判断）。トークン交換のクライアント資格情報不正は（`exchange_token` 側の既存挙動を維持し）400 で応答し 401 へは意図的に再区分しない（design.md の API Contract 表が同エンドポイントに 400/401 双方を許容として記載しているため、レビューで許容）。
+- Task 8.1: `src/contract.rs`（トップレベル、`src/testing/contract.rs` ではない）に `assert_golden`/`register_fixture`/`load_fixture`/`CapturedExchange` を実装した。design.md の File Structure Plan は `src/testing/contract.rs` を想定しているが、`testing/` ディレクトリを新設するほどの複数ファイルが無いため単一ファイル配置とした（レビューで非ブロッキングと確認済み）。後続 spec が本ハーネスへ個別エンティティ契約を追加する際もこの配置を踏襲すること。
+- Task 8.1: `serde_json` を `[dev-dependencies]` から `[dependencies]` へ昇格した。`pub mod contract;` は `#[cfg(test)]` で隔離されておらず、`assert_golden` 等の公開シグネチャが通常ビルドから到達可能なため、dev-dependency のままでは `tests/*.rs` 側からリンクできず必須（レビューで検証済み）。他の `serde_json` 利用箇所（例: `src/domain/primitives.rs`）は全て `#[cfg(test)] mod tests` 内に留まっている点との非対称に注意——契約ハーネスを利用する後続タスクは本クレートで `serde_json` が通常依存になっている前提で良い。
+- Task 8.1: このセッションの `.claude/hooks/cargo-test-stop.sh`（Stop イベント毎に `cargo fmt --all` を無条件実行）が、並行して動作する他エージェントの Stop イベントと競合し、タスク境界外のファイル（`src/bootstrap.rs`/`src/oauth/middleware.rs` 等）に整形のみの差分を再発させることがある（ロジック変更は無し）。実装者・レビュアー双方がこれを検出し `git checkout --` で境界外差分を復元済み。後続タスクのコミット前は `git status --porcelain`/`git diff --stat` で境界外ファイルが紛れ込んでいないか都度確認すること。

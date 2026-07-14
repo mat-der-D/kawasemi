@@ -21,6 +21,7 @@ pub mod actor;
 pub mod api;
 pub mod bootstrap;
 pub mod config;
+pub mod contract;
 pub mod db;
 pub mod domain;
 pub mod error;
