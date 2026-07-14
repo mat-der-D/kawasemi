@@ -160,7 +160,7 @@
   - _Boundary: BearerAuthMiddleware, Scope_
   - _Depends: 7.1_
 
-- [ ] 9.3 (P) ページネーション統合テストを実装する
+- [x] 9.3 (P) ページネーション統合テストを実装する
   - max_id/since_id/min_id/limit の各挙動で欠落・重複・無限ループが起きないこと、`Link` の next/prev が機能すること、カテゴリ別カーソル（status id 以外）が差し替え可能なことを検証する
   - 各カーソルで期待範囲の項目と正しい `Link` ヘッダが返ることを確認できる
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7_
