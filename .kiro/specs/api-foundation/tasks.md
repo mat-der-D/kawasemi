@@ -174,7 +174,7 @@
   - _Boundary: MastodonError, RateLimit_
   - _Depends: 7.1_
 
-- [ ] 9.5 契約ハーネス統合テストを実装する
+- [x] 9.5 契約ハーネス統合テストを実装する
   - ハーネスが決定的境界で再現可能なゴールデンを生成し、差分報告とフィクスチャ登録が受け入れ基準として機能することを、サンプルエンティティで検証する
   - 同一入力で安定したゴールデン比較が成立し、意図的な差分が箇所特定で検出されることを確認できる
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
@@ -201,3 +201,4 @@
 - Task 8.1: `serde_json` を `[dev-dependencies]` から `[dependencies]` へ昇格した。`pub mod contract;` は `#[cfg(test)]` で隔離されておらず、`assert_golden` 等の公開シグネチャが通常ビルドから到達可能なため、dev-dependency のままでは `tests/*.rs` 側からリンクできず必須（レビューで検証済み）。他の `serde_json` 利用箇所（例: `src/domain/primitives.rs`）は全て `#[cfg(test)] mod tests` 内に留まっている点との非対称に注意——契約ハーネスを利用する後続タスクは本クレートで `serde_json` が通常依存になっている前提で良い。
 - Task 8.1: このセッションの `.claude/hooks/cargo-test-stop.sh`（Stop イベント毎に `cargo fmt --all` を無条件実行）が、並行して動作する他エージェントの Stop イベントと競合し、タスク境界外のファイル（`src/bootstrap.rs`/`src/oauth/middleware.rs` 等）に整形のみの差分を再発させることがある（ロジック変更は無し）。実装者・レビュアー双方がこれを検出し `git checkout --` で境界外差分を復元済み。後続タスクのコミット前は `git status --porcelain`/`git diff --stat` で境界外ファイルが紛れ込んでいないか都度確認すること。
 - Task 9.2: このセッションには `cargo clippy --all-targets`（`-D warnings` 相当、dead_code 含む）をゲートする Stop フックが別途存在し、`cargo check`/`cargo test` が通っても未使用フィールド等の clippy 警告があれば検出される。実装者は `cargo check`/`cargo test` だけでなく `cargo clippy --all-targets` も自分の検証コマンドに含め、統合テストの共有ヘルパー（`RawResponse` 等、ファイルごとに私的コピーされる）で実際に使わないフィールド（例: `headers`）を持ち込まないこと。
+- Task 9.5: 契約ハーネスの統合テストは `tests/contract_harness_it.rs`（task 8.1、決定的境界での再現性・箇所特定diffを既に検証済み）に加えて `tests/contract_harness_fixture_it.rs`（新設）で `register_fixture`/`load_fixture` を「フィクスチャがゴールデンとして機能する」受け入れ基準として検証した。1ファイルに統合せず2ファイルに分けたのは、`contract_harness_it.rs` 自身のモジュールdocが明記する通り、プロセスグローバルな `UPDATE_GOLDEN_ENV` の設定/解除をunsafeに行うため同一バイナリ内に複数テスト関数を置くと競合するからで、design.md の File Structure Plan が単数形で `tests/contract_harness_it.rs` とだけ記載しているのはこの制約を考慮していない可能性がある(レビューで許容・非ブロッキング)。後続でこのハーネスへ個別エンティティ契約を追加するテストも、同じ理由で新規ファイルへの分割を検討すること。
