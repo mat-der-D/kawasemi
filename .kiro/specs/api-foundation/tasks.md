@@ -153,7 +153,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.3, 2.4, 2.5, 2.6, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6_
   - _Depends: 7.1_
 
-- [ ] 9.2 (P) 認証・スコープ統合テストを実装する
+- [x] 9.2 (P) 認証・スコープ統合テストを実装する
   - Bearer 認証で単一アクター文脈が確定すること、欠如/失効で 401、スコープ不足で 403、上位スコープが細分要求を満たすこと、任意認証で未認証継続することを検証する
   - これらの認証/認可分岐が期待ステータスで応答することを確認できる
   - _Requirements: 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 5.4, 5.5_
@@ -200,3 +200,4 @@
 - Task 8.1: `src/contract.rs`（トップレベル、`src/testing/contract.rs` ではない）に `assert_golden`/`register_fixture`/`load_fixture`/`CapturedExchange` を実装した。design.md の File Structure Plan は `src/testing/contract.rs` を想定しているが、`testing/` ディレクトリを新設するほどの複数ファイルが無いため単一ファイル配置とした（レビューで非ブロッキングと確認済み）。後続 spec が本ハーネスへ個別エンティティ契約を追加する際もこの配置を踏襲すること。
 - Task 8.1: `serde_json` を `[dev-dependencies]` から `[dependencies]` へ昇格した。`pub mod contract;` は `#[cfg(test)]` で隔離されておらず、`assert_golden` 等の公開シグネチャが通常ビルドから到達可能なため、dev-dependency のままでは `tests/*.rs` 側からリンクできず必須（レビューで検証済み）。他の `serde_json` 利用箇所（例: `src/domain/primitives.rs`）は全て `#[cfg(test)] mod tests` 内に留まっている点との非対称に注意——契約ハーネスを利用する後続タスクは本クレートで `serde_json` が通常依存になっている前提で良い。
 - Task 8.1: このセッションの `.claude/hooks/cargo-test-stop.sh`（Stop イベント毎に `cargo fmt --all` を無条件実行）が、並行して動作する他エージェントの Stop イベントと競合し、タスク境界外のファイル（`src/bootstrap.rs`/`src/oauth/middleware.rs` 等）に整形のみの差分を再発させることがある（ロジック変更は無し）。実装者・レビュアー双方がこれを検出し `git checkout --` で境界外差分を復元済み。後続タスクのコミット前は `git status --porcelain`/`git diff --stat` で境界外ファイルが紛れ込んでいないか都度確認すること。
+- Task 9.2: このセッションには `cargo clippy --all-targets`（`-D warnings` 相当、dead_code 含む）をゲートする Stop フックが別途存在し、`cargo check`/`cargo test` が通っても未使用フィールド等の clippy 警告があれば検出される。実装者は `cargo check`/`cargo test` だけでなく `cargo clippy --all-targets` も自分の検証コマンドに含め、統合テストの共有ヘルパー（`RawResponse` 等、ファイルごとに私的コピーされる）で実際に使わないフィールド（例: `headers`）を持ち込まないこと。
