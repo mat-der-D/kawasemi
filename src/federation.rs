@@ -18,6 +18,10 @@
 //! - Task 2.2 (`Boundary: RequestSigner`): attaches an HTTP Signature
 //!   (draft-cavage or RFC 9421) to an outbound request using a local
 //!   actor's currently valid signing key — see [`signatures`].
+//! - Task 2.3 (`Boundary: SignatureVerifier`): verifies a received HTTP
+//!   Signature end-to-end (format detection, signing-input reconstruction,
+//!   public-key resolution with invalidate-and-retry, RSA-SHA256 check),
+//!   returning the verified signer's identity — see [`signatures`].
 //!
 //! Later tasks in this spec (`config`, `inbound`, `outbound`, `endpoints` —
 //! see design.md's File Structure Plan) are out of this task's boundary and
@@ -30,8 +34,9 @@ pub mod urls;
 
 pub use jsonld::{ParsedActivity, accepts_activitypub, parse_activity, serialize};
 pub use signatures::{
-    DEFAULT_PUBLIC_KEY_CACHE_TTL, DbFederationPublicKeyResolver, Digest, FederationHttpClient,
-    HttpResponse, MockFederationHttpClient, OutboundRequest, PublicKeyResolver, RemotePublicKey,
-    RequestSigner, ReqwestFederationHttpClient,
+    DEFAULT_PUBLIC_KEY_CACHE_TTL, DEFAULT_SIGNATURE_MAX_AGE, DbFederationPublicKeyResolver, Digest,
+    FederationHttpClient, HttpResponse, HttpSignatureVerifier, IncomingRequest,
+    MockFederationHttpClient, OutboundRequest, PublicKeyResolver, RemotePublicKey, RequestSigner,
+    ReqwestFederationHttpClient, SignatureVerifier, VerifiedSigner,
 };
 pub use urls::{ActorUrls, ObjectKind};

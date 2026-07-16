@@ -40,16 +40,25 @@
 //!   `core-runtime`'s `SigningKeyProvider` (Requirements 1.1, 1.2, 1.3,
 //!   1.5).
 //!
-//! Sibling files this spec's later tasks own (`verifier.rs` at 2.3,
-//! `negotiation.rs` at 3.x — design.md's File Structure Plan) are
-//! deliberately not declared here yet; each is added by the task that
-//! actually implements it.
+//! Scope so far (task 2.3, `Boundary: SignatureVerifier`):
+//! - [`verifier`]: `SignatureVerifier`/`HttpSignatureVerifier` — verifies a
+//!   received HTTP Signature (draft-cavage or RFC 9421) end-to-end: format
+//!   detection, signing-input reconstruction, covered-component validation,
+//!   `Date` freshness, body-digest match, public-key resolution (with one
+//!   invalidate-and-retry on crypto failure), and the RSA-SHA256
+//!   cryptographic check itself, returning the verified signer's identity
+//!   (Requirements 2.1, 2.2, 2.5, 2.6, 7.1).
+//!
+//! Sibling files this spec's later tasks own (`negotiation.rs` at 3.x —
+//! design.md's File Structure Plan) are deliberately not declared here yet;
+//! each is added by the task that actually implements it.
 
 mod digest;
 mod http_client;
 mod key_resolver;
 mod signer;
 mod suite;
+mod verifier;
 
 pub use digest::Digest;
 pub use http_client::{
@@ -63,4 +72,8 @@ pub use signer::RequestSigner;
 pub use suite::{
     DraftCavageSuite, ParsedSignature, RequestHeaders, Rfc9421Suite, SignableRequest,
     SignatureFormat, SignatureSuite, SigningInput,
+};
+pub use verifier::{
+    DEFAULT_SIGNATURE_MAX_AGE, HttpSignatureVerifier, IncomingRequest, SignatureVerifier,
+    VerifiedSigner,
 };
