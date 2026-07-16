@@ -26,16 +26,25 @@
 //!   outbound request against a host of unknown signature-format support,
 //!   remembering the successful format per host in
 //!   `instance_signature_capabilities` — see [`signatures`].
+//! - Task 3.1 (`Boundary: ReceivedActivityStore`): records each inbound
+//!   Activity's own `id` in `received_activities` and reports new-vs-known
+//!   so business-logic dispatch never runs twice for the same Activity
+//!   (Requirement 7.4), with periodic pruning of rows past the configured
+//!   retention window — see [`inbound`].
 //!
-//! Later tasks in this spec (`config`, `inbound`, `outbound`, `endpoints` —
-//! see design.md's File Structure Plan) are out of this task's boundary and
+//! Later tasks in this spec (`config`, `outbound`, `endpoints` — see
+//! design.md's File Structure Plan) are out of this task's boundary and
 //! deliberately not declared here yet; each is added by the task that
 //! actually implements it.
 
+pub mod inbound;
 pub mod jsonld;
 pub mod signatures;
 pub mod urls;
 
+pub use inbound::{
+    DEFAULT_RECEIVED_ACTIVITY_RETENTION, DbReceivedActivityStore, ReceivedActivityStore,
+};
 pub use jsonld::{ParsedActivity, accepts_activitypub, parse_activity, serialize};
 pub use signatures::{
     DEFAULT_PUBLIC_KEY_CACHE_TTL, DEFAULT_SIGNATURE_MAX_AGE, DbFederationPublicKeyResolver, Digest,
