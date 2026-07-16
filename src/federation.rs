@@ -72,8 +72,8 @@ pub mod signatures;
 pub mod urls;
 
 pub use endpoints::{
-    ObjectDocumentProvider, ObjectDocumentRegistry, OutboxItemsPage, OutboxSource,
-    OutboxSourceRegistry, PageCursor,
+    ActivityPubDocumentBuilder, ObjectDocumentProvider, ObjectDocumentRegistry, OutboxItemsPage,
+    OutboxSource, OutboxSourceRegistry, PageCursor,
 };
 pub use inbound::{
     BlockPolicy, DEFAULT_RECEIVED_ACTIVITY_RETENTION, DbReceivedActivityStore, HandleOutcome,

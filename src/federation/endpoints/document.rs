@@ -96,8 +96,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::actor::Handle;
+use serde_json::{Map, Value};
+
+use crate::actor::{ActorDirectory, ActorType, Handle, ResolvedActor};
 use crate::error::AppError;
+use crate::federation::jsonld::ACTIVITYSTREAMS_CONTEXT;
+use crate::federation::urls::ActorUrls;
 
 /// An opaque outbox-page cursor, passed through
 /// [`OutboxSourceRegistry::collect`] untouched. See this module's doc
@@ -238,5 +242,246 @@ impl OutboxSourceRegistry {
             pages.push(source.outbox_page(actor, page.clone()).await?);
         }
         Ok(pages)
+    }
+}
+
+/// Builds ActivityPub document representations for local actors and their
+/// outbox (design.md's exact `ActivityPubDocumentBuilder` Service Interface;
+/// Requirements 6.1, 6.2, 6.5, 8.1, 8.2, 8.3; task 3.6, `Boundary:
+/// ActivityPubDocumentBuilder`).
+///
+/// This is strictly a *container* builder, not a content owner (this spec's
+/// own Non-Goals, restated in this module's own doc comment):
+/// [`build_actor_document`](Self::build_actor_document) shapes the actor
+/// representation from already-resolved actor-model data ([`ResolvedActor`],
+/// [`crate::actor::ActorPublicKey`] via [`ActorDirectory`]) and
+/// [`ActorUrls`]'s own URL construction, while
+/// [`build_outbox_page`](Self::build_outbox_page) shapes only the
+/// `OrderedCollectionPage` *container* (structure/paging) -- the Activity
+/// bodies it bundles come entirely from whatever [`OutboxSource`]s are
+/// registered on this builder's own [`OutboxSourceRegistry`] (task 3.5),
+/// collected and merged here, never invented or extended by this builder
+/// itself.
+///
+/// ## Actor document shape (design decision, Requirements 6.1, 6.5)
+/// design.md only requires `id`/`inbox`/`outbox`/public key to be present and
+/// owner information to be absent. This builder emits a conventional
+/// ActivityPub actor document: `@context`, `id`, `type` (from
+/// [`ActorType`]), `preferredUsername` (the handle), `name`
+/// (`display_name`), `summary`, `inbox`, `outbox`, and -- only when
+/// [`ActorDirectory::actor_public_key`] returns `Some` -- a `publicKey`
+/// object (`id`/`owner`/`publicKeyPem`). An actor with no active signing key
+/// gets no `publicKey` field at all (never an error, never a fabricated
+/// key): [`ResolvedActor`]/[`crate::actor::ActorPublicKey`] already carry no
+/// owner-identifying field (actor-model's own structural guarantee,
+/// `src/actor/model.rs`'s own exhaustive-destructuring tests), so this
+/// builder cannot leak owner information even by accident -- nothing it
+/// reads from either type has an owner concept to leak. The `publicKey.owner`
+/// field below is the ActivityPub-standard "which actor's key is this"
+/// back-reference (a public actor URL) -- an entirely different concept from
+/// this spec's "オーナー情報" (management-layer administrator identity,
+/// Requirement 6.5), which never enters this method's inputs at all.
+///
+/// ## Outbox page merge (design decision, Requirements 8.1, 8.2, 8.3)
+/// [`OutboxSourceRegistry::collect`] (task 3.5) returns one
+/// [`OutboxItemsPage`] per registered source, uncombined. This builder's own
+/// job (8.1's "順序付きコレクション", 8.2's per-page contract, 8.3's
+/// "範囲外除外") is to:
+/// - bundle every collected source's `items` into one `orderedItems` array
+///   -- exactly their union, nothing invented or dropped (an empty registry,
+///   or all-empty sources, yields an empty `orderedItems`, never a
+///   fabricated one);
+/// - order that union chronologically by each item's own top-level
+///   `"published"` string field, compared as a plain lexicographic string --
+///   sufficient for this spec's own ISO-8601/RFC-3339 convention without
+///   pulling in a date-parsing crate feature this crate does not otherwise
+///   enable. Items missing `"published"` (or where it is present but not a
+///   JSON string) sort **after** every item that has one, preserving their
+///   original (registration-then-page) relative order among themselves and
+///   among any other missing-`published` items ([`Vec::sort_by`] is a stable
+///   sort);
+/// - propagate the **first** non-`None` `next` cursor reported by any
+///   registered source, in registration order, as this page's own `next`.
+///   design.md does not specify multi-source cursor composition; until more
+///   than one real [`OutboxSource`] implementor exists, this is a defensible
+///   MVP choice -- full composition (e.g. a compound cursor encoding every
+///   source's own position) is out of this task's scope.
+pub struct ActivityPubDocumentBuilder {
+    urls: ActorUrls,
+    actor_directory: Arc<ActorDirectory>,
+    outbox_sources: OutboxSourceRegistry,
+}
+
+impl ActivityPubDocumentBuilder {
+    /// Builds a document builder from its three dependencies (design.md's
+    /// Components table: `ActorUrls, JsonLdCodec, ActorDirectory, OutboxSource
+    /// (P0)` -- `JsonLdCodec` enters only as the [`ACTIVITYSTREAMS_CONTEXT`]
+    /// constant this module stamps onto every document it builds, not as a
+    /// stored field).
+    pub fn new(
+        urls: ActorUrls,
+        actor_directory: Arc<ActorDirectory>,
+        outbox_sources: OutboxSourceRegistry,
+    ) -> Self {
+        Self {
+            urls,
+            actor_directory,
+            outbox_sources,
+        }
+    }
+
+    /// Builds `actor`'s ActivityPub actor document (Requirements 6.1, 6.5).
+    /// See this type's doc comment ("Actor document shape") for the exact
+    /// JSON shape and the no-active-key/no-`publicKey`-field decision.
+    pub async fn build_actor_document(
+        &self,
+        actor: &ResolvedActor,
+    ) -> Result<serde_json::Value, AppError> {
+        let actor_url = self.urls.actor_url(&actor.handle);
+
+        let mut fields: Map<String, Value> = Map::new();
+        fields.insert(
+            "@context".to_string(),
+            Value::String(ACTIVITYSTREAMS_CONTEXT.to_string()),
+        );
+        fields.insert("id".to_string(), Value::String(actor_url.clone()));
+        fields.insert(
+            "type".to_string(),
+            Value::String(actor_type_label(actor.actor_type).to_string()),
+        );
+        fields.insert(
+            "preferredUsername".to_string(),
+            Value::String(actor.handle.as_str().to_string()),
+        );
+        fields.insert(
+            "name".to_string(),
+            Value::String(actor.display_name.clone()),
+        );
+        fields.insert("summary".to_string(), Value::String(actor.summary.clone()));
+        fields.insert(
+            "inbox".to_string(),
+            Value::String(self.urls.inbox_url(&actor.handle)),
+        );
+        fields.insert(
+            "outbox".to_string(),
+            Value::String(self.urls.outbox_url(&actor.handle)),
+        );
+
+        // Requirement 6.1: include the public key when this actor has an
+        // active one. Requirement 6.5: never include owner information --
+        // `actor`/the fetched key are already structurally owner-free (see
+        // this type's doc comment), so there is nothing owner-identifying
+        // to omit beyond simply not inventing a new field for it.
+        if let Some(key) = self.actor_directory.actor_public_key(actor.id).await? {
+            let mut public_key: Map<String, Value> = Map::new();
+            public_key.insert(
+                "id".to_string(),
+                Value::String(self.urls.key_id(&actor.handle)),
+            );
+            // The ActivityPub-standard back-reference to the actor this key
+            // belongs to (a public actor URL) -- see this type's doc comment
+            // ("Actor document shape") for why this is not the same concept
+            // as this spec's "オーナー情報" (Requirement 6.5).
+            public_key.insert("owner".to_string(), Value::String(actor_url));
+            public_key.insert(
+                "publicKeyPem".to_string(),
+                Value::String(key.public_key_pem),
+            );
+            fields.insert("publicKey".to_string(), Value::Object(public_key));
+        }
+
+        Ok(Value::Object(fields))
+    }
+
+    /// Builds one page of `actor`'s outbox as an `OrderedCollectionPage`
+    /// container (Requirements 8.1, 8.2, 8.3). See this type's doc comment
+    /// ("Outbox page merge") for the exact merge/ordering/next-cursor rules.
+    pub async fn build_outbox_page(
+        &self,
+        actor: &Handle,
+        page: PageCursor,
+    ) -> Result<serde_json::Value, AppError> {
+        let collected = self.outbox_sources.collect(actor, page.clone()).await?;
+
+        // Bundle every source's items into one union -- nothing invented,
+        // nothing dropped (Requirement 8.3) -- then order the union
+        // chronologically (Requirement 8.1). `sort_by` is stable, so this
+        // also satisfies the documented "preserve relative order among
+        // missing-`published` items" fallback.
+        let mut items: Vec<Value> = Vec::new();
+        for source_page in &collected {
+            items.extend(source_page.items.iter().cloned());
+        }
+        items.sort_by(|a, b| outbox_item_sort_key(a).cmp(&outbox_item_sort_key(b)));
+
+        // MVP next-cursor rule (see this type's doc comment, "Outbox page
+        // merge"): the first registered source to report a `next` wins.
+        let next = collected
+            .into_iter()
+            .find_map(|source_page| source_page.next);
+
+        let outbox_url = self.urls.outbox_url(actor);
+        let mut fields: Map<String, Value> = Map::new();
+        fields.insert(
+            "@context".to_string(),
+            Value::String(ACTIVITYSTREAMS_CONTEXT.to_string()),
+        );
+        fields.insert(
+            "id".to_string(),
+            Value::String(page_url(&outbox_url, &page)),
+        );
+        fields.insert(
+            "type".to_string(),
+            Value::String("OrderedCollectionPage".to_string()),
+        );
+        fields.insert("partOf".to_string(), Value::String(outbox_url.clone()));
+        fields.insert("orderedItems".to_string(), Value::Array(items));
+        if let Some(next_cursor) = next {
+            fields.insert(
+                "next".to_string(),
+                Value::String(page_url(&outbox_url, &next_cursor)),
+            );
+        }
+
+        Ok(Value::Object(fields))
+    }
+}
+
+/// Maps `actor_type` to the ActivityPub actor-object `type` string this spec
+/// uses (Requirement 6.1): [`ActorType::Person`] -> `"Person"`,
+/// [`ActorType::Service`] -> `"Service"` (ActivityStreams' own
+/// automated-actor convention).
+fn actor_type_label(actor_type: ActorType) -> &'static str {
+    match actor_type {
+        ActorType::Person => "Person",
+        ActorType::Service => "Service",
+    }
+}
+
+/// This outbox page merge's chronological sort key (see
+/// [`ActivityPubDocumentBuilder`]'s doc comment, "Outbox page merge"): `(0,
+/// published)` for an item with a top-level `"published"` string field
+/// (compared lexicographically via the tuple's second element), `(1, "")`
+/// for one without -- so every `published`-bearing item sorts before every
+/// one that lacks it, and [`Vec::sort_by`]'s stability preserves each
+/// bucket's original relative order.
+fn outbox_item_sort_key(item: &Value) -> (u8, &str) {
+    match item.get("published").and_then(Value::as_str) {
+        Some(published) => (0, published),
+        None => (1, ""),
+    }
+}
+
+/// Builds the URL this builder uses to address one outbox page -- its own
+/// `id`, and any `next` cursor's URL: `{outbox_url}?page=<token>` for a
+/// continuation token, or `{outbox_url}?page=true` for the head page (no
+/// token yet) -- mirrors Mastodon/ActivityPub's own `?page=` outbox-paging
+/// convention. Not itself pinned by any requirement design.md states; kept
+/// private (never parsed back by this builder itself, only by whatever later
+/// task wires an incoming `?page=` query parameter to a [`PageCursor`]).
+fn page_url(outbox_url: &str, page: &PageCursor) -> String {
+    match &page.0 {
+        Some(token) => format!("{outbox_url}?page={token}"),
+        None => format!("{outbox_url}?page=true"),
     }
 }

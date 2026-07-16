@@ -10,8 +10,13 @@
 //!   response while nothing downstream is registered yet (Requirements 6.2,
 //!   6.6, 8.1, 8.2, 8.3) — see [`document`].
 //!
-//! Later additions to this same file (`ActivityPubDocumentBuilder`, task
-//! 3.6) and later sibling modules in this spec's `endpoints/` file plan
+//! - Task 3.6 (`Boundary: ActivityPubDocumentBuilder`): builds the actor
+//!   representation (id/inbox/outbox/public key, owner-free) and the outbox
+//!   `OrderedCollectionPage` container, consuming task 3.5's registries above
+//!   without extending them (Requirements 6.1, 6.2, 6.5, 8.1, 8.2, 8.3) —
+//!   see [`document`].
+//!
+//! Later sibling modules in this spec's `endpoints/` file plan
 //! (`webfinger.rs`, `nodeinfo.rs`, `ap_get.rs`, `inbox.rs`, `outbox.rs` —
 //! task 5.x) are out of this task's boundary and deliberately not declared
 //! here yet; each is added by the task that actually implements it.
@@ -19,6 +24,6 @@
 pub mod document;
 
 pub use document::{
-    ObjectDocumentProvider, ObjectDocumentRegistry, OutboxItemsPage, OutboxSource,
-    OutboxSourceRegistry, PageCursor,
+    ActivityPubDocumentBuilder, ObjectDocumentProvider, ObjectDocumentRegistry, OutboxItemsPage,
+    OutboxSource, OutboxSourceRegistry, PageCursor,
 };

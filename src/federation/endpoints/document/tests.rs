@@ -12,8 +12,16 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use serde_json::json;
+use time::OffsetDateTime;
 
 use super::*;
+use crate::actor::keys::repository::{SigningKeyStatus, StoredSigningKey, insert_active_key};
+use crate::actor::model::{ActorState, LocalActor};
+use crate::actor::owner::create_owner;
+use crate::actor::repository::insert_actor;
+use crate::domain::Id;
+use crate::federation::urls::ActorUrls;
+use crate::test_harness::spawn_test_app;
 
 fn handle(raw: &str) -> Handle {
     Handle::new(raw).expect("test handle must be valid")
@@ -291,4 +299,490 @@ async fn actor_and_page_are_passed_through_to_each_source_unchanged() {
         "the registry must pass the exact actor and page values through to each registered \
          source, untouched (this registry does not interpret/parse the cursor)"
     );
+}
+
+// ==========================================================================
+// ActivityPubDocumentBuilder (task 3.6, `Boundary: ActivityPubDocumentBuilder`,
+// Requirements 6.1, 6.2, 6.5, 8.1, 8.2, 8.3)
+//
+// `build_actor_document` tests use a real, Postgres-backed `ActorDirectory`
+// via `spawn_test_app` (mirroring `src/actor/directory/tests.rs`'s and
+// `src/federation/outbound/target/tests.rs`'s own established fixture
+// pattern) -- this task's own instructions call for a real directory, not a
+// mock, since `ActorDirectory` has no narrow port introduced for it here
+// (unlike task 3.4's `LocalActorLookup`). `build_outbox_page` tests are pure
+// in-memory over stub `OutboxSource`s (this module's own `StubOutboxSource`,
+// reused from the `OutboxSourceRegistry` tests above), but still construct
+// their `ActivityPubDocumentBuilder` with a real `ActorDirectory` (via the
+// same `spawn_test_app`), since the builder always requires one -- these
+// tests just never call anything that would query it.
+// ==========================================================================
+
+/// The fixed, non-production domain every `ActivityPubDocumentBuilder` test
+/// in this section builds its `ActorUrls` from.
+fn test_urls() -> ActorUrls {
+    ActorUrls::new("kawasemi.doc-builder-test.internal")
+}
+
+/// Creates a real owner fixture (mirrors `src/actor/directory/tests.rs`'s
+/// own fixture helper of the same name).
+async fn create_owner_fixture(pool: &sqlx::PgPool, owner_id: Id, now: OffsetDateTime) {
+    create_owner(pool, owner_id, now)
+        .await
+        .expect("creating the owner fixture must succeed");
+}
+
+/// Creates a real active actor fixture under an already-existing owner.
+async fn insert_actor_fixture(
+    pool: &sqlx::PgPool,
+    owner_id: Id,
+    actor_id: Id,
+    handle_str: &str,
+    now: OffsetDateTime,
+) -> LocalActor {
+    let actor = LocalActor {
+        id: actor_id,
+        owner_id,
+        handle: handle(handle_str),
+        actor_type: ActorType::Person,
+        display_name: "Doc Builder Test Actor".to_string(),
+        summary: "an actor used to test ActivityPubDocumentBuilder".to_string(),
+        state: ActorState::Active,
+        created_at: now,
+        updated_at: now,
+    };
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("opening a transaction for the actor fixture must succeed");
+    insert_actor(&mut tx, &actor)
+        .await
+        .expect("inserting the actor fixture must succeed");
+    tx.commit()
+        .await
+        .expect("committing the actor fixture transaction must succeed");
+    actor
+}
+
+/// Creates a real active signing-key fixture for `actor_id`.
+async fn insert_active_key_fixture(
+    pool: &sqlx::PgPool,
+    key_id: Id,
+    actor_id: Id,
+    now: OffsetDateTime,
+) -> StoredSigningKey {
+    let key = StoredSigningKey {
+        id: key_id,
+        actor_id,
+        algorithm: "rsa-2048".to_string(),
+        public_key_pem: "-----BEGIN PUBLIC KEY-----\ndoc-builder-test\n-----END PUBLIC KEY-----"
+            .to_string(),
+        sealed_private_key: b"sealed-opaque-bytes".to_vec(),
+        status: SigningKeyStatus::Active,
+        created_at: now,
+    };
+    let mut tx = pool
+        .begin()
+        .await
+        .expect("opening a transaction for the key fixture must succeed");
+    insert_active_key(&mut tx, &key)
+        .await
+        .expect("inserting the active key fixture must succeed");
+    tx.commit()
+        .await
+        .expect("committing the key fixture transaction must succeed");
+    key
+}
+
+// --- build_actor_document ---
+
+/// Requirement 6.1: the built actor document includes `id`/`inbox`/`outbox`
+/// matching `ActorUrls`' own construction, and a `publicKey` block carrying
+/// the PEM from a real, fixture-inserted active signing key.
+#[tokio::test]
+async fn build_actor_document_includes_id_inbox_outbox_and_public_key() {
+    let app = spawn_test_app().await;
+    let urls = test_urls();
+    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+
+    let owner_id = app.runtime.ids.next_id();
+    let actor_id = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+    create_owner_fixture(&app.pool, owner_id, now).await;
+    let actor = insert_actor_fixture(&app.pool, owner_id, actor_id, "doc_alice", now).await;
+    let key_id = app.runtime.ids.next_id();
+    let key = insert_active_key_fixture(&app.pool, key_id, actor_id, now).await;
+
+    let resolved = directory
+        .resolve_actor_by_handle(&actor.handle)
+        .await
+        .expect("resolve_actor_by_handle must succeed")
+        .expect("the fixture actor must resolve");
+
+    let builder = ActivityPubDocumentBuilder::new(
+        urls.clone(),
+        Arc::clone(&directory),
+        OutboxSourceRegistry::new(),
+    );
+
+    let doc = builder
+        .build_actor_document(&resolved)
+        .await
+        .expect("build_actor_document must succeed");
+
+    assert_eq!(doc["id"], json!(urls.actor_url(&actor.handle)));
+    assert_eq!(doc["inbox"], json!(urls.inbox_url(&actor.handle)));
+    assert_eq!(doc["outbox"], json!(urls.outbox_url(&actor.handle)));
+    assert_eq!(
+        doc["publicKey"]["id"],
+        json!(urls.key_id(&actor.handle)),
+        "publicKey.id must be this actor's keyId per ActorUrls::key_id"
+    );
+    assert_eq!(
+        doc["publicKey"]["publicKeyPem"],
+        json!(key.public_key_pem),
+        "publicKey.publicKeyPem must carry the real active signing key's PEM"
+    );
+
+    app.cleanup().await;
+}
+
+/// Requirement 6.5: the built actor document never includes any
+/// owner-identifying field or value -- checked negatively over the whole
+/// serialized document. Note this deliberately does NOT assert the absence
+/// of the substring `"owner"` wholesale: the ActivityPub-standard
+/// `publicKey.owner` field (a back-reference to the actor's own public URL,
+/// asserted present by a sibling test) legitimately contains that word and
+/// is not the "オーナー情報" (management-layer administrator identity) this
+/// requirement is about -- see this file's `ActivityPubDocumentBuilder`
+/// re-export's own doc comment. What this test actually proves: no field
+/// literally named `owner_id`/`ownerId` appears anywhere, and the internal
+/// `owners` row's own numeric id (distinct from every other id used here)
+/// is not present anywhere in the serialized output.
+#[tokio::test]
+async fn build_actor_document_never_includes_owner_identifying_information() {
+    let app = spawn_test_app().await;
+    let urls = test_urls();
+    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+
+    let owner_id = app.runtime.ids.next_id();
+    let actor_id = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+    create_owner_fixture(&app.pool, owner_id, now).await;
+    let actor = insert_actor_fixture(&app.pool, owner_id, actor_id, "doc_no_owner", now).await;
+    let key_id = app.runtime.ids.next_id();
+    insert_active_key_fixture(&app.pool, key_id, actor_id, now).await;
+
+    let resolved = directory
+        .resolve_actor_by_handle(&actor.handle)
+        .await
+        .expect("resolve_actor_by_handle must succeed")
+        .expect("the fixture actor must resolve");
+
+    let builder =
+        ActivityPubDocumentBuilder::new(urls, Arc::clone(&directory), OutboxSourceRegistry::new());
+
+    let doc = builder
+        .build_actor_document(&resolved)
+        .await
+        .expect("build_actor_document must succeed");
+
+    let serialized = serde_json::to_string(&doc).expect("document must serialize to JSON");
+    assert!(
+        !serialized.contains("owner_id") && !serialized.contains("ownerId"),
+        "no field literally named owner_id/ownerId may appear anywhere in the actor document; \
+         found in: {serialized}"
+    );
+    assert!(
+        !serialized.contains(&owner_id.as_i64().to_string()),
+        "the internal owners row's own numeric id must never appear anywhere in the actor \
+         document (owner_id is distinct from actor_id/key_id in this fixture); found in: \
+         {serialized}"
+    );
+
+    app.cleanup().await;
+}
+
+/// Requirement 9.1 (as applied to this builder's own output, per this
+/// module's doc comment): `@context` is present and matches this spec's
+/// established `ACTIVITYSTREAMS_CONTEXT` JSON-LD context value.
+#[tokio::test]
+async fn build_actor_document_includes_the_activitystreams_context() {
+    let app = spawn_test_app().await;
+    let urls = test_urls();
+    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+
+    let owner_id = app.runtime.ids.next_id();
+    let actor_id = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+    create_owner_fixture(&app.pool, owner_id, now).await;
+    let actor = insert_actor_fixture(&app.pool, owner_id, actor_id, "doc_context", now).await;
+
+    let resolved = directory
+        .resolve_actor_by_handle(&actor.handle)
+        .await
+        .expect("resolve_actor_by_handle must succeed")
+        .expect("the fixture actor must resolve");
+
+    let builder =
+        ActivityPubDocumentBuilder::new(urls, Arc::clone(&directory), OutboxSourceRegistry::new());
+
+    let doc = builder
+        .build_actor_document(&resolved)
+        .await
+        .expect("build_actor_document must succeed");
+
+    assert_eq!(
+        doc["@context"],
+        json!(crate::federation::jsonld::ACTIVITYSTREAMS_CONTEXT),
+        "@context must match this spec's established JSON-LD context value"
+    );
+
+    app.cleanup().await;
+}
+
+/// An actor with no active signing key gets no `publicKey` field at all
+/// (this task's documented decision -- see `ActivityPubDocumentBuilder`'s
+/// own doc comment, "Actor document shape"), never an error and never a
+/// null/empty placeholder.
+#[tokio::test]
+async fn build_actor_document_omits_public_key_when_actor_has_no_active_key() {
+    let app = spawn_test_app().await;
+    let urls = test_urls();
+    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+
+    let owner_id = app.runtime.ids.next_id();
+    let actor_id = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+    create_owner_fixture(&app.pool, owner_id, now).await;
+    let actor = insert_actor_fixture(&app.pool, owner_id, actor_id, "doc_keyless", now).await;
+
+    let resolved = directory
+        .resolve_actor_by_handle(&actor.handle)
+        .await
+        .expect("resolve_actor_by_handle must succeed")
+        .expect("the fixture actor must resolve");
+
+    let builder =
+        ActivityPubDocumentBuilder::new(urls, Arc::clone(&directory), OutboxSourceRegistry::new());
+
+    let doc = builder
+        .build_actor_document(&resolved)
+        .await
+        .expect("build_actor_document must succeed even with no active signing key");
+
+    assert!(
+        doc.get("publicKey").is_none(),
+        "an actor with no active signing key must get no publicKey field at all, found: {doc:?}"
+    );
+
+    app.cleanup().await;
+}
+
+// --- build_outbox_page ---
+
+/// Requirements 8.1, 8.2, 8.3: with zero `OutboxSource`s registered, the
+/// built page is a validly-shaped, empty `OrderedCollectionPage` -- nothing
+/// fabricated.
+#[tokio::test]
+async fn build_outbox_page_with_no_registered_sources_yields_an_empty_but_validly_shaped_page() {
+    let app = spawn_test_app().await;
+    let urls = test_urls();
+    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+    let builder =
+        ActivityPubDocumentBuilder::new(urls.clone(), directory, OutboxSourceRegistry::new());
+
+    let actor_handle = handle("outbox_empty");
+    let page = builder
+        .build_outbox_page(&actor_handle, PageCursor::start())
+        .await
+        .expect("build_outbox_page must succeed with nothing registered");
+
+    assert_eq!(page["type"], json!("OrderedCollectionPage"));
+    assert_eq!(
+        page["orderedItems"],
+        json!([]),
+        "an empty registry must yield an empty orderedItems array, not a fabricated one"
+    );
+    assert_eq!(page["partOf"], json!(urls.outbox_url(&actor_handle)));
+    assert_eq!(
+        page["id"],
+        json!(format!("{}?page=true", urls.outbox_url(&actor_handle)))
+    );
+    assert!(
+        page.get("next").is_none(),
+        "an empty registry must not fabricate a next cursor"
+    );
+
+    app.cleanup().await;
+}
+
+/// The task's own observable completion condition: with two or more stub
+/// `OutboxSource`s registered (each returning distinguishable content), the
+/// built page's `orderedItems` contains exactly the union of their supplied
+/// items -- nothing invented, nothing dropped.
+#[tokio::test]
+async fn build_outbox_page_bundles_exactly_the_union_of_all_registered_sources() {
+    let app = spawn_test_app().await;
+    let urls = test_urls();
+    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+
+    let mut sources = OutboxSourceRegistry::new();
+    let item_a = json!({ "type": "Create", "source": "a", "published": "2024-01-01T00:00:00Z" });
+    let item_b = json!({ "type": "Announce", "source": "b", "published": "2024-01-02T00:00:00Z" });
+    sources.register(StubOutboxSource::new(OutboxItemsPage {
+        items: vec![item_a.clone()],
+        next: None,
+    }));
+    sources.register(StubOutboxSource::new(OutboxItemsPage {
+        items: vec![item_b.clone()],
+        next: None,
+    }));
+
+    let builder = ActivityPubDocumentBuilder::new(urls, directory, sources);
+
+    let page = builder
+        .build_outbox_page(&handle("outbox_union"), PageCursor::start())
+        .await
+        .expect("build_outbox_page must succeed");
+
+    let items = page["orderedItems"]
+        .as_array()
+        .expect("orderedItems must be a JSON array");
+    assert_eq!(
+        items.len(),
+        2,
+        "exactly the union of both sources' items, nothing more"
+    );
+    assert!(items.contains(&item_a));
+    assert!(items.contains(&item_b));
+
+    app.cleanup().await;
+}
+
+/// Requirement 8.1's "順序付きコレクション": items collected from multiple
+/// sources are ordered chronologically by their own `published` field, not
+/// merely in registration order.
+#[tokio::test]
+async fn build_outbox_page_orders_items_chronologically_by_published() {
+    let app = spawn_test_app().await;
+    let urls = test_urls();
+    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+
+    let newer = json!({ "type": "Create", "id": "newer", "published": "2024-06-01T00:00:00Z" });
+    let older = json!({ "type": "Create", "id": "older", "published": "2024-01-01T00:00:00Z" });
+
+    let mut sources = OutboxSourceRegistry::new();
+    // Registered "newer first" -- the merge must still sort chronologically,
+    // not just preserve registration order.
+    sources.register(StubOutboxSource::new(OutboxItemsPage {
+        items: vec![newer.clone()],
+        next: None,
+    }));
+    sources.register(StubOutboxSource::new(OutboxItemsPage {
+        items: vec![older.clone()],
+        next: None,
+    }));
+
+    let builder = ActivityPubDocumentBuilder::new(urls, directory, sources);
+    let page = builder
+        .build_outbox_page(&handle("outbox_order"), PageCursor::start())
+        .await
+        .expect("build_outbox_page must succeed");
+
+    let items = page["orderedItems"]
+        .as_array()
+        .expect("orderedItems must be a JSON array");
+    assert_eq!(
+        items,
+        &vec![older, newer],
+        "items must be ordered ascending by their own published timestamp, not registration order"
+    );
+
+    app.cleanup().await;
+}
+
+/// This builder's documented fallback: items missing `published` (or where
+/// it is present but not a JSON string) sort after every dated item,
+/// preserving their original relative (registration-then-page) order among
+/// themselves.
+#[tokio::test]
+async fn build_outbox_page_sorts_items_missing_published_after_all_dated_items_preserving_order() {
+    let app = spawn_test_app().await;
+    let urls = test_urls();
+    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+
+    let dated = json!({ "type": "Create", "id": "dated", "published": "2024-01-01T00:00:00Z" });
+    let undated_first = json!({ "type": "Create", "id": "undated-first" });
+    let undated_second = json!({ "type": "Create", "id": "undated-second", "published": 12345 });
+
+    let mut sources = OutboxSourceRegistry::new();
+    sources.register(StubOutboxSource::new(OutboxItemsPage {
+        items: vec![undated_first.clone(), dated.clone()],
+        next: None,
+    }));
+    sources.register(StubOutboxSource::new(OutboxItemsPage {
+        items: vec![undated_second.clone()],
+        next: None,
+    }));
+
+    let builder = ActivityPubDocumentBuilder::new(urls, directory, sources);
+    let page = builder
+        .build_outbox_page(&handle("outbox_missing_published"), PageCursor::start())
+        .await
+        .expect("build_outbox_page must succeed");
+
+    let items = page["orderedItems"]
+        .as_array()
+        .expect("orderedItems must be a JSON array");
+    assert_eq!(
+        items,
+        &vec![dated, undated_first, undated_second],
+        "the one dated item must sort first; the two undated/malformed-published items must \
+         sort after it, in their original relative (registration-then-page) order"
+    );
+
+    app.cleanup().await;
+}
+
+/// This builder's documented MVP next-cursor rule: the first non-`None`
+/// `next` cursor reported by any registered source (in registration order)
+/// is propagated as this page's own `next`.
+#[tokio::test]
+async fn build_outbox_page_propagates_the_first_non_none_next_cursor() {
+    let app = spawn_test_app().await;
+    let urls = test_urls();
+    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+
+    let mut sources = OutboxSourceRegistry::new();
+    sources.register(StubOutboxSource::new(OutboxItemsPage {
+        items: vec![],
+        next: None,
+    }));
+    sources.register(StubOutboxSource::new(OutboxItemsPage {
+        items: vec![],
+        next: Some(PageCursor::token("second-source-cursor")),
+    }));
+    sources.register(StubOutboxSource::new(OutboxItemsPage {
+        items: vec![],
+        next: Some(PageCursor::token("third-source-cursor")),
+    }));
+
+    let builder = ActivityPubDocumentBuilder::new(urls.clone(), directory, sources);
+    let actor_handle = handle("outbox_next_cursor");
+    let page = builder
+        .build_outbox_page(&actor_handle, PageCursor::start())
+        .await
+        .expect("build_outbox_page must succeed");
+
+    assert_eq!(
+        page["next"],
+        json!(format!(
+            "{}?page=second-source-cursor",
+            urls.outbox_url(&actor_handle)
+        )),
+        "the first registered source's non-None next cursor must win, not a later one's"
+    );
+
+    app.cleanup().await;
 }
