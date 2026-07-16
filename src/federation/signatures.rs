@@ -33,14 +33,22 @@
 //!   to public-key material with cache-first/force/TTL-staleness semantics
 //!   (Requirements 2.3, 2.4).
 //!
-//! Sibling files this spec's later tasks own (`signer.rs` at 2.2,
-//! `verifier.rs` at 2.3, `negotiation.rs` at 3.x — design.md's File
-//! Structure Plan) are deliberately not declared here yet; each is added by
-//! the task that actually implements it.
+//! Scope so far (task 2.2, `Boundary: RequestSigner`):
+//! - [`signer`]: `RequestSigner` — attaches an HTTP Signature (draft-cavage
+//!   or RFC 9421) to an outbound request using a local actor's currently
+//!   valid signing key, resolved via `ActorDirectory` +
+//!   `core-runtime`'s `SigningKeyProvider` (Requirements 1.1, 1.2, 1.3,
+//!   1.5).
+//!
+//! Sibling files this spec's later tasks own (`verifier.rs` at 2.3,
+//! `negotiation.rs` at 3.x — design.md's File Structure Plan) are
+//! deliberately not declared here yet; each is added by the task that
+//! actually implements it.
 
 mod digest;
 mod http_client;
 mod key_resolver;
+mod signer;
 mod suite;
 
 pub use digest::Digest;
@@ -51,6 +59,7 @@ pub use http_client::{
 pub use key_resolver::{
     DEFAULT_PUBLIC_KEY_CACHE_TTL, DbFederationPublicKeyResolver, PublicKeyResolver, RemotePublicKey,
 };
+pub use signer::RequestSigner;
 pub use suite::{
     DraftCavageSuite, ParsedSignature, RequestHeaders, Rfc9421Suite, SignableRequest,
     SignatureFormat, SignatureSuite, SigningInput,

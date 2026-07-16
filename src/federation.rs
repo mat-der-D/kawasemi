@@ -15,6 +15,9 @@
 //! - Task 2.1 (`Boundary: PublicKeyResolver`): resolves a `keyId` to
 //!   cached/fetched public-key material (`remote_public_keys`), with
 //!   cache-first/force/TTL-staleness semantics — see [`signatures`].
+//! - Task 2.2 (`Boundary: RequestSigner`): attaches an HTTP Signature
+//!   (draft-cavage or RFC 9421) to an outbound request using a local
+//!   actor's currently valid signing key — see [`signatures`].
 //!
 //! Later tasks in this spec (`config`, `inbound`, `outbound`, `endpoints` —
 //! see design.md's File Structure Plan) are out of this task's boundary and
@@ -29,6 +32,6 @@ pub use jsonld::{ParsedActivity, accepts_activitypub, parse_activity, serialize}
 pub use signatures::{
     DEFAULT_PUBLIC_KEY_CACHE_TTL, DbFederationPublicKeyResolver, Digest, FederationHttpClient,
     HttpResponse, MockFederationHttpClient, OutboundRequest, PublicKeyResolver, RemotePublicKey,
-    ReqwestFederationHttpClient,
+    RequestSigner, ReqwestFederationHttpClient,
 };
 pub use urls::{ActorUrls, ObjectKind};
