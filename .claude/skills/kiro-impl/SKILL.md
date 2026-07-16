@@ -90,7 +90,7 @@ For each task (one at a time):
   - Whether the task is behavioral (Feature Flag Protocol) or non-behavioral
   - **Previous learnings**: Include any `## Implementation Notes` entries from tasks.md that are relevant to this task's boundary or dependencies (e.g., "better-sqlite3 requires separate rebuild for Electron"). This prevents the same mistakes from recurring.
 - The implementer subagent will read the spec files and build its own Task Brief (acceptance criteria, completion definition, design constraints, verification method) before implementation
-- Dispatch via **Agent tool** as a fresh subagent
+- Dispatch via **Agent tool** as a fresh subagent, with **`run_in_background: false`** (see Critical Constraints — this call must block and return the implementer's report directly; never dispatch it as a background/async call)
 
 **b) Handle implementer status**:
 - Parse implementer status only from the exact `## Status Report` block and `- STATUS:` field.
@@ -108,7 +108,7 @@ For each task (one at a time):
 - The reviewer must apply the `kiro-review` protocol to this task-local review.
 - Preserve the existing task-specific context: task text, spec refs, `_Boundary:_` scope, validation commands, implementer report, and the actual `git diff` as the primary source of truth.
 - The reviewer subagent will run `git diff` itself to read the actual code changes and verify against the spec
-- Dispatch via **Agent tool** as a fresh subagent
+- Dispatch via **Agent tool** as a fresh subagent, with **`run_in_background: false`** (see Critical Constraints — this call must block and return the verdict directly; never dispatch it as a background/async call)
 
 **d) Handle reviewer verdict**:
 - Parse reviewer verdict only from the exact `## Review Verdict` block and `- VERDICT:` field.
@@ -139,7 +139,7 @@ The debug subagent runs in a **fresh context** — it receives only the error in
 - The debugger must apply the `kiro-debug` protocol to this failure investigation.
 - Preserve rich failure context: error output, reviewer findings, current `git diff`, task/spec refs, and any relevant Implementation Notes.
 - When available, the debugger should inspect runtime/config state and use web or official documentation research to validate root-cause hypotheses before proposing a fix plan.
-- Dispatch via **Agent tool** as a fresh subagent
+- Dispatch via **Agent tool** as a fresh subagent, with **`run_in_background: false`** (see Critical Constraints — this call must block and return the debug report directly; never dispatch it as a background/async call)
 
 **Handle debug report**:
 - Parse `NEXT_ACTION` from the debug report's exact structured field.
@@ -199,6 +199,7 @@ For tasks that add or change behavior, enforce RED → GREEN with a feature flag
 **Skip this protocol for**: refactoring, configuration, documentation, or tasks with no behavioral change.
 
 ## Critical Constraints
+- **Foreground Dispatch Only**: Every `Agent` tool call in this skill (implementer, reviewer, debugger) MUST pass `run_in_background: false`. The Agent tool defaults to background/async execution, where the call returns immediately and the *dispatcher's own session* is notified later on completion. That default silently breaks this skill whenever it runs as a nested subagent itself (e.g. under `kiro-auto-implement`): the dispatching agent's turn ends the moment it fires an async call, and the eventual completion notification for that child does not wake it back up — it surfaces at a different (often top-level) session instead, forcing an unreliable cross-session relay to reconstruct the result. `run_in_background: false` makes the call block and return the child's result directly, in-context, with nothing to relay and nothing to distrust. This is not a style preference; omitting it has caused real runs to stall indefinitely on an unresolvable trust question about a relayed verdict.
 - **Strict Handoff Parsing**: Never infer implementer `STATUS` or reviewer `VERDICT` from surrounding prose; only the exact structured fields count
 - **No Destructive Reset**: Never use `git checkout .`, `git reset --hard`, or similar destructive rollback inside the implementation loop
 - **Selective Staging**: NEVER use `git add -A` or `git add .`; always stage explicit file paths

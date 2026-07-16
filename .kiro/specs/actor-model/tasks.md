@@ -1,13 +1,13 @@
 # Implementation Plan
 
 - [ ] 1. 基盤: スキーマとドメイン型
-- [ ] 1.1 アクター/オーナー/鍵テーブルのマイグレーションを追加する
+- [x] 1.1 アクター/オーナー/鍵テーブルのマイグレーションを追加する
   - `migrations/0002_actors.sql` を作成し `owners` / `local_actors` / `actor_signing_keys` を定義する
   - `local_actors.handle` の一意制約、`actor_signing_keys` のアクター毎 active 部分一意制約、`owner_id`/`actor_id` の外部キーを設定する
   - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、3テーブルと各制約が存在する
   - _Requirements: 1.2, 2.1, 5.3_
   - _Boundary: Migration_
-- [ ] 1.2 ドメイン型と参照型を定義する
+- [x] 1.2 ドメイン型と参照型を定義する
   - `Owner` / `LocalActor` / `ActorType`(person, service) / `ActorState`(active, deactivated) / `Handle`(形式検証付き値オブジェクト) を定義する
   - プロトコル層向け参照型 `ResolvedActor` / `ActorPublicKey` / 管理層一覧型 `ActorSummary` を、owner 情報を構造的に含めずに定義する
   - 観測可能な完了条件: `Handle::new` が空文字・不正文字を拒否し許可文字を受理する単体テストが通り、参照型に owner フィールドが存在しないことがコンパイル/テストで確認できる
@@ -16,19 +16,19 @@
   - _Depends: 1.1_
 
 - [ ] 2. オーナー・アクターの永続化と業務
-- [ ] 2.1 (P) オーナーの永続化を実装する
+- [x] 2.1 (P) オーナーの永続化を実装する
   - オーナーの作成（ID は core-runtime の ID 境界で採番、時刻は時刻境界）と取得を実装する
   - 観測可能な完了条件: オーナーを作成すると一意な識別子付きの行が永続化され、取得で同一オーナーが返る
   - _Requirements: 2.1, 2.4_
   - _Boundary: OwnerRepository_
   - _Depends: 1.2_
-- [ ] 2.2 (P) アクターの永続化を実装する
+- [x] 2.2 (P) アクターの永続化を実装する
   - アクターの挿入・状態更新・取得（ハンドル別/ID別/オーナー別）を実装し、ハンドル一意制約違反を重複エラーへ写像する
   - 観測可能な完了条件: 重複ハンドル挿入が重複エラーを返し、オーナー別取得が当該オーナーのアクターのみを返す
   - _Requirements: 1.1, 1.2, 1.3, 2.2, 7.3, 8.1, 8.2_
   - _Boundary: ActorRepository_
   - _Depends: 1.2_
-- [ ] 2.3 (P) 署名鍵の永続化を実装する
+- [x] 2.3 (P) 署名鍵の永続化を実装する
   - 有効鍵挿入・有効鍵失効・有効公開鍵取得・全有効鍵の起動時一括ロードを実装し、秘密鍵は封緘済みバイト列として格納する
   - 観測可能な完了条件: 有効鍵を挿入後に取得でき、失効操作で status が retired に遷移し、一括ロードが全有効鍵を返す
   - _Requirements: 4.1, 4.5, 5.2, 5.3, 5.4, 6.2_
@@ -36,13 +36,13 @@
   - _Depends: 1.2_
 
 - [ ] 3. 鍵素材と封緘
-- [ ] 3.1 (P) 注入乱数による鍵ペア生成を実装する
+- [x] 3.1 (P) 注入乱数による鍵ペア生成を実装する
   - core-runtime の乱数境界を受けて RSA-2048 鍵ペアを生成し、公開鍵 SPKI/PEM・秘密鍵 PKCS#8/PEM（Secret ラッパ）を出力する
   - 観測可能な完了条件: 同一の決定的乱数で同一鍵が再現され、異なるシードで異なる鍵になる単体テストが通る
   - _Requirements: 4.2, 4.3, 4.6_
   - _Boundary: KeyMaterial_
   - _Depends: 1.2_
-- [ ] 3.2 (P) 秘密鍵の at-rest 封緘境界を実装する
+- [x] 3.2 (P) 秘密鍵の at-rest 封緘境界を実装する
   - `KeyCipher` 境界（seal/open）を AEAD と起動設定 KEK・注入乱数 nonce で実装し、本番/決定的テスト実装を差し替え可能にする
   - 観測可能な完了条件: seal→open のラウンドトリップで原文が一致し、封緘出力に平文秘密鍵が含まれないことがテストで確認できる
   - _Requirements: 4.4, 4.5_
@@ -50,14 +50,14 @@
   - _Depends: 1.2_
 
 - [ ] 4. 署名鍵サービスと供給
-- [ ] 4.1 鍵キャッシュと業務サービスを実装する
+- [x] 4.1 鍵キャッシュと業務サービスを実装する
   - `KeyCache`（KeyRef→有効署名鍵のメモリ保持）と `SigningKeyService`（作成時生成・ローテーション・有効鍵一意・キャッシュ更新）を実装する
   - 鍵生成→封緘→有効鍵挿入を単一トランザクションで行い、ローテーションは旧鍵失効＋新鍵有効化を原子的に行い不在アクターを拒否する
   - 観測可能な完了条件: ローテーションで active が高々1に保たれ、書込と同時にキャッシュが更新され、不在アクターのローテーションがエラーを返す
   - _Requirements: 4.1, 4.5, 5.1, 5.2, 5.3, 5.5, 6.4_
   - _Boundary: SigningKeyService, KeyCache_
   - _Depends: 2.3, 3.1, 3.2_
-- [ ] 4.2 署名鍵供給境界の本番実装を提供する
+- [x] 4.2 署名鍵供給境界の本番実装を提供する
   - core-runtime の `SigningKeyProvider` を `DbSigningKeyProvider` として実装し、`KeyRef` をアクター有効鍵参照として解釈してキャッシュから返す
   - 観測可能な完了条件: 登録済みアクターの鍵参照で有効鍵を返し、未登録参照で未検出エラーを返す
   - _Requirements: 6.1, 6.2, 6.3_
@@ -65,13 +65,13 @@
   - _Depends: 4.1_
 
 - [ ] 5. アクター業務と下流向け参照
-- [ ] 5.1 アクター作成とライフサイクルを実装する
+- [x] 5.1 アクター作成とライフサイクルを実装する
   - `ActorService` で作成（ハンドル形式検証→オーナー存在確認→active 初期化挿入→鍵生成を単一トランザクション、ID/時刻は注入境界）と無効化（Deactivated 遷移・updated_at 更新）を実装する
   - 観測可能な完了条件: アクター作成で active アクターと有効鍵1つが永続化され、オーナー不在/重複ハンドル/形式不正が各エラーを返し、無効化で状態が遷移する
   - _Requirements: 1.1, 1.3, 1.5, 1.6, 2.2, 2.3, 7.2, 7.3, 7.5_
   - _Boundary: ActorService_
   - _Depends: 2.1, 2.2, 4.1_
-- [ ] 5.2 下流向けアクター参照を実装する
+- [x] 5.2 下流向けアクター参照を実装する
   - `ActorDirectory` で管理層 `list_actors_for_owner` と、プロトコル層 `resolve_actor_by_handle`・`actor_public_key` を実装し、後二者は owner を含まない参照型のみ返す
   - 観測可能な完了条件: オーナー別一覧が当該オーナー分のみ返し、ハンドル解決・公開鍵供給の戻り値に owner 情報が含まれない
   - _Requirements: 2.5, 3.1, 3.2, 3.3, 8.1, 8.2, 8.3, 8.4_
@@ -79,7 +79,7 @@
   - _Depends: 2.2, 2.3_
 
 - [ ] 6. 統合配線
-- [ ] 6.1 bootstrap と AppState へ配線する
+- [x] 6.1 bootstrap と AppState へ配線する
   - core-runtime config に KEK の起動シークレット項目を追加し、bootstrap でプール確立後に全有効鍵をロードして `KeyCache`・`DbSigningKeyProvider` を構築し `RuntimeContext` へ注入する
   - `ActorModule`（ActorService / SigningKeyService / ActorDirectory）を組み立て `AppState` に格納する
   - 観測可能な完了条件: 起動後にアクター作成→供給→ローテーションが一連で機能し、署名鍵供給が DB 由来の最新鍵を返す
@@ -88,21 +88,35 @@
   - _Depends: 4.2, 5.1, 5.2_
 
 - [ ] 7. 検証
-- [ ] 7.1 (P) アクターライフサイクルの統合テスト
+- [x] 7.1 (P) アクターライフサイクルの統合テスト
   - 作成（active＋鍵1つ）、重複ハンドル拒否、無効化後の状態判別を `spawn_test_app` 上で検証する
   - 観測可能な完了条件: 上記シナリオがグリーンで、無効化後に解決で Deactivated が判別できる
   - _Requirements: 1.1, 1.3, 7.2, 7.3, 7.4_
   - _Boundary: actor_lifecycle_it_
   - _Depends: 6.1_
-- [ ] 7.2 (P) 署名鍵の生成・ローテーション・供給の統合テスト
+- [x] 7.2 (P) 署名鍵の生成・ローテーション・供給の統合テスト
   - 作成時鍵生成、ローテーション（active 高々1・旧鍵 retired）、供給が最新鍵を返す/未検出、決定的乱数での再現を検証する
   - 観測可能な完了条件: ローテーション後に供給が新鍵を返し、決定的構成で鍵が再現され、未登録参照が未検出エラーになる
   - _Requirements: 4.1, 4.3, 5.1, 5.2, 5.3, 5.5, 6.2, 6.3, 6.4_
   - _Boundary: signing_key_it_
   - _Depends: 6.1_
-- [ ] 7.3 (P) オーナー↔アクター境界の統合テスト
+- [x] 7.3 (P) オーナー↔アクター境界の統合テスト
   - 管理層一覧がオーナー別に正しく、プロトコル層参照（ハンドル解決・公開鍵供給）に owner 情報が一切現れないこと、秘密鍵がログ/参照型/DB 平文に現れないことを検証する
   - 観測可能な完了条件: プロトコル経路の戻り値・ログに owner と平文秘密鍵が含まれず、管理層一覧のみが owner 別対応を返す
   - _Requirements: 2.5, 3.1, 3.2, 3.3, 4.4, 4.5, 8.1, 8.4_
   - _Boundary: owner_actor_boundary_it_
   - _Depends: 6.1_
+
+## Implementation Notes
+
+- 1.1: マイグレーション/テストハーネス基盤（`src/migrate.rs` とその `tests.rs`、`src/test_harness.rs`）は core-runtime が所有し本スペックの Out of Boundary。検証用テストは `apply_migrations`/`spawn_test_app` などの公開 API 経由でのみ利用し、`tests/*_it.rs` に actor-model 独自の統合テストとして追加すること（core-runtime のプライベートなテストモジュールを直接編集しない）。
+- 2.2: `insert_actor` が必要とする `PgTransaction<'a>`（`sqlx::Transaction<'a, sqlx::Postgres>` のローカル型エイリアス）は `src/actor/repository.rs` にのみ定義した（リポジトリ横断の共有型はまだ存在しない）。design.md では 2.3（`ActorSigningKeyRepository`）も `tx: &mut PgTransaction` を要求するため、2.3 実装時に同じ別名を再定義するか、共有場所（例: `src/db.rs`）へ昇格するかを判断すること。
+- 2.3: 上記の `PgTransaction` は `src/actor/keys/repository.rs` から `crate::actor::repository::PgTransaction` を再利用する形にした（別名を再定義せず、`src/actor/repository.rs` 自体は無変更）。5.1（`ActorService`）が同一トランザクションで `ActorRepository::insert_actor` と `ActorSigningKeyRepository::insert_active_key` の両方を駆動する際、この一本化された型を素直に使えるはず。また `actor_signing_keys` テーブルには `retired_at`/`updated_at` 列が無く、`retire_active_key(tx, actor_id, now)` の `now` 引数は現状永続化先が無い（設計のシグネチャ通りに受け取るのみ）。将来 retired 時刻の記録が要件化した場合はマイグレーション追加を検討すること。有効鍵重複（`actor_signing_keys_active_unique` 違反）は 5xx として扱った（要件上 4xx 化を要求する記述が無く、設計上のローテーション呼び出し順序では通常到達しないため）。
+- 3.1: `rsa` クレート採用にあたり、design.md のスニペットが直接参照する `rand_core::RngCore`/`CryptoRng` を裸の直接依存として追加すると、sqlx が推移的に引き込む `rand_core` 0.10.1 と rsa 0.9.10 が要求する `rand_core` 0.6.4 系列が衝突する。そのため `rsa::rand_core`（rsa クレート自身が使うバージョンの再エクスポート）経由で `RngCore`/`CryptoRng` を実装し、PKCS8/SPKI エンコードも `rsa::pkcs8::*` 経由で行った。3.2（`KeyCipher`）や以降で乱数/PEM 関連の外部クレートを足す際は同じ再エクスポート経由の流儀を踏襲し、裸の `rand_core`/`pkcs8`/`spki` を別直接依存として追加しないこと。`KeyAlgorithm`（現状 `Rsa2048` のみ）は `src/actor/keys/material.rs` に定義し、`repository.rs` の `StoredSigningKey::algorithm`（plain String）への配線は未実施（2.3 のコメント通り後続タスクの範囲）。PKCS8 秘密鍵 PEM は生成直後 `Zeroizing<String>` だが `Secret<String>`（`SecretString`）へコピーする時点で zeroize-on-drop は失われる（Debug/Display 経由の露出は防げるが drop 時のゼロ化は未対応）。将来 zeroize-on-drop が要件化した場合は `src/config/secret.rs` の `Secret<T>` 自体の拡張を検討すること（本タスクの Boundary 外）。
+- 3.2: AEAD は `chacha20poly1305`（pure Rust, `default-features = false, features = ["alloc"]`）を採用し、独自の RNG/getrandom 系クレートを引き込まないようにした（nonce は `seal` に渡される `&dyn Rng` から直接取得し、AEAD クレート自身の乱数機構は使わない）。design.md のスニペットが参照する `SecretSlice` はまだ共有場所が無いため `src/actor/keys/cipher.rs` にローカル定義した（`Secret<Vec<u8>>` 相当）。KEK は `Kek`（`Secret<[u8; 32]>` 相当）というコンストラクタ引数として受け取るのみで、起動設定（TOML/DB）からの実配線は 6.1（bootstrap/AppState 配線）の範囲。`KeyCipher` の実装は `ChaCha20Poly1305KeyCipher` の1本のみ（差し替え可能境界はテストで決定的 `SeededRng` を注入することで担保しており、別途フェイク実装は追加していない）。
+- 4.1: `provision_key`（呼び出し元のトランザクションに相乗り）は `KeyCache` を呼び出し元のコミット確定前に更新する（design.md のシーケンス図どおり、コミットをゲートにしていない）。呼び出し元（5.1 `ActorService::create_actor`）のトランザクションが後続失敗でロールバックした場合、キャッシュは一時的に未永続アクターの鍵を保持しうる — DB 側は正しくロールバックされる（`provision_key_write_is_rolled_back_if_the_callers_transaction_is_rolled_back` で検証済み）ため実害は限定的だが、5.1 実装時にこのレースを再確認すること。一方 `rotate_key` は自前トランザクションを `commit` した後にのみキャッシュを更新するため、この種のレースは発生しない。`rotate_key` のアクター不在チェック（`find_by_id`）とその後の retire+insert トランザクションは別ラウンドトリップ（TOCTOU の余地）だが、現状コードベースにアクター削除経路が無いため到達不能と判断（将来アクター削除が実装されたら再検証すること）。不在アクターへのローテーションは `404 Not Found`（`ErrorKind::Client`）にマップした（`ActorRepository` の重複ハンドル `409` に続く、命名された失敗条件に特定の 4xx を割り当てる先例に整合）。
+- 4.2: `DbSigningKeyProvider` は `KeyCache::get` への薄い同期パススルーのみ（`_Boundary: DbSigningKeyProvider_` のため `KeyCache` 自体は無変更）。`Debug` は `Clone` のみ導出し `Debug` は導出していない（`KeyCache` 自身が `Debug` を導出していないため）。core-runtime の `FixedSigningKeyProvider` は `Debug, Clone` 両方を導出しており非対称だが、6.1（bootstrap/AppState 配線）で `KeyCache` に `Debug` を追加する判断が必要になった場合はそちらで解消すること（本タスクの Boundary 外と判断）。`RuntimeContext` への実配線（本番 `SigningKeyProvider` としての注入）も 6.1 の範囲。
+- 5.1: `ActorService::create_actor` は `self.pool.begin()` で開いた単一トランザクションを `insert_actor` → `SigningKeyService::provision_key` の順に駆動し、明示的な `rollback()` 呼び出しではなく早期 `?` return によるトランザクションの drop に委ねている（`SigningKeyService::rotate_key` と同じ流儀）。4.1 のノートが指摘した「`provision_key` はコミット前にキャッシュを更新する」レースは 5.1 でも解消していない（設計のシーケンス図どおりの実装であり、5.1 の Boundary 外の再設計が必要なため）。`ActorService::new` は `signing_key_service: Arc<SigningKeyService>` をコンストラクタ注入で受け取る形にした。6.1（bootstrap/AppState 配線）は `SigningKeyService` を `Arc` で包んで `ActorService`/他の消費者に共有する前提で配線すること。`NewActor.handle` は `Handle`（値ではなく既に構築済みの値オブジェクト）を要求するため、ハンドル形式検証（1.6）は `Handle::new` の呼び出し側（将来の 5.2/6.1 配線や API 層）が担う。
+- 5.2: `ActorDirectory` は `PgPool` のみを保持し（`RuntimeContext` 不要、design.md のアーキテクチャ図どおり書き込みが無い）、`list_actors_for_owner`/`resolve_actor_by_handle` は `LocalActor` を `owner_id: _` で明示的に破棄する非網羅 `..` 無しの分解パターンで `ActorSummary`/`ResolvedActor` へ投影している（`model.rs` が確立した owner 非露出の実証パターンを踏襲）。`actor_public_key` は `keys::repository::find_active_public_key` への薄い委譲のみ（そちらが既に owner を含まない `ActorPublicKey` を返すため）。6.1（bootstrap/AppState 配線）は `ActorDirectory::new(pool)` を `ActorService`/`SigningKeyService` と並べて `ActorModule` に組み込む想定。
+- 6.1: KEK は `AppConfig.actor.kek: Secret<[u8; 32]>`（新設 `ActorConfig` 構造体、`actor.kek` ドット path → 環境変数 `KAWASEMI_ACTOR_KEK`、64桁16進文字列を必須フィールドとして検証、`validate_kek`）として配線した。`bootstrap.rs::build_state()` はプール確立・マイグレーション後に `load_key_cache_with_diagnostics`（新規）で全有効鍵をロード→`ChaCha20Poly1305KeyCipher::open`→`KeyCache::from_entries` で温め、`DbSigningKeyProvider::new(cache.clone())` を `RuntimeContext { clock, ids, rng, keys }` の `keys` に直接注入する（`RuntimeContext::production()` は本番経路では**呼ばない** — その `FixedSigningKeyProvider` プレースホルダは意図的にバイパスされる。placeholder 自体は temporarily 残置され `src/runtime.rs` のテスト/デフォルト用途にのみ使われる）。鍵ロード失敗は新設 `BootstrapError::KeySupply(AppError)` に集約（`AppError` は `Display`/`std::error::Error` を実装しないため `Debug` でレンダリング、`source()` は `None`）。`AppState` は `actor: ActorModule` フィールドを追加し `pub fn actor(&self) -> &ActorModule` で公開、`AppState::new` のシグネチャに `actor: ActorModule` 引数が増えた（`src/test_harness.rs`/`src/server/tests.rs`/両 `tests/bootstrap_*_it.rs` はこの新シグネチャと新必須環境変数 `KAWASEMI_ACTOR_KEK` に追随済み）。後続タスク（7.1-7.3 の統合テスト等）はこの `AppState::actor()` 経由で `ActorService`/`SigningKeyService`/`ActorDirectory` を取得すること。
+- 7.1-7.3: 検証グループ全体は `spawn_test_app` 経由で `AppState::actor()` の公開 API のみを駆動する統合テスト3本（`tests/actor_lifecycle_it.rs`, `tests/signing_key_it.rs`, `tests/owner_actor_boundary_it.rs`）として完了。7.2 は退役鍵の `status` 確認に `keys::repository` に公開関数が無いため一時的な生 SQL 読み取りを使用（`load_all_active` は active のみを返すため）。7.3 のレビューで指摘: このファイルのドキュメントコメントは「ログキャプチャ用テスト基盤が存在しない」と述べているが、実際には `src/telemetry/tests.rs` に `Capture`（`tracing_subscriber::Layer`）が存在する（ただし `#[cfg(test)]` で `telemetry` モジュール内に閉じており統合テストクレートから到達不能なため、結論自体は変わらない）。またアクター作成/ローテーション経路 (`src/actor.rs`/`src/actor/**`) には現状ログ出力呼び出しが一つも無いため、ログキャプチャテストを追加しても実質的な追加カバレッジは乏しい。将来ログ出力が追加された場合はこの点を再検討すること。

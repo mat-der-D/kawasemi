@@ -73,6 +73,8 @@ Otherwise, for each detected feature:
 
 The following validation dimensions are independent and can be dispatched as **subagents** via the Agent tool. The agent should decide the optimal decomposition based on feature scope — split, merge, or skip subagents as appropriate. Each subagent returns a **structured findings summary** to keep the main context clean for GO/NO-GO synthesis.
 
+**Dispatch every one of these with `run_in_background: false`.** Issue all of their `Agent` calls together in a single response (multiple tool-use blocks in one turn) to get genuine concurrency — they still run in parallel, but this context receives each one's result directly as its own tool result, in-context. Never use the Agent tool's default background/async mode here: if this skill is itself running as a nested subagent (e.g. dispatched from `kiro-auto-implement`'s Step 4), an async dispatch's completion notification will not reach this context — it surfaces elsewhere, and synthesizing a GO/NO-GO decision from a relayed secondhand claim instead of a direct tool result is not acceptable for this gate.
+
 **Typical validation dimensions** (adjust as appropriate):
 - **Test execution**: Run the complete test suite, report pass/fail with details
 - **Requirements coverage**: Build requirements → implementation matrix, report gaps

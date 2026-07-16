@@ -1,14 +1,14 @@
 # Implementation Plan
 
 - [ ] 1. 基盤の構築（永続スキーマと起動設定）
-- [ ] 1.1 OAuth 永続テーブルのマイグレーションを追加する
+- [x] 1.1 OAuth 永続テーブルのマイグレーションを追加する
   - `migrations/0003_oauth.sql` を連番命名・前方追加規約に従って追加し、OAuth アプリケーション・認可コード・アクセストークンのテーブルと制約（`client_id` 一意・`client_secret_hash` 列・トークンハッシュ一意・`actor_id` 必須・コードの短命/単回消費・トークン失効フラグ）を定義する
   - 認可コード・トークン・クライアントシークレットは値そのものではなく同一規約のハッシュ列で保持し、`actor_id` を NOT NULL とする
   - `spawn_test_app` 起動時にこのマイグレーションが適用され、3 テーブルが `client_secret_hash` を含む列構成で存在する状態になる
   - _Requirements: 1.1, 1.5, 2.3, 2.5, 3.1, 3.4, 3.5_
   - _Boundary: oauth migration_
 
-- [ ] 1.2 起動設定にオーナー資格情報とトークンハッシュ素材を追加する
+- [x] 1.2 起動設定にオーナー資格情報とトークンハッシュ素材を追加する
   - core-runtime の起動設定へ、オーナー資格情報とトークンハッシュ用素材を `Secret<T>` 項目として追加し、`Debug`/ログでマスクされることを確認する
   - 必須/任意の扱いと検証を core-runtime の設定読込規約に沿わせる
   - 設定読込でこれらの項目が取得でき、フォーマットしても平文が露出しないことを単体テストで確認できる
@@ -16,14 +16,14 @@
   - _Boundary: core-runtime config_
 
 - [ ] 2. OAuth ドメインモデルとスコープ・PKCE
-- [ ] 2.1 OAuth ドメイン型と単一アクター文脈を実装する
+- [x] 2.1 OAuth ドメイン型と単一アクター文脈を実装する
   - OAuth アプリ・認可コード・アクセストークン・リクエストアクター文脈・オーナーセッションのドメイン型を定義し、コード/トークン/シークレットを `Secret` ラッパまたはハッシュで保持する
   - リクエストアクター文脈は単一アクターのみを表現し、複数アクター同時操作を型レベルで不能にする
   - 秘匿値をフォーマット/ログ出力しても平文が出ないことを単体テストで確認できる
   - _Requirements: 1.1, 2.3, 3.1, 3.5, 3.6, 5.3_
   - _Boundary: model_
 
-- [ ] 2.2 (P) スコープ体系と内包判定を実装する
+- [x] 2.2 (P) スコープ体系と内包判定を実装する
   - Mastodon 互換の上位スコープ（read/write/follow/push）と細分スコープを表現し、未知スコープを拒否するパースと、上位が配下細分を包含する内包判定を提供する
   - 内包判定は認可・トークン発行・エンドポイント保護で共有できる単一実装とする
   - 上位スコープが細分要求を満たし、不足を拒否し、未知スコープがエラーになることを単体テストで確認できる
@@ -31,7 +31,7 @@
   - _Boundary: Scope_
   - _Depends: 2.1_
 
-- [ ] 2.3 (P) PKCE チャレンジ検証を実装する
+- [x] 2.3 (P) PKCE チャレンジ検証を実装する
   - PKCE(S256) のチャレンジ表現と、検証子との整合検証を提供し、認可コードに紐づけられる形にする
   - 整合/不整合がそれぞれ成功/エラーになることを単体テストで確認できる
   - _Requirements: 2.6, 3.3_
@@ -39,7 +39,7 @@
   - _Depends: 2.1_
 
 - [ ] 3. OAuth データ層
-- [ ] 3.1 (P) OAuth アプリケーションリポジトリを実装する
+- [x] 3.1 (P) OAuth アプリケーションリポジトリを実装する
   - アプリ登録（クライアント識別子/シークレット採番・リダイレクト URI と要求スコープの保管）と取得を実装し、`client_secret` はトークン/認可コードと同一規約でハッシュ化して `client_secret_hash` に保存し、平文は登録応答時のみ返却して以降は永続化・ログ出力しない
   - 資格情報検証は提示されたシークレットをハッシュ化した上でハッシュ同士の定数時間比較により行う
   - 識別子/乱数は core-runtime の決定性境界から取得する
@@ -48,14 +48,14 @@
   - _Boundary: OauthAppRepository_
   - _Depends: 1.1, 2.1_
 
-- [ ] 3.2 (P) 認可コードリポジトリを実装する
+- [x] 3.2 (P) 認可コードリポジトリを実装する
   - 短命認可コードの挿入と、「未消費かつ未期限切れ」を条件とする原子的な単回消費を実装し、選択アクターと承認スコパと任意 PKCE をコードに保持する
   - 消費済みまたは期限切れコードは交換に使えないことを統合テストで確認できる
   - _Requirements: 2.5, 3.1, 3.2_
   - _Boundary: AuthorizationCodeRepository_
   - _Depends: 1.1, 2.1_
 
-- [ ] 3.3 (P) アクセストークンリポジトリを実装する
+- [x] 3.3 (P) アクセストークンリポジトリを実装する
   - トークンのハッシュ保存による発行・解決・失効を実装し、解決時に結びついたアクターと承認スコープを返す
   - トークン平文を永続化せず、失効済みトークンが解決で無効扱いになることを統合テストで確認できる
   - _Requirements: 3.1, 3.4, 3.6, 5.1, 5.2_
@@ -63,7 +63,7 @@
   - _Depends: 1.1, 2.1_
 
 - [ ] 4. OAuth サービス層
-- [ ] 4.1 オーナー認証ゲートを実装する
+- [x] 4.1 オーナー認証ゲートを実装する
   - 起動設定のオーナー資格情報を定数時間比較で照合し、認証成功時に actor-model のオーナーディレクトリが提供する単一オーナー取得アクセサ（一人鯖前提でインスタンスに厳密に1件のみ存在する owners 行を返すアクセサ）を呼び出して `owner_id` を解決し、短命オーナーセッションを発行する最小ゲートを実装する
   - 発行したオーナーセッションは署名付き HttpOnly Cookie（`SameSite=Lax` または `Strict`、TLS 配信時は `Secure`）として運搬する
   - 正しい資格情報でセッションが得られて署名付き Cookie が発行され、誤った資格情報が拒否されることを単体テストで確認できる
@@ -71,7 +71,7 @@
   - _Boundary: OwnerGate_
   - _Depends: 1.2_
 
-- [ ] 4.2 OAuth サービス（登録・コード発行・トークン交換/失効）を実装する
+- [x] 4.2 OAuth サービス（登録・コード発行・トークン交換/失効）を実装する
   - アプリ登録（必須/形式/スコープ検証）、認可コード発行（クライアント/リダイレクト URI/スコープ検証と選択アクター・承認スコープ・任意 PKCE のバインド）、トークン交換（コード単回消費・資格情報/URI 一致・PKCE 整合検証）、トークン失効を業務として集約する
   - 識別子/乱数/時刻は決定性境界から取得する
   - 不正なクライアント/URI/スコープ/コードが拒否され、正常系でアクターとスコープを保持したコードとトークンが発行されることを統合テストで確認できる
@@ -80,14 +80,14 @@
   - _Depends: 2.2, 2.3, 3.1, 3.2, 3.3_
 
 - [ ] 5. OAuth エンドポイント層
-- [ ] 5.1 apps エンドポイントを実装する
+- [x] 5.1 apps エンドポイントを実装する
   - アプリ登録エンドポイントと資格情報検証エンドポイントを実装し、登録応答にクライアント資格情報を含め、検証応答に公開情報を返す
   - 必須欠落/形式不正は互換エラー、無効資格情報は認証エラーになることを統合テストで確認できる
   - _Requirements: 1.1, 1.2, 1.5_
   - _Boundary: AppsEndpoint_
   - _Depends: 4.2_
 
-- [ ] 5.2 認可・承認画面・アクター選択エンドポイントを実装する
+- [x] 5.2 認可・承認画面・アクター選択エンドポイントを実装する
   - 認可エンドポイントで GET 時にオーナー認証を要求し、actor-model のオーナー別アクター一覧を承認画面に提示する。承認画面はオーナーセッションに紐づく CSRF トークンをフォームへ埋め込んで描画する
   - POST 時に選択アクター・承認スコープ・CSRF トークンを受け取り、CSRF トークンがオーナーセッションのものと一致することを検証してから認可コードを発行・登録 URI へリダイレクトする。不一致時は認可コードを発行せず 403 相当の Mastodon 互換エラーで拒否する。承認拒否は OAuth 準拠のアクセス拒否を返す
   - これは OAuth サービス・オーナーゲート・アクターディレクトリを束ねる横断結線であり、明示的な統合作業として扱う
@@ -96,7 +96,7 @@
   - _Boundary: AuthorizeEndpoint, OwnerGate_
   - _Depends: 4.1, 4.2_
 
-- [ ] 5.3 token / revoke エンドポイントを実装する
+- [x] 5.3 token / revoke エンドポイントを実装する
   - トークン交換エンドポイントと失効エンドポイントを実装し、交換成功で Mastodon 互換トークン応答を返す
   - 不正なコード/資格情報で交換が拒否され、失効後に当該トークンが無効化されることを統合テストで確認できる
   - _Requirements: 3.1, 3.2, 3.4_
@@ -104,25 +104,25 @@
   - _Depends: 4.2_
 
 - [ ] 6. API 横断層
-- [ ] 6.1 (P) Mastodon 互換エラー応答層を実装する
+- [x] 6.1 (P) Mastodon 互換エラー応答層を実装する
   - core-runtime の統一エラー型の変換骨格を拡張し、`error`（必要時 `error_description`）の互換 JSON 本文と、入力検証/認証/権限不足/未検出/超過/システムエラーの HTTP ステータス対応表を提供する。新たなエラー型は作らない
   - システムエラー時に内部詳細が本文へ出ないことを単体テストで確認できる
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
   - _Boundary: MastodonError_
 
-- [ ] 6.2 (P) ページネーションツールキットを実装する
+- [x] 6.2 (P) ページネーションツールキットを実装する
   - カーソルパラメータ（max_id/since_id/min_id/limit）の解釈、カテゴリ毎に差し替え可能なカーソル抽象、ページ表現、`Link`（next/prev）ヘッダ生成を実装し、リバースプロキシ後段の外部ホスト名・スキームを尊重した絶対 URL を生成する
   - `since_id`（最新固定）と `min_id`（古い側から進む）の向き差、`max_id` の古い側、`limit` 上限丸めが単体テストで確認でき、status id 以外のカーソルを差し込めることを示せる
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7_
   - _Boundary: Pagination_
 
-- [ ] 6.3 (P) レート制限レイヤーを実装する
+- [x] 6.3 (P) レート制限レイヤーを実装する
   - `X-RateLimit-Limit/Remaining/Reset` を付与する tower レイヤーと上限超過時の互換応答を実装し、リセット時刻を core-runtime の時刻境界から算出する。実値が緩くてもヘッダ形と算出規約を維持する
   - 通常応答にヘッダが付与され、超過時に互換の超過応答が返ることを統合テストで確認できる
   - _Requirements: 8.1, 8.2, 8.3, 8.4_
   - _Boundary: RateLimit_
 
-- [ ] 6.4 Bearer 認証ミドルウェアを実装する
+- [x] 6.4 Bearer 認証ミドルウェアを実装する
   - Bearer トークンを解決して単一アクター文脈と承認スコープを後続へ供給し、欠如/無効/失効を 401、スコープ不足を 403 とする。任意認証モードと、後続 spec が再利用できるトークン検査関数を提供する
   - 有効トークンで単一アクター文脈が確定し、欠如/失効で 401、スコープ不足で 403、任意認証で未認証継続することを統合テストで確認できる
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 4.2, 4.3_
@@ -130,7 +130,7 @@
   - _Depends: 2.2, 3.3_
 
 - [ ] 7. 配線と統合
-- [ ] 7.1 横断レイヤーと OAuth エンドポイントをランタイムへ配線する
+- [x] 7.1 横断レイヤーと OAuth エンドポイントをランタイムへ配線する
   - core-runtime の Composition Root（状態・起動・サーバ）を拡張し、OAuth サービス/リポジトリ/オーナーゲートを構築して共有状態に格納し、エラー変換・レート制限・Bearer 認証の各レイヤーを全 API に適用し、apps/authorize/token/revoke エンドポイントを mount する
   - これは複数コンポーネントを束ねる明示的な統合タスクである
   - 起動後にエラー応答が互換形・レート制限ヘッダ付与・Bearer 保護が有効で、OAuth エンドポイントが到達可能になることを統合テストで確認できる
@@ -139,7 +139,7 @@
   - _Depends: 5.1, 5.2, 5.3, 6.1, 6.3, 6.4_
 
 - [ ] 8. 契約テストハーネス
-- [ ] 8.1 エンティティ契約テストハーネスを実装する
+- [x] 8.1 エンティティ契約テストハーネスを実装する
   - 決定的な非決定性境界の上でエンティティ JSON 応答を生成し、ゴールデンとの比較で不一致箇所を特定報告し、実クライアントのキャプチャをフィクスチャとして登録できる基盤を、後続 spec が契約を足す拡張点として実装する。個別エンティティ契約の中身は所有しない
   - 同一決定的境界で同一ゴールデンが再現され、差分が箇所特定で報告されることを確認できる
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
@@ -147,35 +147,58 @@
   - _Depends: 7.1_
 
 - [ ] 9. 検証（統合テスト）
-- [ ] 9.1 OAuth フロー統合テストを実装する
+- [x] 9.1 OAuth フロー統合テストを実装する
   - アプリ登録→資格情報検証→認可（オーナー認証・アクター選択・CSRF 検証）→トークン交換→失効までを通し、コード単回消費・PKCE 検証・トークンへの actor_id/スコープ伝播・無効入力拒否を検証する
   - 正常系のログインが通過し、コード再利用・不正資格情報・PKCE 不整合・CSRF トークン不一致が拒否されることを確認できる
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.3, 2.4, 2.5, 2.6, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6_
   - _Depends: 7.1_
 
-- [ ] 9.2 (P) 認証・スコープ統合テストを実装する
+- [x] 9.2 (P) 認証・スコープ統合テストを実装する
   - Bearer 認証で単一アクター文脈が確定すること、欠如/失効で 401、スコープ不足で 403、上位スコープが細分要求を満たすこと、任意認証で未認証継続することを検証する
   - これらの認証/認可分岐が期待ステータスで応答することを確認できる
   - _Requirements: 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 5.4, 5.5_
   - _Boundary: BearerAuthMiddleware, Scope_
   - _Depends: 7.1_
 
-- [ ] 9.3 (P) ページネーション統合テストを実装する
+- [x] 9.3 (P) ページネーション統合テストを実装する
   - max_id/since_id/min_id/limit の各挙動で欠落・重複・無限ループが起きないこと、`Link` の next/prev が機能すること、カテゴリ別カーソル（status id 以外）が差し替え可能なことを検証する
   - 各カーソルで期待範囲の項目と正しい `Link` ヘッダが返ることを確認できる
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7_
   - _Boundary: Pagination_
   - _Depends: 7.1_
 
-- [ ] 9.4 (P) エラー・レート制限互換統合テストを実装する
+- [x] 9.4 (P) エラー・レート制限互換統合テストを実装する
   - 422/401/403/404 の本文形とステータス出し分け、システムエラーの内部秘匿、`X-RateLimit-*` の付与と超過時の互換応答を検証する
   - クライアントが解釈可能な互換エラー本文とレート制限ヘッダが一貫して返ることを確認できる
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 8.1, 8.2, 8.3, 8.4_
   - _Boundary: MastodonError, RateLimit_
   - _Depends: 7.1_
 
-- [ ] 9.5 契約ハーネス統合テストを実装する
+- [x] 9.5 契約ハーネス統合テストを実装する
   - ハーネスが決定的境界で再現可能なゴールデンを生成し、差分報告とフィクスチャ登録が受け入れ基準として機能することを、サンプルエンティティで検証する
   - 同一入力で安定したゴールデン比較が成立し、意図的な差分が箇所特定で検出されることを確認できる
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
   - _Depends: 8.1_
+
+## Implementation Notes
+
+- Task 3.1: `src/oauth/hash.rs` を新設し、`keyed_hash`/`verify_keyed_hash`（HMAC-SHA256, `OauthConfig.token_hash_key` で鍵付け、`subtle::ConstantTimeEq` で定数時間比較）を共有プリミティブとして提供した。`client_secret_hash`/`code_hash`/`token_hash` は migrations/0003_oauth.sql のコメントで「同一規約でハッシュ保存」と明記されているため、タスク 3.2 (`code_repository.rs`) と 3.3 (`token_repository.rs`) はこのハッシュ関数を再導出せずそのまま再利用すること。
+- Task 3.1: `model::OauthApp`（タスク 2.1）は `client_secret: Secret<String>` の単一フィールドのみを持ち、`AccessToken::token_hash` のような別ハッシュフィールドがない。平文を返せない `find_app_by_client_id` はこのため `NO_PLAINTEXT_SECRET_SENTINEL`（`app_repository.rs` でエクスポート）で埋めている。後続でこの型不整合を根本解決する場合は `model.rs`（タスク 2.1、レビュー済み）へのフィールド追加が必要になる点に留意。
+- Task 3.2: `model::PkceChallenge`（タスク 2.1 のプレースホルダ型、`AuthorizationCode::pkce` が実際に保持する型）は `challenge: String` のみで `method` フィールドを持たない（`pkce::PkceChallenge`（タスク 2.3、`method: PkceMethod` を持つ「本物」）とは別の型）。`oauth_authorization_codes.pkce_method` 列に対応する値がドメイン型に無いため、`code_repository.rs` は `pkce::PkceMethod` の唯一のバリアントである固定文字列 `"S256"` を PKCE 有無に連動して書き込む（3.1 の `NO_PLAINTEXT_SECRET_SENTINEL` と同型の判断）。根本解決は `model.rs` への `method` フィールド追加（タスク 2.1 の再訪）が必要。
+- Task 3.2: `code_hash`/`token_hash` は主キー参照（`WHERE code_hash = $1` 等）であり、`app_repository.rs::verify_app_credentials` のように「別途取得した2つのハッシュ値を比較する」操作ではないため、`hash.rs::verify_keyed_hash`（定数時間比較）は不要で `keyed_hash` のみで十分——タスク 3.3 (`token_repository.rs::resolve_token`) も同じ主キー/一意索引ルックアップ形状であれば同じ判断が成り立つ可能性があるが、失効チェック等ルックアップ後の追加ロジックがあるため個別に検討すること。
+- Task 4.1: `ActorDirectory::sole_owner()`（design.md が上流追加要求として明記していたアクセサ）を `src/actor/directory.rs` に追加した。実装は `SELECT id, created_at FROM owners`（`LIMIT` なし・`fetch_all`）で 0 件/複数件の両方を単一クエリで検出し、両ケースとも `AppError::server`（5xx）に倒す。`.first()` で黙って先頭を選ぶことは絶対にしないこと——一人鯖前提で `owners` テーブルは厳密に1件のみを想定する不変条件違反として扱う。
+- Task 4.1: `owner_gate.rs` の署名付きセッションクッキーは、専用の署名鍵を新設せず既存の `OauthConfig.token_hash_key` を `hash.rs::keyed_hash`/`verify_keyed_hash` 経由で再利用している（`src/config.rs` の変更はタスク境界外のため）。この鍵は他に `client_secret`/認可コード/アクセストークンのハッシュにも使われており、ローテーションが結合される点に留意——専用鍵への分離は範囲外・将来の別タスク。
+- Task 4.1: `owner_gate.rs` が所有するのは署名付きクッキー**値**のエンコード/デコード（`encode_session_cookie`/`decode_session_cookie`）のみで、実際の `Set-Cookie` ヘッダ（`HttpOnly`/`SameSite`/`Secure` 属性)組み立てはタスク 5.2 (`authorize_endpoint.rs`) の責務として残している。design.md の Service Interface が `OwnerSession`/クッキー値を返す形（HTTP ヘッダそのものではない）である点、および Contracts が `Service [x]` のみ（`API [x]` なし）である点から導いた判断。タスク 5.2 実装時はこの前提（クッキー名・属性の組み立てがまだ存在しない）を踏まえること。
+- Task 4.2: タスク 2.1/2.2/2.3 が「後続タスクへ委ねる」と明記していた `model::ScopeSet`（プレースホルダ・裸の `BTreeSet<String>`）↔ 実装の `scope::ScopeSet`（`crate::oauth::ScopeSet` として再エクスポート、語彙検証・`is_satisfied_by` 判定を持つ）、および `model::PkceChallenge`（プレースホルダ・`challenge: String` のみ）↔ 実装の `pkce::PkceChallenge`（`crate::oauth::PkceChallenge` として再エクスポート、`method: PkceMethod` を持つ）の橋渡しを `service.rs` に実装した。`model.rs`/`scope.rs`/`pkce.rs` は無変更。今後 `model::ScopeSet`/`model::PkceChallenge` を扱う後続タスク（5.x エンドポイント層等）は `service.rs` のこの変換関数（scope 変換・PKCE 再構成ロジック）を再利用し、変換ロジックを再発明しないこと。
+- Task 4.2: `exchange_token` はクライアント資格情報の検証を `code_repository::consume_code`（単回消費）より先に行うため、誤ったクライアント資格情報はコードを消費しない。ただし `consume_code` の後でしか redirect_uri/PKCE 不整合を検知できない（`code_repository` に消費なしの peek API が無いため）ので、redirect_uri 不一致や PKCE 不整合の場合でもコードは消費済みになる（クライアントは新しいコードで再試行が必要）。これは `code_repository`（タスク 3.2、レビュー済み）の API 形状に起因する制約であり、実世界の OAuth サーバーの一般的挙動とも整合するためレビューで許容された判断。`code_repository` に peek API を追加する場合はこの制約を再検討すること。
+- Task 4.2: スコープの「承認スコープ ⊆ アプリ登録スコープ」内包チェックは `issue_authorization_code` にのみ実装し、`exchange_token` では独立検証しない（トークン交換はコードに既にバインドされたスコープをそのまま引き継ぐのみで、独自のスコープ入力を持たないため）。`actor_id` を無条件に信頼するのと同じ設計判断。
+- Task 5.1: `apps_endpoint.rs::verify_credentials` は `OauthService`（タスク 4.2）を経由せず `app_repository::verify_app_credentials` を直接呼ぶ。`OauthService` の task-4.2 インターフェースに verify 系メソッドが無く、レビュー済みの `service.rs` をこのタスクの境界外で拡張したくないための判断（レビューで許容）。将来 `OauthService` の表面を広げてこのバイパスを解消する場合は `service.rs` 側の再訪が必要。
+- Task 5.1: `GET /api/v1/apps/verify_credentials` は design.md の API Contract 表が書く「Bearer」ではなく HTTP Basic 認証（`client_id:client_secret`）で資格情報を受け取る。Requirement 1.5 はトランスポート手段を規定しておらず、本 spec には client_credentials グラントのトークン発行経路が無いため（レビューで許容・design.md 側の記述誤りと判断）。design.md の当該行は将来「HTTP Basic (client_id:client_secret)」に修正すべき（未実施）。
+- Task 5.2: `authorize_endpoint.rs` はログイン画面と承認画面の両方を単一の GET/POST `/oauth/authorize` に束ね、セッションクッキーの有無/有効性で分岐する（design.md のファイル構成計画に別のログインエンドポイントが無いため）。元の認可要求パラメータ（client_id/redirect_uri/scope/response_type）はログイン→承認の往復をまたいで hidden フィールドで運ぶが、コード発行直前に登録済みアプリに対して再検証し、hidden フィールドを無条件に信頼しない。選択アクターは必ず `list_actors_for_owner` の結果に含まれることを確認してからコード発行する（クライアント供給の actor_id を無条件に信頼しない）。CSRF トークンはオーナーセッションに束縛した HMAC 値で、保存不要・定数時間比較。レビューでこれらのセキュリティ境界は健全と確認済み。
+- Task 5.2: `state` パラメータ・PKCE の `authorize_endpoint.rs` 側フォワーディングは本タスクの要求範囲（2.1–2.4）外のため未実装（PKCE 自体は 2.6/3.3 で `code_repository`/`pkce.rs` が別途対応）。オーナーセッションクッキーは承認判断後もローテーションしない（10分の短命 TTL で許容、レビューで非ブロッキングと判断）。CSRF トークンはリクエスト単位ではなくセッション単位で束縛（spec の文言上は許容範囲、将来のタスクで再検討の余地ありとレビューで指摘）。
+- Task 5.3: `OauthService::revoke_token`（タスク 4.2、レビュー済み）はクライアント資格情報を検証せず無条件に冪等(RFC 7009 §2.2)。`token_endpoint.rs` はこれを補うため `app_repository::verify_app_credentials` を直接呼び、資格情報検証をパスしない限り `revoke_token` へ到達しないガードを endpoint 層に実装した（タスク 5.1 の `AppsEndpoint::verify_credentials` と同型の `OauthService` バイパス判断）。トークンの `app_id` が認証済みクライアントのものと一致するかまでは追加検証していない（RFC 上 SHOULD であり MUST ではないため許容、レビューで非ブロッキングと判断）。トークン交換のクライアント資格情報不正は（`exchange_token` 側の既存挙動を維持し）400 で応答し 401 へは意図的に再区分しない（design.md の API Contract 表が同エンドポイントに 400/401 双方を許容として記載しているため、レビューで許容）。
+- Task 8.1: `src/contract.rs`（トップレベル、`src/testing/contract.rs` ではない）に `assert_golden`/`register_fixture`/`load_fixture`/`CapturedExchange` を実装した。design.md の File Structure Plan は `src/testing/contract.rs` を想定しているが、`testing/` ディレクトリを新設するほどの複数ファイルが無いため単一ファイル配置とした（レビューで非ブロッキングと確認済み）。後続 spec が本ハーネスへ個別エンティティ契約を追加する際もこの配置を踏襲すること。
+- Task 8.1: `serde_json` を `[dev-dependencies]` から `[dependencies]` へ昇格した。`pub mod contract;` は `#[cfg(test)]` で隔離されておらず、`assert_golden` 等の公開シグネチャが通常ビルドから到達可能なため、dev-dependency のままでは `tests/*.rs` 側からリンクできず必須（レビューで検証済み）。他の `serde_json` 利用箇所（例: `src/domain/primitives.rs`）は全て `#[cfg(test)] mod tests` 内に留まっている点との非対称に注意——契約ハーネスを利用する後続タスクは本クレートで `serde_json` が通常依存になっている前提で良い。
+- Task 8.1: このセッションの `.claude/hooks/cargo-test-stop.sh`（Stop イベント毎に `cargo fmt --all` を無条件実行）が、並行して動作する他エージェントの Stop イベントと競合し、タスク境界外のファイル（`src/bootstrap.rs`/`src/oauth/middleware.rs` 等）に整形のみの差分を再発させることがある（ロジック変更は無し）。実装者・レビュアー双方がこれを検出し `git checkout --` で境界外差分を復元済み。後続タスクのコミット前は `git status --porcelain`/`git diff --stat` で境界外ファイルが紛れ込んでいないか都度確認すること。
+- Task 9.2: このセッションには `cargo clippy --all-targets`（`-D warnings` 相当、dead_code 含む）をゲートする Stop フックが別途存在し、`cargo check`/`cargo test` が通っても未使用フィールド等の clippy 警告があれば検出される。実装者は `cargo check`/`cargo test` だけでなく `cargo clippy --all-targets` も自分の検証コマンドに含め、統合テストの共有ヘルパー（`RawResponse` 等、ファイルごとに私的コピーされる）で実際に使わないフィールド（例: `headers`）を持ち込まないこと。
+- Task 9.5: 契約ハーネスの統合テストは `tests/contract_harness_it.rs`（task 8.1、決定的境界での再現性・箇所特定diffを既に検証済み）に加えて `tests/contract_harness_fixture_it.rs`（新設）で `register_fixture`/`load_fixture` を「フィクスチャがゴールデンとして機能する」受け入れ基準として検証した。1ファイルに統合せず2ファイルに分けたのは、`contract_harness_it.rs` 自身のモジュールdocが明記する通り、プロセスグローバルな `UPDATE_GOLDEN_ENV` の設定/解除をunsafeに行うため同一バイナリ内に複数テスト関数を置くと競合するからで、design.md の File Structure Plan が単数形で `tests/contract_harness_it.rs` とだけ記載しているのはこの制約を考慮していない可能性がある(レビューで許容・非ブロッキング)。後続でこのハーネスへ個別エンティティ契約を追加するテストも、同じ理由で新規ファイルへの分割を検討すること。
