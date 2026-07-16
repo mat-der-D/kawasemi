@@ -52,18 +52,29 @@
 //!   `DeliveryTarget`, deduplicating remote recipients that share an
 //!   effective shared-inbox address into one delivery target (Requirements
 //!   10.3, 10.4, 11.4) — see [`outbound`].
+//! - Task 3.5 (`Boundary: ObjectDocumentProvider, OutboxSource`): the
+//!   downstream-supply delegation boundary for local objects/collections
+//!   (`ObjectDocumentRegistry`, ordered first-match-wins over
+//!   `can_resolve`) and outbox contents (`OutboxSourceRegistry`, fan-out
+//!   collection across all registered sources), each safely defaulting
+//!   (`None` / empty page) while nothing downstream is registered yet
+//!   (Requirements 6.2, 6.6, 8.1, 8.2, 8.3) — see [`endpoints`].
 //!
-//! Later tasks in this spec (`config`, `endpoints` — see design.md's File
-//! Structure Plan) are out of this task's boundary and deliberately not
-//! declared here yet; each is added by the task that actually implements
-//! it.
+//! Later tasks in this spec (`config` — see design.md's File Structure
+//! Plan) are out of this task's boundary and deliberately not declared here
+//! yet; each is added by the task that actually implements it.
 
+pub mod endpoints;
 pub mod inbound;
 pub mod jsonld;
 pub mod outbound;
 pub mod signatures;
 pub mod urls;
 
+pub use endpoints::{
+    ObjectDocumentProvider, ObjectDocumentRegistry, OutboxItemsPage, OutboxSource,
+    OutboxSourceRegistry, PageCursor,
+};
 pub use inbound::{
     BlockPolicy, DEFAULT_RECEIVED_ACTIVITY_RETENTION, DbReceivedActivityStore, HandleOutcome,
     InboundActivityDispatcher, InboundActivityHandler, InboundContext, LocalRecipientContext,
