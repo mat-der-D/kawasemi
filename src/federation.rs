@@ -46,6 +46,12 @@
 //!   calculation the worker will use to compute `reschedule`'s
 //!   `next_attempt_at` (Requirements 11.1, 11.2, 11.3, 11.5) — see
 //!   [`outbound`].
+//! - Task 3.4 (`Boundary: RecipientTargetResolver`): classifies each
+//!   business-supplied `Recipient` (a local actor by `Handle`, or a remote
+//!   actor by already-known inbox/shared-inbox URL) into a physical
+//!   `DeliveryTarget`, deduplicating remote recipients that share an
+//!   effective shared-inbox address into one delivery target (Requirements
+//!   10.3, 10.4, 11.4) — see [`outbound`].
 //!
 //! Later tasks in this spec (`config`, `endpoints` — see design.md's File
 //! Structure Plan) are out of this task's boundary and deliberately not
@@ -66,7 +72,8 @@ pub use inbound::{
 pub use jsonld::{ParsedActivity, accepts_activitypub, parse_activity, serialize};
 pub use outbound::{
     DEFAULT_DELIVERY_BASE_DELAY, DEFAULT_DELIVERY_MAX_DELAY, DEFAULT_MAX_DELIVERY_ATTEMPTS,
-    DbDeliveryQueue, DeliveryJob, DeliveryJobStatus, DeliveryQueue, NewDeliveryJob, backoff_delay,
+    DbDeliveryQueue, DeliveryJob, DeliveryJobStatus, DeliveryQueue, DeliveryTarget,
+    LocalActorLookup, NewDeliveryJob, Recipient, RecipientTargetResolver, backoff_delay,
 };
 pub use signatures::{
     DEFAULT_PUBLIC_KEY_CACHE_TTL, DEFAULT_SIGNATURE_MAX_AGE, DbFederationPublicKeyResolver, Digest,
