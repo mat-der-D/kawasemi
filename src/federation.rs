@@ -12,6 +12,9 @@
 //!   network boundary (mockable send/fetch port, production `reqwest`
 //!   implementation, deterministic mock implementation) and SHA-256 body
 //!   digest computation/mismatch detection — see [`signatures`].
+//! - Task 2.1 (`Boundary: PublicKeyResolver`): resolves a `keyId` to
+//!   cached/fetched public-key material (`remote_public_keys`), with
+//!   cache-first/force/TTL-staleness semantics — see [`signatures`].
 //!
 //! Later tasks in this spec (`config`, `inbound`, `outbound`, `endpoints` —
 //! see design.md's File Structure Plan) are out of this task's boundary and
@@ -24,7 +27,8 @@ pub mod urls;
 
 pub use jsonld::{ParsedActivity, accepts_activitypub, parse_activity, serialize};
 pub use signatures::{
-    Digest, FederationHttpClient, HttpResponse, MockFederationHttpClient, OutboundRequest,
+    DEFAULT_PUBLIC_KEY_CACHE_TTL, DbFederationPublicKeyResolver, Digest, FederationHttpClient,
+    HttpResponse, MockFederationHttpClient, OutboundRequest, PublicKeyResolver, RemotePublicKey,
     ReqwestFederationHttpClient,
 };
 pub use urls::{ActorUrls, ObjectKind};

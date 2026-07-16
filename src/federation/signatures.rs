@@ -26,23 +26,30 @@
 //!   happens here (that is `RequestSigner`/`SignatureVerifier`, later
 //!   tasks).
 //!
+//! Scope so far (task 2.1, `Boundary: PublicKeyResolver`):
+//! - [`key_resolver`]: `PublicKeyResolver` port and a DB
+//!   (`remote_public_keys`) plus `FederationHttpClient`-backed
+//!   implementation (`DbFederationPublicKeyResolver`), resolving a `keyId`
+//!   to public-key material with cache-first/force/TTL-staleness semantics
+//!   (Requirements 2.3, 2.4).
+//!
 //! Sibling files this spec's later tasks own (`signer.rs` at 2.2,
-//! `verifier.rs` at 2.3, `key_resolver.rs` at 2.1, `negotiation.rs` at 3.x —
-//! design.md's File Structure Plan) are deliberately not declared here yet;
-//! each is added by the task that actually implements it. In particular,
-//! `PublicKeyResolver` (task 2.1) is *not* implemented by this task even
-//! though design.md documents it in the same "PublicKeyResolver /
-//! FederationHttpClient（モック可能境界）" section — this task's boundary is
-//! `FederationHttpClient, Digest` only.
+//! `verifier.rs` at 2.3, `negotiation.rs` at 3.x — design.md's File
+//! Structure Plan) are deliberately not declared here yet; each is added by
+//! the task that actually implements it.
 
 mod digest;
 mod http_client;
+mod key_resolver;
 mod suite;
 
 pub use digest::Digest;
 pub use http_client::{
     FederationHttpClient, HttpResponse, MockFederationHttpClient, OutboundRequest,
     ReqwestFederationHttpClient,
+};
+pub use key_resolver::{
+    DEFAULT_PUBLIC_KEY_CACHE_TTL, DbFederationPublicKeyResolver, PublicKeyResolver, RemotePublicKey,
 };
 pub use suite::{
     DraftCavageSuite, ParsedSignature, RequestHeaders, Rfc9421Suite, SignableRequest,
