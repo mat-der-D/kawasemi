@@ -31,6 +31,14 @@
 //!   so business-logic dispatch never runs twice for the same Activity
 //!   (Requirement 7.4), with periodic pruning of rows past the configured
 //!   retention window — see [`inbound`].
+//! - Task 3.2 (`Boundary: InboundActivityDispatcher, BlockPolicy`): the
+//!   outer-Activity-type -> `InboundActivityHandler` multimap dispatch
+//!   registry, fanning out to every handler registered for a type and
+//!   safely no-oping unregistered types (Requirements 7.3, 7.5, 7.6), plus
+//!   the destination-aware `BlockPolicy` delegation boundary whose default
+//!   (`NoopBlockPolicy`) always answers non-blocked for both per-actor and
+//!   shared-inbox destination contexts (Requirements 12.1, 12.2, 12.3) —
+//!   see [`inbound`].
 //!
 //! Later tasks in this spec (`config`, `outbound`, `endpoints` — see
 //! design.md's File Structure Plan) are out of this task's boundary and
@@ -43,7 +51,9 @@ pub mod signatures;
 pub mod urls;
 
 pub use inbound::{
-    DEFAULT_RECEIVED_ACTIVITY_RETENTION, DbReceivedActivityStore, ReceivedActivityStore,
+    BlockPolicy, DEFAULT_RECEIVED_ACTIVITY_RETENTION, DbReceivedActivityStore, HandleOutcome,
+    InboundActivityDispatcher, InboundActivityHandler, InboundContext, LocalRecipientContext,
+    NoopBlockPolicy, ReceivedActivityStore,
 };
 pub use jsonld::{ParsedActivity, accepts_activitypub, parse_activity, serialize};
 pub use signatures::{
