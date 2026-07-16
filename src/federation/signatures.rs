@@ -49,13 +49,17 @@
 //!   cryptographic check itself, returning the verified signer's identity
 //!   (Requirements 2.1, 2.2, 2.5, 2.6, 7.1).
 //!
-//! Sibling files this spec's later tasks own (`negotiation.rs` at 3.x —
-//! design.md's File Structure Plan) are deliberately not declared here yet;
-//! each is added by the task that actually implements it.
+//! Scope so far (task 2.4, `Boundary: SignatureNegotiator`):
+//! - [`negotiation`]: `SignatureNegotiator` — double-knocks a signed
+//!   outbound request against a host of unknown signature-format support,
+//!   retrying with the other format on a `401` (signature-related)
+//!   rejection, and remembers the successful format per host in
+//!   `instance_signature_capabilities` (Requirements 3.1, 3.2, 3.3).
 
 mod digest;
 mod http_client;
 mod key_resolver;
+mod negotiation;
 mod signer;
 mod suite;
 mod verifier;
@@ -68,6 +72,7 @@ pub use http_client::{
 pub use key_resolver::{
     DEFAULT_PUBLIC_KEY_CACHE_TTL, DbFederationPublicKeyResolver, PublicKeyResolver, RemotePublicKey,
 };
+pub use negotiation::SignatureNegotiator;
 pub use signer::RequestSigner;
 pub use suite::{
     DraftCavageSuite, ParsedSignature, RequestHeaders, Rfc9421Suite, SignableRequest,

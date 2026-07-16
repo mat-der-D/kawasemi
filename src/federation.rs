@@ -22,6 +22,10 @@
 //!   Signature end-to-end (format detection, signing-input reconstruction,
 //!   public-key resolution with invalidate-and-retry, RSA-SHA256 check),
 //!   returning the verified signer's identity — see [`signatures`].
+//! - Task 2.4 (`Boundary: SignatureNegotiator`): double-knocks a signed
+//!   outbound request against a host of unknown signature-format support,
+//!   remembering the successful format per host in
+//!   `instance_signature_capabilities` — see [`signatures`].
 //!
 //! Later tasks in this spec (`config`, `inbound`, `outbound`, `endpoints` —
 //! see design.md's File Structure Plan) are out of this task's boundary and
@@ -37,6 +41,6 @@ pub use signatures::{
     DEFAULT_PUBLIC_KEY_CACHE_TTL, DEFAULT_SIGNATURE_MAX_AGE, DbFederationPublicKeyResolver, Digest,
     FederationHttpClient, HttpResponse, HttpSignatureVerifier, IncomingRequest,
     MockFederationHttpClient, OutboundRequest, PublicKeyResolver, RemotePublicKey, RequestSigner,
-    ReqwestFederationHttpClient, SignatureVerifier, VerifiedSigner,
+    ReqwestFederationHttpClient, SignatureNegotiator, SignatureVerifier, VerifiedSigner,
 };
 pub use urls::{ActorUrls, ObjectKind};
