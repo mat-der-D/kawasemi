@@ -25,6 +25,7 @@ pub mod contract;
 pub mod db;
 pub mod domain;
 pub mod error;
+pub mod federation;
 pub mod migrate;
 pub mod oauth;
 pub mod runtime;

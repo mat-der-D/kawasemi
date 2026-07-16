@@ -7,7 +7,7 @@
   - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、4テーブルと各索引・制約が存在する
   - _Requirements: 11.1, 11.4, 7.4_
   - _Boundary: Migration_
-- [ ] 1.2 (P) JSON-LD コーデックを実装する
+- [x] 1.2 (P) JSON-LD コーデックを実装する
   - ActivityPub `@context` 付与の直列化、未知プロパティで失敗しない安全展開、必須プロパティ（type/id）欠落検出、`application/activity+json`・`application/ld+json` のメディアタイプ判定を実装する
   - 観測可能な完了条件: 未知プロパティ入り文書を解釈でき、必須欠落は検証エラーになり、直列化出力に `@context` が含まれる単体テストが通る
   - _Requirements: 9.1, 9.2, 9.3, 9.4_
