@@ -13,7 +13,7 @@
   - _Requirements: 9.1, 9.2, 9.3, 9.4_
   - _Boundary: JsonLdCodec_
   - _Depends: 1.1_
-- [ ] 1.3 (P) アクター URL ビルダーを実装する
+- [x] 1.3 (P) アクター URL ビルダーを実装する
   - サーバードメイン設定からアクター/inbox/outbox/shared inbox/オブジェクト/コレクション URL と keyId URL を構築する
   - 観測可能な完了条件: 同一ハンドルに対し一貫した URL 群と keyId が生成される単体テストが通る
   - _Requirements: 6.1, 8.1_
