@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. 基盤: スキーマ・直列化・URL・低位境界
-- [ ] 1.1 連合用テーブルのマイグレーションを追加する
+- [x] 1.1 連合用テーブルのマイグレーションを追加する
   - `migrations/0008_federation.sql` を作成し `delivery_jobs` / `received_activities` / `remote_public_keys` / `instance_signature_capabilities` を定義する
   - 配送ジョブの期限索引と、`target_inbox` × Activity id の重複排除一意索引、状態カラム（pending/in_progress/done/failed）を設定する
   - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、4テーブルと各索引・制約が存在する
@@ -177,3 +177,6 @@
   - _Requirements: 10.5, 13.1, 13.2, 13.3, 13.4_
   - _Boundary: FederationTestHarness, federation_pair_it_
   - _Depends: 5.4_
+
+## Implementation Notes
+- 1.1: design.md の物理データモデルは移行ファイル名を `0008_federation.sql` と記載しているが、実際には `migrations/0004_federation.sql` として作成した。`migrations/` は `0001`〜`0003`（core-runtime/actor-model/api-foundation、roadmap.md の依存順）までしか存在せず、federation-core はロードマップ順で4番目に実装されるため実際の次番号は 0004。design.md 側の番号（0004〜0008、spec 間で不整合）は `/kiro-spec-batch` の並列生成時に割り当てられた値であり、実装順を反映していない（federation-core に依存する accounts-and-instance/statuses-core/social-graph がより小さい番号を持つ点からも裏付けられる）。sqlx のマイグレータはデフォルトで版番号の昇順以外の追記を拒否するため、以降のタスクでマイグレーションファイルを追加する際は、design.md の番号をそのまま使わず `migrations/` の実際の内容を確認して次の連番を採番すること。テーブル/カラム/索引/制約の中身は design.md の `0008_federation.sql` ブロックをそのまま踏襲している。
