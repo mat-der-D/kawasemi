@@ -18,20 +18,33 @@
 //! - [`digest`]: SHA-256 body digest computation and mismatch detection
 //!   (`Digest`) (Requirements 1.3, 2.5).
 //!
-//! Sibling files this spec's later tasks own (`suite.rs` at 1.5, `signer.rs`
-//! at 1.5, `verifier.rs` at 2.3, `key_resolver.rs` at 2.1, `negotiation.rs`
-//! at 3.x — design.md's File Structure Plan) are deliberately not declared
-//! here yet; each is added by the task that actually implements it. In
-//! particular, `PublicKeyResolver` (task 2.1) is *not* implemented by this
-//! task even though design.md documents it in the same "PublicKeyResolver /
+//! Scope so far (task 1.5, `Boundary: SignatureSuite`):
+//! - [`suite`]: the `SignatureSuite` abstraction over draft-cavage and RFC
+//!   9421 HTTP Signatures — signing-target construction, signature header
+//!   assembly, parsing, and received-format detection (Requirements 1.4,
+//!   2.2). Pure string/format logic only: no RSA signing or verification
+//!   happens here (that is `RequestSigner`/`SignatureVerifier`, later
+//!   tasks).
+//!
+//! Sibling files this spec's later tasks own (`signer.rs` at 2.2,
+//! `verifier.rs` at 2.3, `key_resolver.rs` at 2.1, `negotiation.rs` at 3.x —
+//! design.md's File Structure Plan) are deliberately not declared here yet;
+//! each is added by the task that actually implements it. In particular,
+//! `PublicKeyResolver` (task 2.1) is *not* implemented by this task even
+//! though design.md documents it in the same "PublicKeyResolver /
 //! FederationHttpClient（モック可能境界）" section — this task's boundary is
 //! `FederationHttpClient, Digest` only.
 
 mod digest;
 mod http_client;
+mod suite;
 
 pub use digest::Digest;
 pub use http_client::{
     FederationHttpClient, HttpResponse, MockFederationHttpClient, OutboundRequest,
     ReqwestFederationHttpClient,
+};
+pub use suite::{
+    DraftCavageSuite, ParsedSignature, RequestHeaders, Rfc9421Suite, SignableRequest,
+    SignatureFormat, SignatureSuite, SigningInput,
 };

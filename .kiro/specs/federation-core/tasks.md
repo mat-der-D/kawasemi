@@ -25,7 +25,7 @@
   - _Requirements: 2.7, 1.3, 2.5_
   - _Boundary: FederationHttpClient, Digest_
   - _Depends: 1.1_
-- [ ] 1.5 (P) 署名スイート抽象を実装する
+- [x] 1.5 (P) 署名スイート抽象を実装する
   - `SignatureSuite` を draft-cavage / RFC 9421 の両形式で実装し、署名対象構築・署名ヘッダ組み立て・解析・受信形式検出を提供する
   - 観測可能な完了条件: 各形式で署名対象とヘッダを構築・解析でき、受信ヘッダから形式を検出できる単体テストが通る
   - _Requirements: 1.4, 2.2_
@@ -180,3 +180,4 @@
 
 ## Implementation Notes
 - 1.1: design.md の物理データモデルは移行ファイル名を `0008_federation.sql` と記載しているが、実際には `migrations/0004_federation.sql` として作成した。`migrations/` は `0001`〜`0003`（core-runtime/actor-model/api-foundation、roadmap.md の依存順）までしか存在せず、federation-core はロードマップ順で4番目に実装されるため実際の次番号は 0004。design.md 側の番号（0004〜0008、spec 間で不整合）は `/kiro-spec-batch` の並列生成時に割り当てられた値であり、実装順を反映していない（federation-core に依存する accounts-and-instance/statuses-core/social-graph がより小さい番号を持つ点からも裏付けられる）。sqlx のマイグレータはデフォルトで版番号の昇順以外の追記を拒否するため、以降のタスクでマイグレーションファイルを追加する際は、design.md の番号をそのまま使わず `migrations/` の実際の内容を確認して次の連番を採番すること。テーブル/カラム/索引/制約の中身は design.md の `0008_federation.sql` ブロックをそのまま踏襲している。
+- 1.5: `SignatureSuite`（`src/federation/signatures/suite.rs`）は draft-cavage / RFC 9421 双方の署名対象文字列構築・ヘッダ組み立て・解析・形式検出のみを扱う純粋な文字列/フォーマット層で、実際の RSA 署名・検証は行わない（2.2/2.3 の責務）。design.md にない `SignableRequest::key_id` フィールドを追加した（RFC 9421 の `@signature-params` 行に keyid/alg を署名対象として含めるため。`assemble_headers` の `key_id` 引数と一致させる契約は `debug_assert_eq!` で明文化）。RFC 9421 側のダイジェスト成分は RFC 9530 Content-Digest 構造化フィールドではなく、1.4 の既存 `Digest`（`Digest: SHA-256=...`）をそのまま `digest` コンポーネント名で流用している（2.2/2.3 実装時に留意）。`created`/`expires` パラメータは意図的に省略（`SignatureSuite` は clock を持たないため。代わりに `date` ヘッダを鮮度検証に使う想定）。`build_signing_input` が対象とするヘッダ/コンポーネント集合は固定（design.md のシグネチャに呼び出し側からの一覧指定引数が無いため）— 2.3（`SignatureVerifier`）は受信側の `Signature-Input`/`headers=` パラメータが宣言する成分集合と実装側の固定集合が食い違うケースへの対処を検討すること。
