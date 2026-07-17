@@ -29,13 +29,20 @@
 //!   `OrderedCollectionPage`, no authorized-fetch gate per design.md's own
 //!   API Contract table — Requirements 8.1, 8.2, 9.4 — see [`outbox`]).
 //!
-//! Later sibling modules in this spec's `endpoints/` file plan (`inbox.rs`
-//! — task 5.3) are out of this task's boundary and deliberately not
-//! declared here yet; each is added by the task that actually implements
-//! it.
+//! - Task 5.3 (`Boundary: inbox`): the per-actor inbox and shared-inbox POST
+//!   handlers, connecting a signed Activity to `InboxService::process_inbound`
+//!   with the correct `LocalRecipientContext` (per-actor `Actor` vs.
+//!   domain-wide `SharedInbox`) — verification failure -> auth-failure
+//!   response, acceptance -> `202`, duplicate -> `202` without re-dispatch
+//!   (Requirements 7.1, 7.2 — see [`inbox`]).
+//!
+//! Later sibling modules in this spec's `endpoints/` file plan are out of
+//! this task's boundary and deliberately not declared here yet; each is
+//! added by the task that actually implements it.
 
 pub mod ap_get;
 pub mod document;
+pub mod inbox;
 pub mod nodeinfo;
 pub mod outbox;
 pub mod webfinger;
@@ -45,6 +52,7 @@ pub use document::{
     ActivityPubDocumentBuilder, ObjectDocumentProvider, ObjectDocumentRegistry, OutboxItemsPage,
     OutboxSource, OutboxSourceRegistry, PageCursor,
 };
+pub use inbox::{InboxState, actor_inbox, shared_inbox};
 pub use nodeinfo::{NodeInfoState, nodeinfo_discovery, nodeinfo_document};
 pub use outbox::{OutboxQuery, OutboxState, outbox_get};
 pub use webfinger::{WebfingerQuery, WebfingerState, webfinger};

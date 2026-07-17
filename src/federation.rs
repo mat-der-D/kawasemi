@@ -94,6 +94,16 @@
 //!   6.1-6.4, 6.6, 8.1, 8.2, 9.4) — see [`endpoints`]. Not yet mounted on
 //!   the live router (task 5.4's job); see `endpoints::ap_get`/
 //!   `endpoints::outbox`'s own doc comments.
+//! - Task 5.3 (`Boundary: inbox`): the per-actor inbox and shared-inbox POST
+//!   handlers — connects a signed Activity to `InboxService::process_inbound`
+//!   with the endpoint-derived `LocalRecipientContext` (per-actor `Actor`
+//!   built from the matched `{handle}` segment, or domain-wide
+//!   `SharedInbox`), mapping both non-rejecting `InboxOutcome` variants to
+//!   `202 Accepted` and letting every rejection (signature failure,
+//!   malformed body, blocked signer) surface as `AppError`'s own status
+//!   (Requirements 7.1, 7.2) — see [`endpoints`]. Not yet mounted on the
+//!   live router (task 5.4's job); see `endpoints::inbox`'s own doc
+//!   comment.
 //!
 //! Later tasks in this spec (`config` — see design.md's File Structure
 //! Plan) are out of this task's boundary and deliberately not declared here
@@ -107,15 +117,15 @@ pub mod signatures;
 pub mod urls;
 
 pub use endpoints::{
-    ActivityPubDocumentBuilder, ApGetState, NodeInfoState, ObjectDocumentProvider,
+    ActivityPubDocumentBuilder, ApGetState, InboxState, NodeInfoState, ObjectDocumentProvider,
     ObjectDocumentRegistry, OutboxItemsPage, OutboxQuery, OutboxSource, OutboxSourceRegistry,
-    OutboxState, PageCursor, WebfingerQuery, WebfingerState, actor_get, nodeinfo_discovery,
-    nodeinfo_document, object_get, outbox_get, webfinger,
+    OutboxState, PageCursor, WebfingerQuery, WebfingerState, actor_get, actor_inbox,
+    nodeinfo_discovery, nodeinfo_document, object_get, outbox_get, shared_inbox, webfinger,
 };
 pub use inbound::{
     BlockPolicy, DEFAULT_RECEIVED_ACTIVITY_RETENTION, DbReceivedActivityStore, HandleOutcome,
-    InboundActivityDispatcher, InboundActivityHandler, InboundContext, LocalRecipientContext,
-    NoopBlockPolicy, ReceivedActivityStore,
+    InboundActivityDispatcher, InboundActivityHandler, InboundContext, InboxOutcome, InboxService,
+    LocalRecipientContext, NoopBlockPolicy, ReceivedActivityStore,
 };
 pub use jsonld::{ParsedActivity, accepts_activitypub, parse_activity, serialize};
 pub use outbound::{
