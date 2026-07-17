@@ -73,6 +73,15 @@
 //!   hand-off (no queue) or a `DeliveryQueue::enqueue` call, so a single
 //!   call's local and remote targets provably share one canonical Activity
 //!   (Requirements 10.1-10.5, 11.1) — see [`outbound`].
+//! - Task 5.1 (`Boundary: webfinger, nodeinfo`): the WebFinger `acct:`
+//!   resolution handler — self-domain matching, owner-non-exposing
+//!   multi-actor resolution via `ActorDirectory::resolve_actor_by_handle`,
+//!   JRD `self`-link response (Requirements 4.1-4.5) — and the NodeInfo
+//!   discovery + minimal-public-stats document handlers (software
+//!   name/version/ActivityPub protocol only, no internal information,
+//!   Requirements 5.1-5.3) — see [`endpoints`]. Not yet mounted on the live
+//!   router (task 5.4's job); see `endpoints::webfinger`/`endpoints::nodeinfo`'s
+//!   own doc comments.
 //!
 //! Later tasks in this spec (`config` — see design.md's File Structure
 //! Plan) are out of this task's boundary and deliberately not declared here
@@ -86,8 +95,9 @@ pub mod signatures;
 pub mod urls;
 
 pub use endpoints::{
-    ActivityPubDocumentBuilder, ObjectDocumentProvider, ObjectDocumentRegistry, OutboxItemsPage,
-    OutboxSource, OutboxSourceRegistry, PageCursor,
+    ActivityPubDocumentBuilder, NodeInfoState, ObjectDocumentProvider, ObjectDocumentRegistry,
+    OutboxItemsPage, OutboxSource, OutboxSourceRegistry, PageCursor, WebfingerQuery,
+    WebfingerState, nodeinfo_discovery, nodeinfo_document, webfinger,
 };
 pub use inbound::{
     BlockPolicy, DEFAULT_RECEIVED_ACTIVITY_RETENTION, DbReceivedActivityStore, HandleOutcome,

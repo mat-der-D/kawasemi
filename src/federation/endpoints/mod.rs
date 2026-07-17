@@ -16,14 +16,24 @@
 //!   without extending them (Requirements 6.1, 6.2, 6.5, 8.1, 8.2, 8.3) —
 //!   see [`document`].
 //!
+//! - Task 5.1 (`Boundary: webfinger, nodeinfo`): the WebFinger `acct:`
+//!   resolution handler (owner-non-exposing, multi-actor, domain-matching,
+//!   Requirements 4.1-4.5 — see [`webfinger`]) and the NodeInfo discovery +
+//!   document handlers (minimal public stats, no internal information,
+//!   Requirements 5.1-5.3 — see [`nodeinfo`]).
+//!
 //! Later sibling modules in this spec's `endpoints/` file plan
-//! (`webfinger.rs`, `nodeinfo.rs`, `ap_get.rs`, `inbox.rs`, `outbox.rs` —
-//! task 5.x) are out of this task's boundary and deliberately not declared
-//! here yet; each is added by the task that actually implements it.
+//! (`ap_get.rs`, `inbox.rs`, `outbox.rs` — task 5.x) are out of this task's
+//! boundary and deliberately not declared here yet; each is added by the
+//! task that actually implements it.
 
 pub mod document;
+pub mod nodeinfo;
+pub mod webfinger;
 
 pub use document::{
     ActivityPubDocumentBuilder, ObjectDocumentProvider, ObjectDocumentRegistry, OutboxItemsPage,
     OutboxSource, OutboxSourceRegistry, PageCursor,
 };
+pub use nodeinfo::{NodeInfoState, nodeinfo_discovery, nodeinfo_document};
+pub use webfinger::{WebfingerQuery, WebfingerState, webfinger};
