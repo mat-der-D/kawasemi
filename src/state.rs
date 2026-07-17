@@ -33,6 +33,7 @@ use sqlx::PgPool;
 
 use crate::actor::ActorModule;
 use crate::config::AppConfig;
+use crate::federation::FederationModule;
 use crate::oauth::OauthModule;
 use crate::runtime::RuntimeContext;
 
@@ -45,6 +46,11 @@ struct AppStateInner {
     config: AppConfig,
     actor: ActorModule,
     oauth: OauthModule,
+    /// federation-core's port bundle (task 5.4, Requirements 7.3, 10.1,
+    /// 11.1, 11.2): every federation-core port constructed with one
+    /// concrete production type, shared the same way `actor`/`oauth` are —
+    /// see `crate::federation::FederationModule`'s own doc comment.
+    federation: FederationModule,
 }
 
 /// Immutable, cheaply-cloneable shared handle bundling the database
@@ -74,6 +80,7 @@ impl AppState {
         config: AppConfig,
         actor: ActorModule,
         oauth: OauthModule,
+        federation: FederationModule,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -82,6 +89,7 @@ impl AppState {
                 config,
                 actor,
                 oauth,
+                federation,
             }),
         }
     }
@@ -127,5 +135,16 @@ impl AppState {
     /// through this accessor rather than each constructing their own.
     pub fn oauth(&self) -> &OauthModule {
         &self.inner.oauth
+    }
+
+    /// The shared federation-core port bundle (task 5.4, Requirements 7.3,
+    /// 10.1, 11.1, 11.2): `src/server.rs`'s `FromRef<AppState>` bridges for
+    /// every federation endpoint's own state type derive from this handle,
+    /// and downstream code (a later spec's own service layer) retrieves the
+    /// delivery service / registers into the object-document / outbox-source
+    /// registries through it — see `crate::federation::FederationModule`'s
+    /// own doc comment for the full downstream-registration surface.
+    pub fn federation(&self) -> &FederationModule {
+        &self.inner.federation
     }
 }

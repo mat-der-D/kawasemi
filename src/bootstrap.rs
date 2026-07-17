@@ -94,6 +94,7 @@ use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::config::{self, AppConfig, ConfigError};
 use crate::db::{self, DbError};
 use crate::error::AppError;
+use crate::federation::{self, FederationWiringConfig};
 use crate::migrate::{self, MigrateError};
 use crate::oauth::OauthModule;
 use crate::runtime::{RuntimeContext, SnowflakeIdGenerator, SystemClock, SystemRng};
@@ -370,12 +371,42 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         false,
     );
 
+    // Assembles the federation-core port bundle (task 5.4, Requirements 7.3,
+    // 10.1, 11.1, 11.2): every federation-core port constructed with one
+    // concrete production type (`crate::federation::build_federation_module`),
+    // using the same `pool`/`runtime` every other composition-root component
+    // shares and `actor_module`'s own `ActorDirectory` handle (federation-core
+    // needs handle resolution across several ports; never reconstructs its
+    // own directory independently). `FederationWiringConfig::production`
+    // converts `cfg.federation`'s `std::time::Duration` fields into the
+    // `time::Duration` federation-core's own components take throughout, and
+    // supplies this module's own choice of background-task poll/prune
+    // cadence (design.md names no numeric value for either — see
+    // `FederationWiringConfig::production`'s own doc comment).
+    let (federation_module, federation_background) = federation::build_federation_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor_module.directory()),
+        FederationWiringConfig::production(
+            cfg.server.domain.clone(),
+            cfg.federation.secure_mode,
+            time::Duration::seconds(cfg.federation.public_key_cache_ttl.as_secs() as i64),
+            time::Duration::days(cfg.federation.received_activity_retention_days as i64),
+        ),
+    );
+    // Starts the delivery-worker poll loop and received-Activity pruning
+    // loop as detached background tasks (never awaited here) — this call
+    // returns immediately, so it does not delay `bootstrap()`'s own listener
+    // bind below (Requirement: background tasks must not block startup).
+    federation_background.spawn();
+
     Ok(AppState::new(
         pool,
         runtime,
         cfg,
         actor_module,
         oauth_module,
+        federation_module,
     ))
 }
 

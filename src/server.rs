@@ -58,6 +58,11 @@ use tracing::Span;
 
 use crate::api::ratelimit::{RateLimitPolicy, rate_limit_layer};
 use crate::config::ServerConfig;
+use crate::federation::{
+    ApGetState, ConcreteBlockPolicy, ConcreteReceivedActivityStore, ConcreteVerifier, InboxState,
+    NodeInfoState, OutboxState, WebfingerState, actor_get, actor_inbox, nodeinfo_discovery,
+    nodeinfo_document, object_get, outbox_get, shared_inbox, webfinger,
+};
 use crate::oauth::apps_endpoint::{self, AppsEndpointState};
 use crate::oauth::authorize_endpoint::{self, AuthorizeEndpointState};
 use crate::oauth::middleware::AuthState;
@@ -74,6 +79,37 @@ const AUTHORIZE_PATH: &str = "/oauth/authorize";
 /// `POST /oauth/token` / `POST /oauth/revoke` paths (task 5.3).
 const TOKEN_PATH: &str = "/oauth/token";
 const REVOKE_PATH: &str = "/oauth/revoke";
+
+/// federation-core's URL shapes (task 5.4, `_Boundary: FederationModule,
+/// Bootstrap, AppState, Config_`), matching `crate::federation::urls::ActorUrls`'s
+/// own literal path convention verbatim (`urls.rs`'s own doc comment:
+/// "actor: `https://{domain}/users/{handle}`", "inbox: `{actor_url}/inbox`",
+/// "shared inbox: `https://{domain}/inbox`", "outbox: `{actor_url}/outbox`")
+/// — every one of these constants must keep matching that module's own
+/// construction exactly, since a sender's HTTP Signature covers the URL
+/// `ActorUrls` builds, and a mismatch here would make every inbound
+/// signature verification fail on a URL the sender never actually signed.
+const WEBFINGER_PATH: &str = "/.well-known/webfinger";
+const NODEINFO_DISCOVERY_PATH: &str = "/.well-known/nodeinfo";
+const NODEINFO_DOCUMENT_PATH: &str = "/nodeinfo/{version}";
+const ACTOR_PATH: &str = "/users/{handle}";
+const ACTOR_INBOX_PATH: &str = "/users/{handle}/inbox";
+const ACTOR_OUTBOX_PATH: &str = "/users/{handle}/outbox";
+const SHARED_INBOX_PATH: &str = "/inbox";
+/// Catch-all GET route [`object_get`] is mounted on, for every local
+/// object/collection URL that is not an actor URL (Requirement 6.2).
+/// `ActorUrls::object_url`'s own `ObjectKind` is a deliberately open-ended,
+/// caller-supplied path segment (`urls.rs`'s own doc comment: "extensible by
+/// construction at any later call site, never by editing this type again"),
+/// so no fixed set of literal routes can enumerate every kind a not-yet-written
+/// downstream spec might register an `ObjectDocumentProvider` for. A single
+/// wildcard route is therefore the only mount point that can serve every
+/// current and future object/collection kind without this task guessing at
+/// kinds that do not exist yet. axum's router prefers a more specific
+/// static/named-param match over a wildcard one (`ACTOR_PATH`/`ACTOR_OUTBOX_PATH`/
+/// etc. all win over this route for the paths they cover), so this does not
+/// shadow any of the other GET routes mounted below.
+const OBJECT_CATCH_ALL_PATH: &str = "/{*path}";
 
 /// Rate-limit policy applied to the whole router (task 7.1, api-foundation
 /// Requirements 8.1-8.4): a single-owner deployment ("一人鯖前提") has
@@ -143,6 +179,50 @@ impl FromRef<AppState> for TokenEndpointState {
     }
 }
 
+/// Bridges `AppState` to [`WebfingerState`] (task 5.4), mirroring
+/// [`AppsEndpointState`]'s own `FromRef` bridge above.
+impl FromRef<AppState> for WebfingerState {
+    fn from_ref(state: &AppState) -> Self {
+        state.federation().webfinger_state()
+    }
+}
+
+/// Bridges `AppState` to [`NodeInfoState`] (task 5.4).
+impl FromRef<AppState> for NodeInfoState {
+    fn from_ref(state: &AppState) -> Self {
+        state.federation().nodeinfo_state()
+    }
+}
+
+/// Bridges `AppState` to [`ApGetState<ConcreteVerifier>`] (task 5.4). See
+/// `crate::federation::module`'s own doc comment ("One concrete type per
+/// non-`dyn`-safe trait") for why [`ConcreteVerifier`] specifically, and why
+/// this instantiation (not a generic `impl<V> FromRef<AppState> for
+/// ApGetState<V>`) is the one this crate mounts.
+impl FromRef<AppState> for ApGetState<ConcreteVerifier> {
+    fn from_ref(state: &AppState) -> Self {
+        state.federation().ap_get_state()
+    }
+}
+
+/// Bridges `AppState` to [`OutboxState`] (task 5.4).
+impl FromRef<AppState> for OutboxState {
+    fn from_ref(state: &AppState) -> Self {
+        state.federation().outbox_state()
+    }
+}
+
+/// Bridges `AppState` to [`InboxState<ConcreteVerifier, ConcreteBlockPolicy,
+/// ConcreteReceivedActivityStore>`] (task 5.4). Same concrete-type-choice
+/// reasoning as [`ApGetState<ConcreteVerifier>`]'s bridge above.
+impl FromRef<AppState>
+    for InboxState<ConcreteVerifier, ConcreteBlockPolicy, ConcreteReceivedActivityStore>
+{
+    fn from_ref(state: &AppState) -> Self {
+        state.federation().inbox_state()
+    }
+}
+
 /// Path of the minimal liveness route this task adds (Requirement 1.1).
 pub const HEALTH_PATH: &str = "/health";
 
@@ -191,6 +271,24 @@ pub fn router() -> Router<AppState> {
         )
         .route(TOKEN_PATH, post(token_endpoint::exchange_token))
         .route(REVOKE_PATH, post(token_endpoint::revoke_token))
+        // federation-core (task 5.4): WebFinger, NodeInfo, ActivityPub
+        // actor/object/collection GET, outbox GET, per-actor and shared
+        // inbox POST — see `WEBFINGER_PATH`'s own doc comment for why every
+        // path constant here must match `ActorUrls`'s construction exactly.
+        .route(WEBFINGER_PATH, get(webfinger))
+        .route(NODEINFO_DISCOVERY_PATH, get(nodeinfo_discovery))
+        .route(NODEINFO_DOCUMENT_PATH, get(nodeinfo_document))
+        .route(ACTOR_PATH, get(actor_get::<ConcreteVerifier>))
+        .route(ACTOR_OUTBOX_PATH, get(outbox_get))
+        .route(
+            ACTOR_INBOX_PATH,
+            post(actor_inbox::<ConcreteVerifier, ConcreteBlockPolicy, ConcreteReceivedActivityStore>),
+        )
+        .route(
+            SHARED_INBOX_PATH,
+            post(shared_inbox::<ConcreteVerifier, ConcreteBlockPolicy, ConcreteReceivedActivityStore>),
+        )
+        .route(OBJECT_CATCH_ALL_PATH, get(object_get::<ConcreteVerifier>))
 }
 
 /// Builds the complete, ready-to-serve foundation router (Requirements 1.1,

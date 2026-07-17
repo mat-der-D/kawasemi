@@ -89,10 +89,11 @@ use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::actor::{self, ActorModule};
 use crate::config::{
-    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, OauthConfig, OwnerConfig, Secret,
-    ServerConfig,
+    ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, OauthConfig,
+    OwnerConfig, Secret, ServerConfig,
 };
 use crate::db;
+use crate::federation::{self, FederationWiringConfig};
 use crate::migrate;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
@@ -141,6 +142,20 @@ const TEST_OWNER_PASSWORD: &str = "test-harness-owner-passphrase";
 /// call uses (api-foundation task 1.2, Requirement 3.6). Fixed rather than
 /// per-call, mirroring [`TEST_KEK`]'s own "why fixed" reasoning.
 const TEST_TOKEN_HASH_KEY: [u8; 32] = [0x24; 32];
+
+/// Every [`spawn_test_app`] call's delivery-worker poll interval (task 5.4):
+/// far shorter than [`crate::federation::module::DEFAULT_DELIVERY_POLL_INTERVAL`]'s
+/// production default so an integration test proving delivery completion
+/// (e.g. observing a `delivery_jobs` row transition after enqueuing) does
+/// not need to wait several seconds per assertion.
+const TEST_DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Every [`spawn_test_app`] call's received-Activity pruning-loop interval
+/// (task 5.4): short for the same reason as [`TEST_DELIVERY_POLL_INTERVAL`],
+/// though no test in this crate currently depends on pruning actually
+/// running within a test's lifetime (task 3.1's own unit tests already
+/// cover `prune_expired`'s correctness directly).
+const TEST_PRUNING_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Resolves the shared test database's connection URL: an explicit
 /// `KAWASEMI_TEST_DATABASE_URL` override if set, otherwise
@@ -480,6 +495,11 @@ pub async fn spawn_test_app() -> TestApp {
         oauth: OauthConfig {
             token_hash_key: Secret::new(TEST_TOKEN_HASH_KEY),
         },
+        federation: FederationConfig {
+            secure_mode: false,
+            public_key_cache_ttl: Duration::from_secs(24 * 60 * 60),
+            received_activity_retention_days: 14,
+        },
     };
 
     // Assembles the OAuth service bundle (task 7.1) the same way
@@ -496,12 +516,40 @@ pub async fn spawn_test_app() -> TestApp {
         false,
     );
 
+    // Assembles the federation-core port bundle (task 5.4) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::federation::build_federation_module`), sharing this
+    // instance's own `pool`/`runtime`/`ActorDirectory`, but with a much
+    // shorter background-task poll cadence (see `TEST_DELIVERY_POLL_INTERVAL`'s
+    // own doc comment) so integration tests observing delivery/pruning
+    // completion do not need to wait production's several-seconds interval.
+    let (federation_module, federation_background) = federation::build_federation_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor_module.directory()),
+        FederationWiringConfig {
+            domain: config.server.domain.clone(),
+            secure_mode: config.federation.secure_mode,
+            public_key_cache_ttl: time::Duration::seconds(
+                config.federation.public_key_cache_ttl.as_secs() as i64,
+            ),
+            received_activity_retention: time::Duration::days(
+                config.federation.received_activity_retention_days as i64,
+            ),
+            delivery_poll_interval: TEST_DELIVERY_POLL_INTERVAL,
+            delivery_poll_batch_size: 20,
+            pruning_interval: TEST_PRUNING_INTERVAL,
+        },
+    );
+    federation_background.spawn();
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
         config,
         actor_module.clone(),
         oauth_module,
+        federation_module,
     );
     let router = server::build_router(state.clone());
 

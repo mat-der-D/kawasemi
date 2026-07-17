@@ -36,10 +36,11 @@ use crate::actor::build_actor_module;
 use crate::actor::keys::cache::KeyCache;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::config::{
-    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, OauthConfig, OwnerConfig, Secret,
-    ServerConfig,
+    ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, OauthConfig,
+    OwnerConfig, Secret, ServerConfig,
 };
 use crate::error::{AppError, GENERIC_SERVER_MESSAGE};
+use crate::federation::{FederationWiringConfig, build_federation_module};
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::telemetry::{REQUEST_ID_FIELD, REQUEST_SPAN_NAME};
@@ -90,6 +91,11 @@ fn test_state(seed: u64) -> AppState {
         oauth: OauthConfig {
             token_hash_key: Secret::new(TEST_TOKEN_HASH_KEY),
         },
+        federation: FederationConfig {
+            secure_mode: false,
+            public_key_cache_ttl: Duration::from_secs(24 * 60 * 60),
+            received_activity_retention_days: 14,
+        },
     };
     let pool = PgPoolOptions::new()
         .max_connections(config.database.max_connections)
@@ -106,7 +112,30 @@ fn test_state(seed: u64) -> AppState {
         config.owner.clone(),
         false,
     );
-    AppState::new(pool, runtime, config, actor_module, oauth_module)
+    // Mirrors `sample_federation_module` in `src/state/tests.rs`: constructs
+    // a real `FederationModule` against the same `connect_lazy` pool (never
+    // dials it), and deliberately never calls `.spawn()` on the returned
+    // background-tasks handle — this suite asserts on router/`TraceLayer`
+    // behavior, not federation-core's own delivery/pruning loops.
+    let (federation_module, _background_tasks_not_spawned) = build_federation_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor_module.directory()),
+        FederationWiringConfig::production(
+            config.server.domain.clone(),
+            false,
+            time::Duration::hours(24),
+            time::Duration::days(14),
+        ),
+    );
+    AppState::new(
+        pool,
+        runtime,
+        config,
+        actor_module,
+        oauth_module,
+        federation_module,
+    )
 }
 
 /// Speaks a minimal raw HTTP/1.1 GET request over a fresh `TcpStream` and

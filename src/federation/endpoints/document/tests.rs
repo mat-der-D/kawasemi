@@ -95,7 +95,7 @@ async fn empty_object_document_registry_returns_none() {
 
 #[tokio::test]
 async fn single_matching_provider_resolves_its_url_space() {
-    let mut registry = ObjectDocumentRegistry::new();
+    let registry = ObjectDocumentRegistry::new();
     let body = json!({ "id": "https://kawasemi.example/objects/1", "type": "Note" });
     registry.register(StubObjectProvider::new(
         "https://kawasemi.example/objects/",
@@ -118,7 +118,7 @@ async fn single_matching_provider_resolves_its_url_space() {
 
 #[tokio::test]
 async fn non_matching_url_returns_none_even_with_a_provider_registered() {
-    let mut registry = ObjectDocumentRegistry::new();
+    let registry = ObjectDocumentRegistry::new();
     registry.register(StubObjectProvider::new(
         "https://kawasemi.example/objects/",
         json!({ "id": "https://kawasemi.example/objects/1" }),
@@ -139,7 +139,7 @@ async fn non_matching_url_returns_none_even_with_a_provider_registered() {
 
 #[tokio::test]
 async fn first_registered_matching_provider_wins_over_a_later_one() {
-    let mut registry = ObjectDocumentRegistry::new();
+    let registry = ObjectDocumentRegistry::new();
     let first_body = json!({ "source": "first" });
     let second_body = json!({ "source": "second" });
     // Both providers claim every URL (empty prefix matches everything).
@@ -163,7 +163,7 @@ async fn first_registered_matching_provider_wins_over_a_later_one() {
 
 #[tokio::test]
 async fn non_matching_provider_registered_first_is_skipped_for_a_later_matching_one() {
-    let mut registry = ObjectDocumentRegistry::new();
+    let registry = ObjectDocumentRegistry::new();
     let body = json!({ "source": "second-provider" });
     registry.register(Arc::new(NeverMatchesProvider));
     registry.register(StubObjectProvider::new(
@@ -235,7 +235,7 @@ async fn empty_outbox_source_registry_collects_nothing() {
 
 #[tokio::test]
 async fn multiple_registered_sources_are_all_collected() {
-    let mut registry = OutboxSourceRegistry::new();
+    let registry = OutboxSourceRegistry::new();
     let statuses_page = OutboxItemsPage {
         items: vec![json!({ "type": "Create", "source": "statuses-core" })],
         next: None,
@@ -272,7 +272,7 @@ async fn multiple_registered_sources_are_all_collected() {
 
 #[tokio::test]
 async fn actor_and_page_are_passed_through_to_each_source_unchanged() {
-    let mut registry = OutboxSourceRegistry::new();
+    let registry = OutboxSourceRegistry::new();
     let source = StubOutboxSource::new(OutboxItemsPage {
         items: Vec::new(),
         next: None,
@@ -627,7 +627,7 @@ async fn build_outbox_page_bundles_exactly_the_union_of_all_registered_sources()
     let urls = test_urls();
     let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
 
-    let mut sources = OutboxSourceRegistry::new();
+    let sources = OutboxSourceRegistry::new();
     let item_a = json!({ "type": "Create", "source": "a", "published": "2024-01-01T00:00:00Z" });
     let item_b = json!({ "type": "Announce", "source": "b", "published": "2024-01-02T00:00:00Z" });
     sources.register(StubOutboxSource::new(OutboxItemsPage {
@@ -672,7 +672,7 @@ async fn build_outbox_page_orders_items_chronologically_by_published() {
     let newer = json!({ "type": "Create", "id": "newer", "published": "2024-06-01T00:00:00Z" });
     let older = json!({ "type": "Create", "id": "older", "published": "2024-01-01T00:00:00Z" });
 
-    let mut sources = OutboxSourceRegistry::new();
+    let sources = OutboxSourceRegistry::new();
     // Registered "newer first" -- the merge must still sort chronologically,
     // not just preserve registration order.
     sources.register(StubOutboxSource::new(OutboxItemsPage {
@@ -716,7 +716,7 @@ async fn build_outbox_page_sorts_items_missing_published_after_all_dated_items_p
     let undated_first = json!({ "type": "Create", "id": "undated-first" });
     let undated_second = json!({ "type": "Create", "id": "undated-second", "published": 12345 });
 
-    let mut sources = OutboxSourceRegistry::new();
+    let sources = OutboxSourceRegistry::new();
     sources.register(StubOutboxSource::new(OutboxItemsPage {
         items: vec![undated_first.clone(), dated.clone()],
         next: None,
@@ -754,7 +754,7 @@ async fn build_outbox_page_propagates_the_first_non_none_next_cursor() {
     let urls = test_urls();
     let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
 
-    let mut sources = OutboxSourceRegistry::new();
+    let sources = OutboxSourceRegistry::new();
     sources.register(StubOutboxSource::new(OutboxItemsPage {
         items: vec![],
         next: None,

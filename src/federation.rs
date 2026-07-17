@@ -104,14 +104,32 @@
 //!   (Requirements 7.1, 7.2) — see [`endpoints`]. Not yet mounted on the
 //!   live router (task 5.4's job); see `endpoints::inbox`'s own doc
 //!   comment.
+//! - Task 5.4 (`Boundary: FederationModule, Bootstrap, AppState, Config`):
+//!   the composition-root wiring — [`module::build_federation_module`]
+//!   constructs one concrete production type per non-`dyn`-safe port
+//!   (`ConcreteVerifier`/`ConcreteBlockPolicy`/`ConcreteReceivedActivityStore`),
+//!   bundles them as [`FederationModule`] (stored on `AppState`), starts the
+//!   delivery-worker/pruning background tasks
+//!   ([`FederationBackgroundTasks::spawn`]), and `src/server.rs` mounts
+//!   every endpoint handler from tasks 5.1-5.3 with those exact concrete
+//!   type arguments onto the live router — see [`module`]'s own doc comment
+//!   for the full concrete-type rationale and the downstream-registration
+//!   surface (`ObjectDocumentProvider`/`OutboxSource` live-mutable after
+//!   startup; `InboundActivityDispatcher` registrable only at
+//!   composition-root wiring time — a documented, boundary-driven asymmetry,
+//!   not an oversight).
 //!
-//! Later tasks in this spec (`config` — see design.md's File Structure
-//! Plan) are out of this task's boundary and deliberately not declared here
-//! yet; each is added by the task that actually implements it.
+//! `federation.rs`'s File Structure Plan also names a `config` submodule
+//! (design.md: "連合関連設定の参照"); task 5.4 placed that config surface in
+//! `crate::config::FederationConfig` instead (alongside `ServerConfig`/
+//! `DatabaseConfig`/etc., that module's own existing per-concern grouping)
+//! rather than introducing `src/federation/config.rs` — see
+//! `crate::config::FederationConfig`'s own doc comment for why.
 
 pub mod endpoints;
 pub mod inbound;
 pub mod jsonld;
+pub mod module;
 pub mod outbound;
 pub mod signatures;
 pub mod urls;
@@ -128,6 +146,11 @@ pub use inbound::{
     LocalRecipientContext, NoopBlockPolicy, ReceivedActivityStore,
 };
 pub use jsonld::{ParsedActivity, accepts_activitypub, parse_activity, serialize};
+pub use module::{
+    ConcreteBlockPolicy, ConcreteDeliveryService, ConcreteInboxService,
+    ConcreteReceivedActivityStore, ConcreteVerifier, FederationBackgroundTasks, FederationModule,
+    FederationWiringConfig, build_federation_module,
+};
 pub use outbound::{
     CanonicalActivity, DEFAULT_DELIVERY_BASE_DELAY, DEFAULT_DELIVERY_MAX_DELAY,
     DEFAULT_MAX_DELIVERY_ATTEMPTS, DbDeliveryQueue, DeliveryJob, DeliveryJobStatus, DeliveryQueue,

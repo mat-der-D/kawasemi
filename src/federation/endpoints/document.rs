@@ -94,7 +94,7 @@ mod tests;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use serde_json::{Map, Value};
 
@@ -148,9 +148,40 @@ pub trait ObjectDocumentProvider: Send + Sync {
 /// delegates to the first match (design.md's exact
 /// `ObjectDocumentRegistry` Service Interface). See this module's doc
 /// comment for the full ordered/first-match/safe-default contract.
-#[derive(Default)]
+///
+/// ## Interior mutability and `Clone` (task 5.4's wiring addition)
+/// The list of registered providers is held behind `Arc<RwLock<Vec<...>>>`
+/// rather than a bare `Vec` (task 3.5's original shape), and
+/// [`Self::register`] takes `&self` rather than `&mut self`. This is task
+/// 5.4's own resolution to a structural tension design.md itself does not
+/// address: `AppState` is immutable-after-construction (per this crate's
+/// steering), yet downstream specs (statuses-core, social-graph, etc.) must
+/// be able to register a provider *after* this instance is already inside a
+/// live, serving `AppState` (see `FederationModule`'s own doc comment,
+/// "Downstream registration surface", for the full reasoning across all
+/// three of `ObjectDocumentRegistry`/`OutboxSourceRegistry`/
+/// `InboundActivityDispatcher`). Deriving `Clone` (cheap: it clones only the
+/// `Arc`, not the underlying `Vec`) lets a caller keep one shared handle for
+/// registration (e.g. `FederationModule`'s own field) while another clone is
+/// wrapped in `Arc<ObjectDocumentRegistry>` for `ApGetState`'s own field —
+/// both observe the same live list, since they share the same inner `Arc`.
+/// This is a behavior-preserving internal change: every existing caller that
+/// built a `mut` binding and called `.register(&mut self)` before this
+/// change continues to compile unchanged (a `&self` method is always
+/// callable through a `mut` binding), and no constructor or field-visible
+/// signature elsewhere in this file changed.
+///
+/// [`Self::resolve`] takes a `read()` snapshot of the current provider list,
+/// clones the `Arc<dyn ObjectDocumentProvider>` pointers it needs (cheap —
+/// only reference-count bumps), and releases the lock *before* awaiting any
+/// provider's own `resolve` future: holding a `std::sync::RwLockReadGuard`
+/// across an `.await` point would make the enclosing future `!Send` (the
+/// guard itself is not `Send` on this platform), which would break every
+/// axum handler that extracts this state (`axum::Handler` requires a `Send`
+/// future).
+#[derive(Clone, Default)]
 pub struct ObjectDocumentRegistry {
-    providers: Vec<Arc<dyn ObjectDocumentProvider>>,
+    providers: Arc<RwLock<Vec<Arc<dyn ObjectDocumentProvider>>>>,
 }
 
 impl ObjectDocumentRegistry {
@@ -160,9 +191,16 @@ impl ObjectDocumentRegistry {
     }
 
     /// Registers `provider`. Providers are tried in the order they were
-    /// registered (see this module's doc comment).
-    pub fn register(&mut self, provider: Arc<dyn ObjectDocumentProvider>) {
-        self.providers.push(provider);
+    /// registered (see this module's doc comment). `&self`, not `&mut
+    /// self` — see this type's doc comment ("Interior mutability and
+    /// `Clone`") for why: any clone of this registry (or a shared `Arc<Self>`
+    /// held elsewhere, e.g. `ApGetState::object_documents`) observes a
+    /// provider registered through any other clone/handle.
+    pub fn register(&self, provider: Arc<dyn ObjectDocumentProvider>) {
+        self.providers
+            .write()
+            .expect("ObjectDocumentRegistry lock must not be poisoned")
+            .push(provider);
     }
 
     /// Resolves `url` by delegating to the first registered provider whose
@@ -171,7 +209,15 @@ impl ObjectDocumentRegistry {
     /// them claim `url`, returns `Ok(None)` (Requirement 6.6's "not found",
     /// never an error just because nobody owns this URL).
     pub async fn resolve(&self, url: &str) -> Result<Option<serde_json::Value>, AppError> {
-        for provider in &self.providers {
+        // Snapshot the current provider list under the lock, then release
+        // it before awaiting anything -- see this type's doc comment for
+        // why holding the guard across `.await` is not an option.
+        let providers: Vec<Arc<dyn ObjectDocumentProvider>> = self
+            .providers
+            .read()
+            .expect("ObjectDocumentRegistry lock must not be poisoned")
+            .clone();
+        for provider in &providers {
             if provider.can_resolve(url) {
                 return provider.resolve(url).await;
             }
@@ -209,9 +255,16 @@ pub trait OutboxSource: Send + Sync {
 /// contribution for a given actor/page (design.md's exact
 /// `OutboxSourceRegistry` Service Interface). See this module's doc comment
 /// for the full collect-not-merge contract.
-#[derive(Default)]
+///
+/// ## Interior mutability and `Clone` (task 5.4's wiring addition)
+/// Mirrors [`ObjectDocumentRegistry`]'s identical change and identical
+/// reasoning ("Interior mutability and `Clone`") — see that type's doc
+/// comment for the full explanation. `Self::register` takes `&self`; a clone
+/// held by `FederationModule` and the clone moved into
+/// `ActivityPubDocumentBuilder::new` observe the same live source list.
+#[derive(Clone, Default)]
 pub struct OutboxSourceRegistry {
-    sources: Vec<Arc<dyn OutboxSource>>,
+    sources: Arc<RwLock<Vec<Arc<dyn OutboxSource>>>>,
 }
 
 impl OutboxSourceRegistry {
@@ -222,9 +275,13 @@ impl OutboxSourceRegistry {
 
     /// Registers `source`. All registered sources are queried on every
     /// [`OutboxSourceRegistry::collect`] call (see this module's doc
-    /// comment).
-    pub fn register(&mut self, source: Arc<dyn OutboxSource>) {
-        self.sources.push(source);
+    /// comment). `&self`, not `&mut self` — see this type's doc comment
+    /// ("Interior mutability and `Clone`").
+    pub fn register(&self, source: Arc<dyn OutboxSource>) {
+        self.sources
+            .write()
+            .expect("OutboxSourceRegistry lock must not be poisoned")
+            .push(source);
     }
 
     /// Calls `outbox_page(actor, page)` on every registered
@@ -232,13 +289,22 @@ impl OutboxSourceRegistry {
     /// results, in registration order. Merging/ordering into a single page
     /// is the caller's job (`ActivityPubDocumentBuilder`, task 3.6), not
     /// this registry's. An empty registry returns `Ok(vec![])`.
+    ///
+    /// Snapshots the current source list under the lock and releases it
+    /// before awaiting anything, mirroring [`ObjectDocumentRegistry::resolve`]'s
+    /// identical `!Send`-guard-across-`.await` avoidance.
     pub async fn collect(
         &self,
         actor: &Handle,
         page: PageCursor,
     ) -> Result<Vec<OutboxItemsPage>, AppError> {
-        let mut pages = Vec::with_capacity(self.sources.len());
-        for source in &self.sources {
+        let sources: Vec<Arc<dyn OutboxSource>> = self
+            .sources
+            .read()
+            .expect("OutboxSourceRegistry lock must not be poisoned")
+            .clone();
+        let mut pages = Vec::with_capacity(sources.len());
+        for source in &sources {
             pages.push(source.outbox_page(actor, page.clone()).await?);
         }
         Ok(pages)

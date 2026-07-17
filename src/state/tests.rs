@@ -24,9 +24,10 @@ use crate::actor::keys::cache::KeyCache;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::{ActorModule, build_actor_module};
 use crate::config::{
-    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, OauthConfig, OwnerConfig, Secret,
-    ServerConfig,
+    ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, OauthConfig,
+    OwnerConfig, Secret, ServerConfig,
 };
+use crate::federation::{FederationModule, FederationWiringConfig, build_federation_module};
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 
@@ -73,6 +74,11 @@ fn sample_config(domain: &str, max_connections: u32) -> AppConfig {
         oauth: OauthConfig {
             token_hash_key: Secret::new(TEST_TOKEN_HASH_KEY),
         },
+        federation: FederationConfig {
+            secure_mode: false,
+            public_key_cache_ttl: Duration::from_secs(24 * 60 * 60),
+            received_activity_retention_days: 14,
+        },
     }
 }
 
@@ -114,6 +120,36 @@ fn sample_oauth_module(
     )
 }
 
+/// Builds a `FederationModule` sharing `pool`/`runtime`/`directory` (task
+/// 5.4), mirroring `sample_actor_module`/`sample_oauth_module`'s own "no
+/// real I/O beyond what construction itself needs" property:
+/// `build_federation_module`'s own constructors only ever store `pool`
+/// (never dial it), so this is safe against the same `connect_lazy` pool
+/// this suite's other fixtures use. The returned background-tasks handle is
+/// deliberately dropped without calling `.spawn()` — these tests assert only
+/// on `AppState`'s own bundling/cloning behavior, not on federation-core's
+/// live delivery/pruning loops, so there is nothing for a background task to
+/// usefully do here (and spawning one against a `connect_lazy` pool pointed
+/// at a fake URL would just be a source of unrelated background log noise).
+fn sample_federation_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    directory: Arc<crate::actor::ActorDirectory>,
+) -> FederationModule {
+    let (federation, _background_tasks_not_spawned) = build_federation_module(
+        pool,
+        runtime,
+        directory,
+        FederationWiringConfig::production(
+            "state-test.federation.internal".to_string(),
+            false,
+            time::Duration::hours(24),
+            time::Duration::days(14),
+        ),
+    );
+    federation
+}
+
 /// Requirements 1.1, 3.3, 5.5, 5.6: downstream code must be able to retrieve
 /// the pool, the injection boundaries (via `RuntimeContext`), and the
 /// validated config values from `AppState`, unchanged from what was passed
@@ -126,8 +162,10 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
     let pool = lazy_pool(config.database.max_connections);
     let actor = sample_actor_module(pool.clone(), runtime.clone());
     let oauth = sample_oauth_module(pool.clone(), runtime.clone(), &config);
+    let federation =
+        sample_federation_module(pool.clone(), runtime.clone(), Arc::clone(actor.directory()));
 
-    let state = AppState::new(pool, runtime, config.clone(), actor, oauth);
+    let state = AppState::new(pool, runtime, config.clone(), actor, oauth, federation);
 
     // Config values are retrievable and match what was supplied.
     assert_eq!(state.config().server.domain, "state.example.test");
@@ -176,8 +214,10 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
     let pool = lazy_pool(config.database.max_connections);
     let actor = sample_actor_module(pool.clone(), runtime.clone());
     let oauth = sample_oauth_module(pool.clone(), runtime.clone(), &config);
+    let federation =
+        sample_federation_module(pool.clone(), runtime.clone(), Arc::clone(actor.directory()));
 
-    let state = AppState::new(pool, runtime, config, actor, oauth);
+    let state = AppState::new(pool, runtime, config, actor, oauth, federation);
     assert_eq!(Arc::strong_count(&state.inner), 1);
 
     let cloned = state.clone();

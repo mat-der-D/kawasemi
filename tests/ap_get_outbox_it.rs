@@ -592,7 +592,7 @@ async fn object_get_delegates_to_a_registered_provider() {
         "type": "Note",
         "content": "hello federation"
     });
-    let mut registry = ObjectDocumentRegistry::new();
+    let registry = ObjectDocumentRegistry::new();
     registry.register(Arc::new(StubObjectProvider {
         prefix: "https://kawasemi.ap-get-outbox-it.internal/statuses/",
         body: body.clone(),
@@ -637,7 +637,7 @@ async fn object_get_in_secure_mode_rejects_an_unsigned_get() {
         "type": "Note",
         "content": "secure mode must gate this too"
     });
-    let mut registry = ObjectDocumentRegistry::new();
+    let registry = ObjectDocumentRegistry::new();
     registry.register(Arc::new(StubObjectProvider {
         prefix: "https://kawasemi.ap-get-outbox-it.internal/statuses/",
         body,
@@ -693,7 +693,7 @@ async fn object_get_in_secure_mode_accepts_a_validly_signed_get() {
         "type": "Note",
         "content": "a validly signed authorized fetch may read this"
     });
-    let mut registry = ObjectDocumentRegistry::new();
+    let registry = ObjectDocumentRegistry::new();
     registry.register(Arc::new(StubObjectProvider {
         prefix: "https://kawasemi.ap-get-outbox-it.internal/statuses/",
         body: body.clone(),
@@ -765,7 +765,7 @@ async fn outbox_get_returns_a_page_with_registered_source_items() {
         "type": "Create",
         "published": "2024-01-01T00:00:00Z"
     });
-    let mut outbox_sources = OutboxSourceRegistry::new();
+    let outbox_sources = OutboxSourceRegistry::new();
     outbox_sources.register(Arc::new(StubOutboxSource {
         items: vec![item.clone()],
     }));

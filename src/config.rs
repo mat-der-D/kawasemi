@@ -76,6 +76,15 @@ pub struct AppConfig {
     /// Model: `client_secret_hash`/`code_hash`/`token_hash`, "同一規約で
     /// ハッシュ化").
     pub oauth: OauthConfig,
+    /// federation-core's startup settings: secure-mode flag, public-key
+    /// cache TTL, and received-Activity retention window (task 5.4,
+    /// `_Boundary: FederationModule, Bootstrap, AppState, Config_`,
+    /// Requirements 7.3, 10.1, 11.1, 11.2). core-runtime only hosts this
+    /// field; `crate::federation::module::build_federation_module` is the
+    /// consumer. See [`FederationConfig`]'s own doc comment for why this
+    /// struct does not also carry a delivery-retry-policy field despite
+    /// task 5.4's task text naming "配送リトライ方針" alongside these three.
+    pub federation: FederationConfig,
 }
 
 /// Server-facing startup settings.
@@ -181,6 +190,60 @@ pub struct OauthConfig {
     /// cryptographic primitive with no natural human-typable format beyond
     /// hex.
     pub token_hash_key: Secret<[u8; 32]>,
+}
+
+/// federation-core's startup settings (task 5.4, design.md's Data Contracts
+/// & Integration: "設定: セキュアモードフラグ・配送リトライ方針・公開鍵
+/// キャッシュ TTL（`federation.public_key_cache_ttl`、既定 24h）・受信
+/// Activity 保持日数（`federation.received_activity_retention_days`、既定
+/// 14 日）を core-runtime 起動設定に追加").
+///
+/// ## Why no delivery-retry-policy field
+/// Task 5.4's own text also names "配送リトライ方針" (delivery retry
+/// policy) as something to add to startup config, alongside these three
+/// fields. Judgment call, documented here: the only components that
+/// actually *consume* a retry policy — `DeliveryWorker::process_job`
+/// (comparing an incremented attempt count against
+/// `federation::outbound::queue::DEFAULT_MAX_DELIVERY_ATTEMPTS`) and
+/// `backoff_delay` (reading `DEFAULT_DELIVERY_BASE_DELAY`/
+/// `DEFAULT_DELIVERY_MAX_DELAY`) — reference those as bare module
+/// constants with no constructor parameter to inject a different value
+/// through (`src/federation/outbound/worker.rs`, `queue.rs`). Task 5.4's own
+/// boundary explicitly forbids modifying `src/federation/outbound/*.rs`
+/// ("already-implemented dependencies"), so there is no reachable injection
+/// point this task can wire a config value into without violating that
+/// boundary. Adding a `FederationConfig` field nothing reads would be a
+/// dead/unwired config surface, which this task's own "no scope expansion
+/// beyond wiring" constraint counsels against. The delivery retry policy
+/// therefore remains exactly the already-existing compile-time defaults
+/// documented on those constants (`DEFAULT_DELIVERY_BASE_DELAY = 30s`,
+/// `DEFAULT_DELIVERY_MAX_DELAY = 6h`, `DEFAULT_MAX_DELIVERY_ATTEMPTS = 10`);
+/// a future task revisiting `DeliveryWorker`'s own boundary is the right
+/// place to add the constructor parameter this would need.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FederationConfig {
+    /// Whether authorized fetch (signed GET) is required for ActivityPub
+    /// representation requests (Requirement 6.4). Defaults to `false`: a
+    /// freshly configured instance should serve public AP documents
+    /// without requiring every fetcher to pre-negotiate signing.
+    pub secure_mode: bool,
+    /// How long a resolved remote public key stays valid in
+    /// `remote_public_keys` before the next verification re-fetches it
+    /// (`federation.public_key_cache_ttl`, design.md's literal config key;
+    /// Requirement 2.4). Defaults to 24 hours, mirroring
+    /// `crate::federation::signatures::DEFAULT_PUBLIC_KEY_CACHE_TTL`
+    /// (duplicated as a plain seconds constant here rather than importing
+    /// that `time::Duration` constant, so this foundational, early-loaded
+    /// module does not gain a dependency on `crate::federation`).
+    pub public_key_cache_ttl: Duration,
+    /// How many days a `received_activities` row is kept before the
+    /// periodic pruning task deletes it
+    /// (`federation.received_activity_retention_days`, design.md's literal
+    /// config key; Requirement 7.4). Defaults to 14 days, mirroring
+    /// `crate::federation::inbound::DEFAULT_RECEIVED_ACTIVITY_RETENTION`
+    /// (see this field's sibling doc comment for why that constant is not
+    /// imported directly).
+    pub received_activity_retention_days: u32,
 }
 
 /// Logging/diagnostics startup settings.
@@ -397,6 +460,28 @@ fn load_config_from(
         &mut issues,
     );
 
+    let federation_secure_mode = optional(
+        &source,
+        "federation.secure_mode",
+        false,
+        parse_bool,
+        &mut issues,
+    );
+    let federation_public_key_cache_ttl = optional(
+        &source,
+        "federation.public_key_cache_ttl",
+        Duration::from_secs(DEFAULT_FEDERATION_PUBLIC_KEY_CACHE_TTL_SECS),
+        parse_secs,
+        &mut issues,
+    );
+    let federation_received_activity_retention_days = optional(
+        &source,
+        "federation.received_activity_retention_days",
+        DEFAULT_FEDERATION_RECEIVED_ACTIVITY_RETENTION_DAYS,
+        |raw| raw.parse::<u32>().map_err(|e| e.to_string()),
+        &mut issues,
+    );
+
     let level = optional(
         &source,
         "log.level",
@@ -452,8 +537,27 @@ fn load_config_from(
                     .expect("validated above: no issues means all required fields present"),
             ),
         },
+        federation: FederationConfig {
+            secure_mode: federation_secure_mode.expect("validated above"),
+            public_key_cache_ttl: federation_public_key_cache_ttl.expect("validated above"),
+            received_activity_retention_days: federation_received_activity_retention_days
+                .expect("validated above"),
+        },
     })
 }
+
+/// Default for `federation.public_key_cache_ttl`, in seconds (24 hours).
+/// Mirrors `crate::federation::signatures::DEFAULT_PUBLIC_KEY_CACHE_TTL` —
+/// see [`FederationConfig::public_key_cache_ttl`]'s doc comment for why this
+/// is a plain duplicated constant rather than an import.
+const DEFAULT_FEDERATION_PUBLIC_KEY_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// Default for `federation.received_activity_retention_days` (14 days).
+/// Mirrors `crate::federation::inbound::DEFAULT_RECEIVED_ACTIVITY_RETENTION`
+/// — see [`FederationConfig::received_activity_retention_days`]'s doc
+/// comment for why this is a plain duplicated constant rather than an
+/// import.
+const DEFAULT_FEDERATION_RECEIVED_ACTIVITY_RETENTION_DAYS: u32 = 14;
 
 fn default_bind_addr() -> SocketAddr {
     "0.0.0.0:3000".parse().expect("valid hardcoded default")
