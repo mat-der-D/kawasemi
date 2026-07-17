@@ -93,6 +93,7 @@ use crate::config::{
     OwnerConfig, Secret, ServerConfig,
 };
 use crate::db;
+use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{self, FederationWiringConfig};
 use crate::migrate;
 use crate::oauth::OauthModule;
@@ -318,7 +319,52 @@ pub struct TestApp {
     server_task: Option<JoinHandle<std::io::Result<()>>>,
 }
 
+/// The already-built parts [`TestApp::from_parts`] bundles into a
+/// [`TestApp`] (task 6.4, `Boundary: FederationTestHarness,
+/// federation_pair_it`) — a plain data bundle (mirroring this crate's own
+/// `FederationWiringConfig`-style "group a constructor's inputs into a named
+/// struct" convention) rather than a long positional parameter list.
+pub(crate) struct TestAppParts {
+    pub(crate) address: SocketAddr,
+    pub(crate) pool: PgPool,
+    pub(crate) runtime: RuntimeContext,
+    pub(crate) actor: ActorModule,
+    pub(crate) state: AppState,
+    pub(crate) schema: String,
+    pub(crate) shutdown_tx: oneshot::Sender<()>,
+    pub(crate) server_task: JoinHandle<std::io::Result<()>>,
+}
+
 impl TestApp {
+    /// `pub(crate)` constructor from already-built parts (task 6.4,
+    /// `Boundary: FederationTestHarness, federation_pair_it`): lets
+    /// [`crate::federation::test_harness::spawn_federation_pair`] reuse
+    /// `TestApp`'s own release lifecycle (`cleanup()`/`Drop`) for the paired
+    /// instances it composes itself — with a different `domain`
+    /// (`cfg.server.domain`/`FederationWiringConfig.domain`, set to that
+    /// instance's own bound address rather than [`spawn_test_app`]'s fixed
+    /// `"test-harness.kawasemi.internal"`) and a different
+    /// [`crate::federation::signatures::ReqwestFederationHttpClient`]
+    /// (`insecure_loopback()` rather than `new()`) — without duplicating
+    /// [`TestApp`]'s own struct fields or [`Drop`] logic in that module.
+    /// `pub(crate)` (not `pub`): [`TestApp`]'s external contract stays
+    /// exactly "boot a full app via [`spawn_test_app`]/`spawn_federation_pair`;
+    /// call [`Self::cleanup`] when done" — no `tests/*.rs` integration test
+    /// (a separate crate, seeing only `pub` items) can reach this
+    /// constructor to build a `TestApp` from arbitrary parts of its own.
+    pub(crate) fn from_parts(parts: TestAppParts) -> Self {
+        Self {
+            address: parts.address,
+            pool: parts.pool,
+            runtime: parts.runtime,
+            actor: parts.actor,
+            state: parts.state,
+            schema: Some(parts.schema),
+            shutdown_tx: Some(parts.shutdown_tx),
+            server_task: Some(parts.server_task),
+        }
+    }
+
     /// The mandatory, explicit async release path (Requirement 8.5): signals
     /// the serving task to shut down and awaits it actually stopping, closes
     /// the connection pool, and drops this instance's isolated schema — in
@@ -540,6 +586,7 @@ pub async fn spawn_test_app() -> TestApp {
             delivery_poll_batch_size: 20,
             pruning_interval: TEST_PRUNING_INTERVAL,
         },
+        Arc::new(ReqwestFederationHttpClient::new()),
     );
     federation_background.spawn();
 

@@ -27,6 +27,7 @@ use crate::config::{
     ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, OauthConfig,
     OwnerConfig, Secret, ServerConfig,
 };
+use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{FederationModule, FederationWiringConfig, build_federation_module};
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
@@ -146,6 +147,7 @@ fn sample_federation_module(
             time::Duration::hours(24),
             time::Duration::days(14),
         ),
+        Arc::new(ReqwestFederationHttpClient::new()),
     );
     federation
 }

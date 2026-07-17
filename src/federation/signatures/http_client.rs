@@ -60,6 +60,15 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use crate::actor::Handle;
 use crate::error::AppError;
 
+/// The `Accept` header value [`ReqwestFederationHttpClient::fetch`] sends on
+/// every request (task 6.4). Mirrors
+/// `crate::federation::jsonld`'s own private `ACTIVITY_JSON_MEDIA_TYPE`
+/// (not `pub` there, so duplicated verbatim rather than imported) — the
+/// primary ActivityPub media type `crate::federation::jsonld::accepts_activitypub`
+/// checks for, and the same value this crate's own AP GET content
+/// negotiation requires a fetcher to send.
+const ACTIVITYPUB_ACCEPT_HEADER_VALUE: &str = "application/activity+json";
+
 /// An outbound HTTP request federation-core needs sent — either a signed
 /// delivery (`send`) or an unsigned/actor-signed fetch turned into a request
 /// by a caller. See this module's doc comment ("`OutboundRequest` /
@@ -153,14 +162,61 @@ pub trait FederationHttpClient: Send + Sync {
 /// job, all out of this task's boundary).
 pub struct ReqwestFederationHttpClient {
     client: reqwest::Client,
+    /// When `true`, [`Self::send`]/[`Self::fetch`] rewrite a `https://`
+    /// URL's scheme to `http://` immediately before dispatching (see
+    /// [`Self::insecure_loopback`]'s doc comment for why this exists and why
+    /// it must never be the default).
+    downgrade_https_to_http: bool,
 }
 
 impl ReqwestFederationHttpClient {
-    /// Builds a client with `reqwest`'s default connection settings.
+    /// Builds a client with `reqwest`'s default connection settings. Speaks
+    /// real TLS for every `https://` URL, unchanged (task 6.4 added
+    /// [`Self::insecure_loopback`] alongside this constructor without
+    /// altering `new()`'s own behavior or existing callers).
     pub fn new() -> Self {
         Self {
             client: reqwest::Client::new(),
+            downgrade_https_to_http: false,
         }
+    }
+
+    /// Builds a client identical to [`Self::new`] except every `https://`
+    /// URL passed to [`Self::send`]/[`Self::fetch`] has its scheme rewritten
+    /// to `http://` immediately before dispatch (task 6.4, `Boundary:
+    /// FederationTestHarness, federation_pair_it`, Requirements 13.1, 13.2,
+    /// 13.3, 13.4).
+    ///
+    /// [`crate::federation::urls::ActorUrls`] hardcodes `https://{domain}/...`
+    /// for every URL it builds, and [`crate::federation::test_harness::spawn_federation_pair`]
+    /// serves each paired instance over plain HTTP on a real loopback
+    /// `127.0.0.1:PORT` listener (mirroring `crate::test_harness::spawn_test_app`'s
+    /// own plain-HTTP serving) with `domain` set to that instance's own
+    /// bound address. Without this constructor, two such instances'
+    /// `https://127.0.0.1:PORT/...` URLs would attempt a real TLS handshake
+    /// against a plain-HTTP server and fail before any application-level
+    /// federation logic ever ran. This is a narrow, explicit, opt-in escape
+    /// hatch for that one test-harness reachability problem — never used by
+    /// `crate::bootstrap::bootstrap`'s production wiring, which continues to
+    /// build a client via [`Self::new`].
+    pub fn insecure_loopback() -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            downgrade_https_to_http: true,
+        }
+    }
+
+    /// Returns `url` unchanged unless [`Self::insecure_loopback`] built this
+    /// client, in which case a `https://` prefix is rewritten to `http://`
+    /// (any other scheme, or a URL already `http://`, passes through
+    /// unchanged).
+    fn effective_url<'a>(&self, url: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.downgrade_https_to_http
+            && let Some(rest) = url.strip_prefix("https://")
+        {
+            return std::borrow::Cow::Owned(format!("http://{rest}"));
+        }
+        std::borrow::Cow::Borrowed(url)
     }
 }
 
@@ -172,10 +228,8 @@ impl Default for ReqwestFederationHttpClient {
 
 impl FederationHttpClient for ReqwestFederationHttpClient {
     async fn send(&self, req: OutboundRequest) -> Result<HttpResponse, AppError> {
-        let mut builder = self
-            .client
-            .request(req.method, &req.url)
-            .headers(req.headers);
+        let url = self.effective_url(&req.url).into_owned();
+        let mut builder = self.client.request(req.method, url).headers(req.headers);
         if let Some(body) = req.body {
             builder = builder.body(body);
         }
@@ -193,9 +247,28 @@ impl FederationHttpClient for ReqwestFederationHttpClient {
     ) -> Result<HttpResponse, AppError> {
         // `_signed_as`: see this trait method's doc comment -- not yet acted
         // on, no `RequestSigner` exists in this task's boundary.
+        //
+        // `Accept: application/activity+json` (task 6.4, discovered via
+        // `tests/federation_pair_it.rs`'s own real cross-instance round
+        // trip, Requirement 13.3): this crate's own AP GET content
+        // negotiation (`crate::federation::endpoints::ap_get`'s own doc
+        // comment, "An absent `Accept` header is treated as 'not requesting
+        // AP'") treats a request with no `Accept` header the same as one
+        // requesting a non-AP representation, returning `406`. Every prior
+        // task exercising `fetch` did so either against
+        // `MockFederationHttpClient` (headers irrelevant) or against a
+        // deliberately-unreachable host (the request never actually
+        // completes), so this real, latent gap was never previously
+        // exercised. A remote `keyId`/actor document fetch is always an
+        // ActivityPub GET, so this is unconditional -- not specific to
+        // `insecure_loopback`, and matches how a genuine remote federation
+        // fetch already needs to behave against any AP-content-negotiating
+        // instance (this one's own `ap_get.rs`, and every other
+        // ActivityPub-conformant implementation).
         let response = self
             .client
-            .get(url)
+            .get(self.effective_url(url).into_owned())
+            .header(axum::http::header::ACCEPT, ACTIVITYPUB_ACCEPT_HEADER_VALUE)
             .send()
             .await
             .map_err(|source| AppError::server(StatusCode::BAD_GATEWAY, source))?;

@@ -119,6 +119,19 @@
 //!   composition-root wiring time — a documented, boundary-driven asymmetry,
 //!   not an oversight).
 //!
+//! - Task 6.4 (`Boundary: FederationTestHarness, federation_pair_it`): the
+//!   2-instance federation test harness — [`test_harness::spawn_federation_pair`]
+//!   boots two genuinely separate, mutually-reachable-over-real-loopback-TCP
+//!   instances with deterministic injection boundaries (Requirements 13.1,
+//!   13.2), enabling `tests/federation_pair_it.rs` to verify an A→B signed
+//!   round trip (Requirement 13.3) and local-vs-HTTP delivery-result
+//!   equivalence (Requirements 10.5, 13.4) — see [`test_harness`]'s own doc
+//!   comment for the one real reachability problem this task solves
+//!   (`ActorUrls`' hardcoded `https://` scheme vs. `spawn_test_app`'s
+//!   plain-HTTP serving) and the small, additive, backward-compatible
+//!   changes to [`module::build_federation_module`] and
+//!   [`signatures::ReqwestFederationHttpClient`] this solution required.
+//!
 //! `federation.rs`'s File Structure Plan also names a `config` submodule
 //! (design.md: "連合関連設定の参照"); task 5.4 placed that config surface in
 //! `crate::config::FederationConfig` instead (alongside `ServerConfig`/
@@ -132,6 +145,7 @@ pub mod jsonld;
 pub mod module;
 pub mod outbound;
 pub mod signatures;
+pub mod test_harness;
 pub mod urls;
 
 pub use endpoints::{
@@ -164,4 +178,5 @@ pub use signatures::{
     MockFederationHttpClient, OutboundRequest, PublicKeyResolver, RemotePublicKey, RequestSigner,
     ReqwestFederationHttpClient, SignatureNegotiator, SignatureVerifier, VerifiedSigner,
 };
+pub use test_harness::{FederationPair, spawn_federation_pair};
 pub use urls::{ActorUrls, ObjectKind};

@@ -94,6 +94,7 @@ use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::config::{self, AppConfig, ConfigError};
 use crate::db::{self, DbError};
 use crate::error::AppError;
+use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{self, FederationWiringConfig};
 use crate::migrate::{self, MigrateError};
 use crate::oauth::OauthModule;
@@ -393,6 +394,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
             time::Duration::seconds(cfg.federation.public_key_cache_ttl.as_secs() as i64),
             time::Duration::days(cfg.federation.received_activity_retention_days as i64),
         ),
+        Arc::new(ReqwestFederationHttpClient::new()),
     );
     // Starts the delivery-worker poll loop and received-Activity pruning
     // loop as detached background tasks (never awaited here) — this call

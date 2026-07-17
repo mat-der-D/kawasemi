@@ -388,15 +388,26 @@ impl FederationModule {
 /// handle (never reconstructed independently) — federation-core needs it for
 /// handle resolution across several ports (`RequestSigner`, delivery's
 /// target resolution/sender lookup, `DeliveryWorker`'s `Id -> Handle` gap
-/// resolution).
+/// resolution). `http_client` is the already-constructed
+/// [`ReqwestFederationHttpClient`] every caller must build for itself (task
+/// 6.4, `Boundary: FederationTestHarness, federation_pair_it`): production
+/// (`src/bootstrap.rs`) and `crate::test_harness::spawn_test_app` both build
+/// one via [`ReqwestFederationHttpClient::new`] (this function itself used
+/// to do exactly that internally, before this parameter existed — behavior
+/// for those callers is unchanged), while
+/// [`crate::federation::test_harness::spawn_federation_pair`] passes one
+/// built via [`ReqwestFederationHttpClient::insecure_loopback`] instead, so
+/// its two paired, plain-HTTP-served instances can actually reach each
+/// other's `https://{domain}/...` URLs (see `insecure_loopback`'s own doc
+/// comment).
 pub fn build_federation_module(
     pool: PgPool,
     runtime: RuntimeContext,
     directory: Arc<ActorDirectory>,
     cfg: FederationWiringConfig,
+    http_client: Arc<ReqwestFederationHttpClient>,
 ) -> (FederationModule, FederationBackgroundTasks) {
     let urls = ActorUrls::new(cfg.domain.clone());
-    let http_client = Arc::new(ReqwestFederationHttpClient::new());
 
     let key_resolver = Arc::new(DbFederationPublicKeyResolver::new(
         pool.clone(),

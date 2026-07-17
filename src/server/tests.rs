@@ -40,6 +40,7 @@ use crate::config::{
     OwnerConfig, Secret, ServerConfig,
 };
 use crate::error::{AppError, GENERIC_SERVER_MESSAGE};
+use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{FederationWiringConfig, build_federation_module};
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
@@ -127,6 +128,7 @@ fn test_state(seed: u64) -> AppState {
             time::Duration::hours(24),
             time::Duration::days(14),
         ),
+        Arc::new(ReqwestFederationHttpClient::new()),
     );
     AppState::new(
         pool,
