@@ -100,7 +100,11 @@ fn sample_actor_module(pool: sqlx::PgPool, runtime: RuntimeContext) -> ActorModu
 /// (see this module's own doc comment), and `OauthModule::new` only stores
 /// `pool`/`runtime`/the secret material, matching `sample_actor_module`'s
 /// identical "no real I/O" property.
-fn sample_oauth_module(pool: sqlx::PgPool, runtime: RuntimeContext, config: &AppConfig) -> OauthModule {
+fn sample_oauth_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    config: &AppConfig,
+) -> OauthModule {
     OauthModule::new(
         pool,
         runtime,

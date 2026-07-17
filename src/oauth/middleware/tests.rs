@@ -206,8 +206,14 @@ async fn optional_route_with_a_real_valid_token_resolves_the_single_bound_actor(
     let app = spawn_test_app().await;
     let app_id = register_test_app(&app.pool, &app.runtime).await;
     let actor_id = app.runtime.ids.next_id();
-    let token = issue_test_token(&app.pool, &app.runtime, app_id, actor_id, &["read", "write"])
-        .await;
+    let token = issue_test_token(
+        &app.pool,
+        &app.runtime,
+        app_id,
+        actor_id,
+        &["read", "write"],
+    )
+    .await;
 
     let router = test_router(AuthState {
         pool: app.pool.clone(),
@@ -266,8 +272,14 @@ async fn required_route_with_a_genuinely_revoked_token_is_401_not_a_crash_or_suc
     let app = spawn_test_app().await;
     let app_id = register_test_app(&app.pool, &app.runtime).await;
     let actor_id = app.runtime.ids.next_id();
-    let token = issue_test_token(&app.pool, &app.runtime, app_id, actor_id, &["read", "write"])
-        .await;
+    let token = issue_test_token(
+        &app.pool,
+        &app.runtime,
+        app_id,
+        actor_id,
+        &["read", "write"],
+    )
+    .await;
 
     let revoked = token_repository::revoke_token(&app.pool, &test_token_hash_key(), &token)
         .await

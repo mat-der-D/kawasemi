@@ -370,7 +370,13 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         false,
     );
 
-    Ok(AppState::new(pool, runtime, cfg, actor_module, oauth_module))
+    Ok(AppState::new(
+        pool,
+        runtime,
+        cfg,
+        actor_module,
+        oauth_module,
+    ))
 }
 
 /// Assembles all application dependencies and runs the server

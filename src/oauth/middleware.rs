@@ -306,8 +306,12 @@ where
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let auth_state = AuthState::from_ref(state);
         let bearer = bearer_token(&parts.headers);
-        let ctx = authenticate(&auth_state.pool, &auth_state.token_hash_key, bearer.as_deref())
-            .await?;
+        let ctx = authenticate(
+            &auth_state.pool,
+            &auth_state.token_hash_key,
+            bearer.as_deref(),
+        )
+        .await?;
         Ok(OptionalActor(ctx))
     }
 }
