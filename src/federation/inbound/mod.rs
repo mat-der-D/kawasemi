@@ -12,13 +12,18 @@
 //!   always-non-blocked default (Requirements 12.1, 12.2, 12.3 — see
 //!   [`block_policy`]).
 //!
-//! Later tasks in this spec's `inbound/` file plan (`service.rs` — task 4.1)
-//! are out of this task's boundary and deliberately not declared here yet;
-//! each is added by the task that actually implements it.
+//! - Task 4.1 (`Boundary: InboxService`): the receive-pipeline orchestrator
+//!   composing the three modules above plus `JsonLdCodec` and
+//!   `SignatureVerifier` — signature verification -> required-property
+//!   validation -> block judgment -> deduplication -> dispatch, with a
+//!   `process_local` entry point providing the same semantic path minus
+//!   signature verification (Requirements 6.4, 7.1-7.4, 9.3, 12.1, 12.2 —
+//!   see [`service`]).
 
 pub mod block_policy;
 pub mod dedup;
 pub mod dispatcher;
+pub mod service;
 
 pub use block_policy::{BlockPolicy, LocalRecipientContext, NoopBlockPolicy};
 pub use dedup::{
@@ -27,3 +32,4 @@ pub use dedup::{
 pub use dispatcher::{
     HandleOutcome, InboundActivityDispatcher, InboundActivityHandler, InboundContext,
 };
+pub use service::{InboxOutcome, InboxService};
