@@ -14,17 +14,28 @@
 //!   in-process vs. remote HTTP) and collapses remote recipients sharing an
 //!   effective shared-inbox address into a single delivery target
 //!   (Requirements 10.3, 10.4, 11.4) — see [`target`].
+//! - Task 4.2 (`Boundary: DeliveryService, DeliverySink`): runs the delivery
+//!   common part (canonical Activity generation/validation, recipient
+//!   resolution) exactly once per `deliver()` call, then branches only on
+//!   the resulting physical target to either an in-process hand-off to
+//!   `InboxService::process_local` (no queue) or a `DeliveryQueue::enqueue`
+//!   call, so a single call's local and remote targets provably observe the
+//!   identical canonical Activity (Requirements 10.1-10.5, 11.1) — see
+//!   [`delivery`] (the common part) and [`sink`] (the branch point).
 //!
-//! Later tasks in this spec's `outbound/` file plan (`delivery.rs` — task
-//! 4.2, `sink.rs` — task 4.2, `worker.rs` — task 4.3) are out of this
-//! task's boundary and deliberately not declared here yet; each is added by
-//! the task that actually implements it.
+//! Later tasks in this spec's `outbound/` file plan (`worker.rs` — task 4.3)
+//! are out of this task's boundary and deliberately not declared here yet;
+//! each is added by the task that actually implements it.
 
+pub mod delivery;
 pub mod queue;
+pub mod sink;
 pub mod target;
 
+pub use delivery::{DeliveryRequest, DeliveryService};
 pub use queue::{
     DEFAULT_DELIVERY_BASE_DELAY, DEFAULT_DELIVERY_MAX_DELAY, DEFAULT_MAX_DELIVERY_ATTEMPTS,
     DbDeliveryQueue, DeliveryJob, DeliveryJobStatus, DeliveryQueue, NewDeliveryJob, backoff_delay,
 };
+pub use sink::{CanonicalActivity, DeliverySink, HttpDeliverySink, LocalDeliverySink};
 pub use target::{DeliveryTarget, LocalActorLookup, Recipient, RecipientTargetResolver};

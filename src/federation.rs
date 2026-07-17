@@ -59,6 +59,20 @@
 //!   collection across all registered sources), each safely defaulting
 //!   (`None` / empty page) while nothing downstream is registered yet
 //!   (Requirements 6.2, 6.6, 8.1, 8.2, 8.3) — see [`endpoints`].
+//! - Task 4.1 (`Boundary: InboxService`): the receive-pipeline orchestrator
+//!   (signature verification -> required-property validation -> block
+//!   judgment -> deduplication -> dispatch), with a `process_local` entry
+//!   point providing the same semantic path minus signature verification so
+//!   in-process and HTTP-received Activities converge on identical
+//!   business-processing state (Requirements 6.4, 7.1-7.4, 9.3, 12.1, 12.2)
+//!   — see [`inbound`].
+//! - Task 4.2 (`Boundary: DeliveryService, DeliverySink`): the delivery
+//!   common part (canonical Activity generation/validation, recipient
+//!   resolution) run exactly once per `deliver()` call, branching only on
+//!   physical delivery mechanism to an in-process `InboxService::process_local`
+//!   hand-off (no queue) or a `DeliveryQueue::enqueue` call, so a single
+//!   call's local and remote targets provably share one canonical Activity
+//!   (Requirements 10.1-10.5, 11.1) — see [`outbound`].
 //!
 //! Later tasks in this spec (`config` — see design.md's File Structure
 //! Plan) are out of this task's boundary and deliberately not declared here
@@ -82,9 +96,11 @@ pub use inbound::{
 };
 pub use jsonld::{ParsedActivity, accepts_activitypub, parse_activity, serialize};
 pub use outbound::{
-    DEFAULT_DELIVERY_BASE_DELAY, DEFAULT_DELIVERY_MAX_DELAY, DEFAULT_MAX_DELIVERY_ATTEMPTS,
-    DbDeliveryQueue, DeliveryJob, DeliveryJobStatus, DeliveryQueue, DeliveryTarget,
-    LocalActorLookup, NewDeliveryJob, Recipient, RecipientTargetResolver, backoff_delay,
+    CanonicalActivity, DEFAULT_DELIVERY_BASE_DELAY, DEFAULT_DELIVERY_MAX_DELAY,
+    DEFAULT_MAX_DELIVERY_ATTEMPTS, DbDeliveryQueue, DeliveryJob, DeliveryJobStatus, DeliveryQueue,
+    DeliveryRequest, DeliveryService, DeliverySink, DeliveryTarget, HttpDeliverySink,
+    LocalActorLookup, LocalDeliverySink, NewDeliveryJob, Recipient, RecipientTargetResolver,
+    backoff_delay,
 };
 pub use signatures::{
     DEFAULT_PUBLIC_KEY_CACHE_TTL, DEFAULT_SIGNATURE_MAX_AGE, DbFederationPublicKeyResolver, Digest,
