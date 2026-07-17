@@ -165,7 +165,7 @@
   - _Requirements: 7.3, 7.4, 11.1, 11.2, 11.3, 11.4, 11.5, 12.1, 12.2_
   - _Boundary: inbox_delivery_it_
   - _Depends: 5.4_
-- [ ] 6.3 (P) WebFinger/NodeInfo/AP GET の統合テスト
+- [x] 6.3 (P) WebFinger/NodeInfo/AP GET の統合テスト
   - 複数アクター WebFinger 解決・他ドメイン非解決・未検出、NodeInfo の内部情報非露出、AP GET の owner 非露出・content negotiation・セキュアモード authorized fetch・未検出、下流未登録時の `ObjectDocumentProvider`（オブジェクト URL 未検出）・`OutboxSource`（空 outbox）の既定応答を検証する
   - 観測可能な完了条件: 上記がグリーンで、AP 表現に owner が含まれずセキュアモードで未署名 GET が拒否され、下流未登録のオブジェクト URL が未検出、outbox が空コレクションとして返る
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 8.1, 8.2, 8.3, 9.1, 9.4_
