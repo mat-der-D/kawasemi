@@ -22,15 +22,19 @@
 //!   call, so a single call's local and remote targets provably observe the
 //!   identical canonical Activity (Requirements 10.1-10.5, 11.1) — see
 //!   [`delivery`] (the common part) and [`sink`] (the branch point).
-//!
-//! Later tasks in this spec's `outbound/` file plan (`worker.rs` — task 4.3)
-//! are out of this task's boundary and deliberately not declared here yet;
-//! each is added by the task that actually implements it.
+//! - Task 4.3 (`Boundary: DeliveryWorker`): claims due delivery jobs, sends
+//!   each as a signed HTTP request via `SignatureNegotiator` (which
+//!   internally handles the known-format-first / double-knock-retry
+//!   negotiation), and applies this task's own retry/permanent-failure
+//!   policy — reschedule with exponential backoff on a transient failure,
+//!   permanent failure once the attempts limit is reached (Requirements
+//!   1.1, 3.1, 3.2, 3.3, 11.2, 11.3, 11.5) — see [`worker`].
 
 pub mod delivery;
 pub mod queue;
 pub mod sink;
 pub mod target;
+pub mod worker;
 
 pub use delivery::{DeliveryRequest, DeliveryService};
 pub use queue::{
@@ -39,3 +43,4 @@ pub use queue::{
 };
 pub use sink::{CanonicalActivity, DeliverySink, HttpDeliverySink, LocalDeliverySink};
 pub use target::{DeliveryTarget, LocalActorLookup, Recipient, RecipientTargetResolver};
+pub use worker::{DeliveryWorker, WorkerRunSummary};

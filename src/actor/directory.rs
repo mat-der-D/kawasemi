@@ -87,6 +87,33 @@
 //! protocol-facing types too (revisiting design.md's Revalidation Triggers)
 //! rather than it silently flowing through by accident.
 //!
+//! ## `resolve_actor_by_id` (federation-core task 4.3's narrow upstream addition)
+//! [`ActorDirectory::resolve_actor_by_id`] was added later, by
+//! federation-core's task 4.3 (`DeliveryWorker`), not this task (5.2).
+//! design.md's Allowed Dependencies section for federation-core lists only
+//! `resolve_actor_by_handle` (`Handle -> ResolvedActor`) and
+//! `actor_public_key` (`Id -> ActorPublicKey`) as this component's exposed
+//! surface — no `Id -> Handle`/`Id -> ResolvedActor` path. But
+//! `delivery_jobs.sender_actor_id` (`DeliveryQueue`'s `DeliveryJob`, task
+//! 3.3) is persisted as a plain `Id`, while both
+//! `SignatureNegotiator::negotiate_and_send` and `RequestSigner::sign_request`
+//! (task 2.2, which hit the mirror-image `Handle -> Id` gap for its own
+//! `Key Dependencies` table — see that module's own doc comment) take
+//! `actor: &Handle`. No existing path anywhere in federation-core's already-
+//! implemented boundaries resolves `Id -> Handle`, so `DeliveryWorker` cannot
+//! be built at all without one. `resolve_actor_by_id` closes that gap the
+//! same way `resolve_actor_by_handle` closes the mirror-image one: a
+//! near-identical delegation to the already-implemented, already-tested
+//! `repository::find_by_id` (task 2.2), projected through the same
+//! [`local_actor_to_resolved`] the handle-keyed lookup already uses — same
+//! owner-free contract (Requirements 3.1, 3.2), same "`Ok(None)`, not an
+//! error, for absence" convention (mirroring `find_by_id`'s own contract).
+//! This is a small, well-precedented sibling-method extension (the same kind
+//! of narrow upstream addition `sole_owner` above already established for
+//! this exact component), not a boundary violation: actor-model already owns
+//! actor storage and already exposes the handle-keyed twin of this exact
+//! operation.
+//!
 //! ## Constructor takes only a `PgPool` (Requirement: no unnecessary
 //! ## non-determinism dependency)
 //! Every operation this component performs is a read against an already
@@ -116,7 +143,7 @@ use time::OffsetDateTime;
 
 use super::keys::repository::find_active_public_key;
 use super::model::{ActorPublicKey, ActorSummary, Handle, LocalActor, Owner, ResolvedActor};
-use super::repository::{find_by_handle, list_by_owner};
+use super::repository::{find_by_handle, find_by_id, list_by_owner};
 use crate::domain::Id;
 use crate::error::AppError;
 
@@ -240,6 +267,20 @@ impl ActorDirectory {
         handle: &Handle,
     ) -> Result<Option<ResolvedActor>, AppError> {
         let actor = find_by_handle(&self.pool, handle).await?;
+        Ok(actor.map(local_actor_to_resolved))
+    }
+
+    /// Protocol-layer operation: resolves `id` to an owner-free
+    /// [`ResolvedActor`] (Requirements 3.1, 3.2), returning `Ok(None)` (not
+    /// an error) when no local actor is persisted under `id` — mirrors
+    /// [`resolve_actor_by_handle`](Self::resolve_actor_by_handle)'s own
+    /// contract exactly, keyed by [`Id`] instead of [`Handle`]. See this
+    /// module's doc comment (`resolve_actor_by_id` section) for why this
+    /// method exists and why it was added later, by federation-core's task
+    /// 4.3, rather than being part of this component's original task 5.2
+    /// scope.
+    pub async fn resolve_actor_by_id(&self, id: Id) -> Result<Option<ResolvedActor>, AppError> {
+        let actor = find_by_id(&self.pool, id).await?;
         Ok(actor.map(local_actor_to_resolved))
     }
 
