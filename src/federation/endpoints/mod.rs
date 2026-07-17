@@ -22,18 +22,29 @@
 //!   document handlers (minimal public stats, no internal information,
 //!   Requirements 5.1-5.3 — see [`nodeinfo`]).
 //!
-//! Later sibling modules in this spec's `endpoints/` file plan
-//! (`ap_get.rs`, `inbox.rs`, `outbox.rs` — task 5.x) are out of this task's
-//! boundary and deliberately not declared here yet; each is added by the
-//! task that actually implements it.
+//! - Task 5.2 (`Boundary: ap_get, outbox`): the ActivityPub GET handlers for
+//!   local actors and non-actor local objects/collections (content
+//!   negotiation, secure-mode authorized fetch, not-found — Requirements
+//!   6.1-6.4, 6.6, 9.4 — see [`ap_get`]), and the outbox GET handler (paged
+//!   `OrderedCollectionPage`, no authorized-fetch gate per design.md's own
+//!   API Contract table — Requirements 8.1, 8.2, 9.4 — see [`outbox`]).
+//!
+//! Later sibling modules in this spec's `endpoints/` file plan (`inbox.rs`
+//! — task 5.3) are out of this task's boundary and deliberately not
+//! declared here yet; each is added by the task that actually implements
+//! it.
 
+pub mod ap_get;
 pub mod document;
 pub mod nodeinfo;
+pub mod outbox;
 pub mod webfinger;
 
+pub use ap_get::{ApGetState, actor_get, object_get};
 pub use document::{
     ActivityPubDocumentBuilder, ObjectDocumentProvider, ObjectDocumentRegistry, OutboxItemsPage,
     OutboxSource, OutboxSourceRegistry, PageCursor,
 };
 pub use nodeinfo::{NodeInfoState, nodeinfo_discovery, nodeinfo_document};
+pub use outbox::{OutboxQuery, OutboxState, outbox_get};
 pub use webfinger::{WebfingerQuery, WebfingerState, webfinger};

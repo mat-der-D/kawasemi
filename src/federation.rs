@@ -82,6 +82,18 @@
 //!   Requirements 5.1-5.3) — see [`endpoints`]. Not yet mounted on the live
 //!   router (task 5.4's job); see `endpoints::webfinger`/`endpoints::nodeinfo`'s
 //!   own doc comments.
+//! - Task 5.2 (`Boundary: ap_get, outbox`): the ActivityPub GET handlers —
+//!   local actor documents built via `ActivityPubDocumentBuilder`, every
+//!   other local object/collection URL delegated to `ObjectDocumentRegistry`
+//!   (`None` -> not-found), content-negotiated (Requirement 9.4/6.3),
+//!   secure-mode authorized fetch reusing `SignatureVerifier` directly
+//!   (Requirement 6.4) — and the outbox GET handler, a paged
+//!   `OrderedCollectionPage` sourced from `OutboxSourceRegistry` with no
+//!   authorized-fetch gate (design.md's own API Contract table scopes
+//!   `401(secure)` to the actor/object rows only, not outbox) (Requirements
+//!   6.1-6.4, 6.6, 8.1, 8.2, 9.4) — see [`endpoints`]. Not yet mounted on
+//!   the live router (task 5.4's job); see `endpoints::ap_get`/
+//!   `endpoints::outbox`'s own doc comments.
 //!
 //! Later tasks in this spec (`config` — see design.md's File Structure
 //! Plan) are out of this task's boundary and deliberately not declared here
@@ -95,9 +107,10 @@ pub mod signatures;
 pub mod urls;
 
 pub use endpoints::{
-    ActivityPubDocumentBuilder, NodeInfoState, ObjectDocumentProvider, ObjectDocumentRegistry,
-    OutboxItemsPage, OutboxSource, OutboxSourceRegistry, PageCursor, WebfingerQuery,
-    WebfingerState, nodeinfo_discovery, nodeinfo_document, webfinger,
+    ActivityPubDocumentBuilder, ApGetState, NodeInfoState, ObjectDocumentProvider,
+    ObjectDocumentRegistry, OutboxItemsPage, OutboxQuery, OutboxSource, OutboxSourceRegistry,
+    OutboxState, PageCursor, WebfingerQuery, WebfingerState, actor_get, nodeinfo_discovery,
+    nodeinfo_document, object_get, outbox_get, webfinger,
 };
 pub use inbound::{
     BlockPolicy, DEFAULT_RECEIVED_ACTIVITY_RETENTION, DbReceivedActivityStore, HandleOutcome,
