@@ -23,8 +23,11 @@ json_escape() {
   printf '%s' "$s"
 }
 
-# cargo fmt is auto-applied, never blocks the stop.
-cargo fmt --all >/dev/null 2>&1
+# Per-file cargo fmt runs on each Edit/Write via the PostToolUse hook
+# (.claude/settings.json). Running `cargo fmt --all` here reformats the
+# entire repo on every Stop, which repeatedly reintroduced whitespace-only
+# diffs into unrelated files during concurrent subagent runs (see
+# .kiro/specs/federation-core/tasks.md Implementation Notes, task 4.1).
 
 FAILURES=""
 
