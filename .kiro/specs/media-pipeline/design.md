@@ -144,8 +144,8 @@ migrations/
 └── 0004_media.sql                # media / media_processing_jobs テーブルと制約・インデックス（連番・前方追加規約に従う）
 
 src/
+├── media.rs                      # MediaModule 組み立て（サービス/リポジトリ/キュー/ストア/プロセッサ/ワーカーのハンドル束ね）と公開
 └── media/
-    ├── mod.rs                    # MediaModule 組み立て（サービス/リポジトリ/キュー/ストア/プロセッサ/ワーカーのハンドル束ね）と公開
     ├── model.rs                  # Media, MediaId, MediaState, MediaType, Focus, MediaMeta, ProcessingJob 等のドメイン型
     ├── media_repository.rs       # MediaRepository（メディアの挿入・所有スコープ付き取得・状態/メタ更新）
     ├── job_queue.rs             # ProcessingJobQueue（投入・FOR UPDATE SKIP LOCKED 取得・完了・再試行/バックオフ・失敗）
@@ -172,7 +172,7 @@ tests/
 - `src/state.rs`（core-runtime）— `AppState` に `MediaModule`（`MediaService` / `MediaStore` / `ProcessingJobQueue` ハンドル）を追加。
 - `src/bootstrap.rs`（core-runtime）— プール確立後にメディアのリポジトリ/キュー/ストア/プロセッサ/サービスを構築し、`MediaModule` を `AppState` に格納、常駐ワーカーを起動。
 - `src/server.rs`（core-runtime）— ルータにメディアエンドポイントを mount し、api-foundation の横断レイヤー（認証・エラー・レート制限）が適用される装着点に乗せる。
-- `src/config/mod.rs`（core-runtime）— 起動設定にメディア保管ルート・アップロード上限サイズ・サムネイル寸法・対応形式・ワーカー並行度/再試行上限・処理ジョブのリース期間（`lease_duration`。クラッシュしたワーカーからジョブを再取得するまでの猶予。既定は想定処理時間を十分に上回る値、例: 5 分）を追加。
+- `src/config.rs`（core-runtime）— 起動設定にメディア保管ルート・アップロード上限サイズ・サムネイル寸法・対応形式・ワーカー並行度/再試行上限・処理ジョブのリース期間（`lease_duration`。クラッシュしたワーカーからジョブを再取得するまでの猶予。既定は想定処理時間を十分に上回る値、例: 5 分）を追加。
 
 > 各ファイルは単一責務。メディア業務（service/repository/queue/serializer）と外部副作用 adapter（local_fs/image_processor）と HTTP 表層（endpoints）とワーカーを分離し、core-runtime の Composition Root へ一方向に配線する。
 

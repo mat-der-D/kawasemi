@@ -135,8 +135,8 @@ graph LR
 
 ```
 src/
+├── timelines.rs                # TimelinesModule 組み立て・公開・ルータ装着点・TimelineMatcher シーム公開
 └── timelines/
-    ├── mod.rs                  # TimelinesModule 組み立て・公開・ルータ装着点・TimelineMatcher シーム公開
     ├── model.rs                # TimelineKind(Home/Public/Local/Tag), TimelineParams, TimelineQuerySpec, FilterContext 等のドメイン型
     ├── kind_rules.rs           # TimelineKindRules（種別ごとの条件：home=フォロー+自分・direct除外・ブースト含む、public/local/tag=public限定・ブースト除外、local=ローカル限定、tag=タグ照合）
     ├── candidate_repository.rs # CandidateRepository（statuses / status_media / タグ関連を read-only 照会しカーソル範囲の候補を取得）

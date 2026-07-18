@@ -150,17 +150,17 @@ migrations/
 └── 0008_federation.sql          # delivery_jobs / received_activities / remote_public_keys / instance_signature_capabilities
 
 src/
+├── federation.rs                 # FederationModule 組み立て・公開 port のエクスポート・ルータ装着点
 └── federation/
-    ├── mod.rs                    # FederationModule 組み立て・公開 port のエクスポート・ルータ装着点
     ├── config.rs                 # 連合関連設定の参照（サーバードメイン・セキュアモード・配送リトライ方針・公開鍵キャッシュ TTL・受信 Activity 保持日数）
     ├── urls.rs                   # ActorUrls: アクター/inbox/outbox/shared inbox/オブジェクト/コレクション URL 構築・keyId URL
+    ├── jsonld.rs                 # JsonLdCodec 公開
     ├── jsonld/
-    │   ├── mod.rs                # JsonLdCodec 公開
     │   ├── context.rs            # ActivityPub @context 定数・付与
     │   ├── serialize.rs          # 正規 ActivityPub ドキュメント直列化（@context 付与）
     │   └── parse.rs              # 受信 JSON-LD の安全展開・未知プロパティ処理・必須プロパティ検証
+    ├── signatures.rs              # 署名サブモジュール公開
     ├── signatures/
-    │   ├── mod.rs                # 署名サブモジュール公開
     │   ├── suite.rs              # SignatureSuite 抽象 + DraftCavage / Rfc9421 実装（形式差吸収）
     │   ├── digest.rs            # 本文ダイジェスト算出・検証
     │   ├── signer.rs             # RequestSigner: 送信リクエストへ署名付与（SigningKeyProvider 利用）
@@ -168,21 +168,21 @@ src/
     │   ├── key_resolver.rs       # PublicKeyResolver port + Db/Http 実装（取得+キャッシュ）+ モック
     │   ├── negotiation.rs        # SignatureNegotiator: double-knock と host 能力記憶
     │   └── http_client.rs        # FederationHttpClient port + 本番/モック実装
+    ├── inbound.rs                 # inbound サブモジュール公開
     ├── inbound/
-    │   ├── mod.rs                # inbound サブモジュール公開
     │   ├── dispatcher.rs         # InboundActivityHandler trait + InboundActivityDispatcher multimap レジストリ（委譲境界・複数ハンドラ/種別ファンアウト）
     │   ├── dedup.rs              # ReceivedActivityStore: Activity id 重複記録・冪等判定
     │   ├── block_policy.rs       # BlockPolicy port + 既定 no-op 実装（委譲境界）
     │   └── service.rs            # InboxService: 検証→ブロック判定→重複排除→ディスパッチ
+    ├── outbound.rs                # outbound サブモジュール公開
     ├── outbound/
-    │   ├── mod.rs                # outbound サブモジュール公開
     │   ├── delivery.rs           # DeliveryService: 共通部（正規 Activity 生成・検証・宛先解決）
     │   ├── target.rs             # RecipientTargetResolver: recipient → local/remote 物理ターゲット・shared inbox 重複排除
     │   ├── sink.rs               # DeliverySink trait + LocalDeliverySink(in-process) / HttpDeliverySink(キュー投入)
     │   ├── queue.rs              # DeliveryQueue: 配送ジョブ永続化・取得・状態遷移・再試行スケジュール
     │   └── worker.rs             # DeliveryWorker: ジョブ取り出し→署名付き HTTP 送信→再試行/恒久失敗
+    ├── endpoints.rs               # エンドポイントルータ束ね
     └── endpoints/
-        ├── mod.rs                # エンドポイントルータ束ね
         ├── webfinger.rs          # WebFinger ハンドラ（acct: 解決・複数アクター・ドメイン照合）
         ├── nodeinfo.rs           # NodeInfo ディスカバリ + ドキュメント
         ├── ap_get.rs             # アクター/オブジェクト/コレクション activity+json GET・authorized fetch・content negotiation（オブジェクト/コレクションは ObjectDocumentProvider レジストリへ委譲）
@@ -202,7 +202,7 @@ tests/
 - `src/bootstrap.rs`（core-runtime）— プール確立・`ActorModule` 構築後に `FederationModule` を組み立て、配送ワーカーを起動、`AppState` に格納。
 - `src/state.rs`（core-runtime）— `AppState` に `FederationModule`（ディスパッチャ・配送サービス・各 port のハンドル）を追加。
 - `src/server.rs`（core-runtime）— 連合エンドポイントのルータを土台ルータへ装着。
-- `src/config/mod.rs`（core-runtime）— セキュアモードフラグと配送リトライ方針の設定項目を追加（起動設定）。
+- `src/config.rs`（core-runtime）— セキュアモードフラグと配送リトライ方針の設定項目を追加（起動設定）。
 
 > 各ファイルは単一責務。`signatures/` は形式差吸収・送信・受信・鍵取得・交渉・ネットワークを分離し、`outbound/` は共通部（delivery）と分岐部（sink）を物理的に分ける。
 
