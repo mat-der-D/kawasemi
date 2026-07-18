@@ -28,10 +28,18 @@
 //! repository layer (tasks 3.1-3.3) uses to hash client secrets,
 //! authorization codes, and access tokens before persisting them — neither
 //! may ever appear in plaintext via `Debug`/`Display`/log output either.
+//!
+//! media-pipeline's task 1.2 adds `media.*`: storage root, max upload size,
+//! thumbnail target dimensions, supported content types, worker
+//! concurrency, max retry attempts, and processing-job lease duration. None
+//! of these are secret-bearing, so none are wrapped in `Secret<T>`; see
+//! [`MediaConfig`]'s own doc comment for field-by-field detail and why every
+//! field has a safe default.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[cfg(test)]
@@ -85,6 +93,16 @@ pub struct AppConfig {
     /// struct does not also carry a delivery-retry-policy field despite
     /// task 5.4's task text naming "配送リトライ方針" alongside these three.
     pub federation: FederationConfig,
+    /// media-pipeline's startup settings (task 1.2, design.md's Modified
+    /// Files: "起動設定にメディア保管ルート・アップロード上限サイズ・
+    /// サムネイル寸法・対応形式・ワーカー並行度/再試行上限・処理ジョブの
+    /// リース期間...を追加", Requirements 1.4, 4.2, 5.2, 6.1). core-runtime
+    /// only hosts this field; the eventual consumers (`LocalFsStore`,
+    /// `MediaService`, `PureRustImageProcessor`, `ProcessingWorker`,
+    /// `ProcessingJobQueue`) are wired up by later tasks (2.x-5.2), not this
+    /// one. See [`MediaConfig`]'s own doc comment for why no field here is
+    /// wrapped in `Secret<T>`.
+    pub media: MediaConfig,
 }
 
 /// Server-facing startup settings.
@@ -244,6 +262,88 @@ pub struct FederationConfig {
     /// (see this field's sibling doc comment for why that constant is not
     /// imported directly).
     pub received_activity_retention_days: u32,
+}
+
+/// media-pipeline's startup settings (task 1.2, design.md's Modified Files:
+/// "起動設定にメディア保管ルート・アップロード上限サイズ・サムネイル寸法・
+/// 対応形式・ワーカー並行度/再試行上限・処理ジョブのリース期間
+/// （`lease_duration`。クラッシュしたワーカーからジョブを再取得するまでの
+/// 猶予。既定は想定処理時間を十分に上回る値、例: 5 分）を追加").
+/// core-runtime only hosts these fields; it does not itself know how a
+/// storage root or thumbnail dimension is used — `LocalFsStore` (task 2.2,
+/// Requirement 5.2), `MediaService` (task 4.1, Requirement 1.4),
+/// `PureRustImageProcessor` (task 2.3, Requirement 6.1), and
+/// `ProcessingWorker`/`ProcessingJobQueue` (tasks 3.2/4.3, Requirement 4.2)
+/// are the eventual consumers, mirroring `FederationConfig`'s precedent of
+/// a downstream-consumed startup settings group hosted here without this
+/// module depending on `crate::media`.
+///
+/// Unlike `ActorConfig`/`OwnerConfig`/`OauthConfig`, no field here is
+/// secret-bearing (no credentials or key material), so nothing is wrapped
+/// in [`Secret`]. Every field also has a safe default (mirroring
+/// `FederationConfig`'s "defaults are provided so a minimal config still
+/// boots" precedent): none of Requirements 1.4, 4.2, 5.2, or 6.1 mandate a
+/// value with no safe fallback, unlike `database.url`/`actor.kek`/
+/// `owner.password`/`oauth.token_hash_key`, which have no safe default to
+/// fall back to. Consequently this struct — like `FederationConfig` —
+/// contributes no `ConfigIssue::Missing` cases, only `Malformed` ones for
+/// values present but not shaped as expected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaConfig {
+    /// Filesystem directory under which a later `LocalFsStore` (task 2.2,
+    /// Requirement 5.2) persists original media and derivatives, keyed by a
+    /// path derived deterministically from the media identifier (design.md
+    /// Physical Data Model: `object_key`/`thumb_key`). Defaults to
+    /// `media_storage`, a relative path resolved against the process's
+    /// current working directory — mirroring [`DEFAULT_CONFIG_PATH`]'s own
+    /// relative-path convention, so a freshly cloned instance boots without
+    /// an operator having to pre-provision an absolute path.
+    pub storage_root: PathBuf,
+    /// Maximum accepted upload size in bytes; an upload exceeding this is
+    /// rejected before storage (Requirement 1.4, consumed by a later
+    /// `MediaService::accept_upload`). Defaults to 10 MiB
+    /// (`10 * 1024 * 1024` bytes), a generous ceiling for this MVP's
+    /// image-only scope (Requirement 10.3 — no video/audio to size for
+    /// yet).
+    pub max_upload_size_bytes: u64,
+    /// Target thumbnail width in pixels, consumed by a later
+    /// `PureRustImageProcessor::process_image` (Requirement 6.1). Defaults
+    /// to 400, alongside [`Self::thumbnail_target_height`].
+    pub thumbnail_target_width: u32,
+    /// Target thumbnail height in pixels, consumed the same way as
+    /// [`Self::thumbnail_target_width`] (Requirement 6.1). Defaults to 400.
+    pub thumbnail_target_height: u32,
+    /// Content types accepted by upload validation; anything else is
+    /// rejected as an unsupported format (Requirement 1.4, consumed by a
+    /// later `MediaService::accept_upload`). Supplied as a comma-separated
+    /// list (matching this module's convention of scalar-string TOML/env
+    /// values — see [`MergedSource::get`]'s doc comment for why array-typed
+    /// TOML values are not supported here). Defaults to the four raster
+    /// formats a later pure-Rust `MediaProcessor` (task 2.3, Requirements
+    /// 10.2, 10.3) is expected to decode without native dependencies:
+    /// `image/jpeg`, `image/png`, `image/gif`, `image/webp`.
+    pub supported_formats: Vec<String>,
+    /// Number of concurrent processing workers a later `MediaModule`
+    /// wiring (task 5.2) spawns to consume the processing job queue
+    /// (Requirement 4.2's exclusive per-job claim only matters once 1+
+    /// workers may run concurrently). Defaults to 2, a modest concurrency
+    /// befitting this project's single-server ("一人鯖") deployment
+    /// target.
+    pub worker_concurrency: u32,
+    /// Maximum retry attempts for a processing job before it is moved to a
+    /// failed state, consumed by a later
+    /// `ProcessingJobQueue::fail_or_retry` (design.md's `max_attempts: u32`
+    /// parameter; Requirement 4.5, referenced from this task's boundary via
+    /// Requirement 4.2's exclusive-claim/retry semantics). Defaults to 5.
+    pub max_retry_attempts: u32,
+    /// Grace period after a processing job's `locked_at` before a worker
+    /// crash is presumed and another worker may reclaim the job (design.md's
+    /// `lease_duration` parameter to `ProcessingJobQueue::claim_due`;
+    /// Requirement 4.2). Defaults to 5 minutes, matching the task text's own
+    /// example of a value "well above the expected processing time"
+    /// (処理ジョブのリース期間の既定は想定処理時間を十分に上回る値、例: 5
+    /// 分).
+    pub lease_duration: Duration,
 }
 
 /// Logging/diagnostics startup settings.
@@ -482,6 +582,63 @@ fn load_config_from(
         &mut issues,
     );
 
+    let media_storage_root = optional(
+        &source,
+        "media.storage_root",
+        default_media_storage_root(),
+        validate_media_storage_root,
+        &mut issues,
+    );
+    let media_max_upload_size_bytes = optional(
+        &source,
+        "media.max_upload_size_bytes",
+        DEFAULT_MEDIA_MAX_UPLOAD_SIZE_BYTES,
+        parse_max_upload_size_bytes,
+        &mut issues,
+    );
+    let media_thumbnail_target_width = optional(
+        &source,
+        "media.thumbnail_target_width",
+        DEFAULT_MEDIA_THUMBNAIL_TARGET_WIDTH,
+        parse_thumbnail_dimension,
+        &mut issues,
+    );
+    let media_thumbnail_target_height = optional(
+        &source,
+        "media.thumbnail_target_height",
+        DEFAULT_MEDIA_THUMBNAIL_TARGET_HEIGHT,
+        parse_thumbnail_dimension,
+        &mut issues,
+    );
+    let media_supported_formats = optional(
+        &source,
+        "media.supported_formats",
+        default_media_supported_formats(),
+        parse_supported_formats,
+        &mut issues,
+    );
+    let media_worker_concurrency = optional(
+        &source,
+        "media.worker_concurrency",
+        DEFAULT_MEDIA_WORKER_CONCURRENCY,
+        parse_worker_concurrency,
+        &mut issues,
+    );
+    let media_max_retry_attempts = optional(
+        &source,
+        "media.max_retry_attempts",
+        DEFAULT_MEDIA_MAX_RETRY_ATTEMPTS,
+        |raw| raw.parse::<u32>().map_err(|e| e.to_string()),
+        &mut issues,
+    );
+    let media_lease_duration = optional(
+        &source,
+        "media.lease_duration_secs",
+        Duration::from_secs(DEFAULT_MEDIA_LEASE_DURATION_SECS),
+        parse_secs,
+        &mut issues,
+    );
+
     let level = optional(
         &source,
         "log.level",
@@ -543,6 +700,16 @@ fn load_config_from(
             received_activity_retention_days: federation_received_activity_retention_days
                 .expect("validated above"),
         },
+        media: MediaConfig {
+            storage_root: media_storage_root.expect("validated above"),
+            max_upload_size_bytes: media_max_upload_size_bytes.expect("validated above"),
+            thumbnail_target_width: media_thumbnail_target_width.expect("validated above"),
+            thumbnail_target_height: media_thumbnail_target_height.expect("validated above"),
+            supported_formats: media_supported_formats.expect("validated above"),
+            worker_concurrency: media_worker_concurrency.expect("validated above"),
+            max_retry_attempts: media_max_retry_attempts.expect("validated above"),
+            lease_duration: media_lease_duration.expect("validated above"),
+        },
     })
 }
 
@@ -558,6 +725,52 @@ const DEFAULT_FEDERATION_PUBLIC_KEY_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 /// comment for why this is a plain duplicated constant rather than an
 /// import.
 const DEFAULT_FEDERATION_RECEIVED_ACTIVITY_RETENTION_DAYS: u32 = 14;
+
+/// Default for `media.max_upload_size_bytes` (10 MiB). See
+/// [`MediaConfig::max_upload_size_bytes`]'s doc comment for rationale.
+const DEFAULT_MEDIA_MAX_UPLOAD_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Default for `media.thumbnail_target_width` (400px). See
+/// [`MediaConfig::thumbnail_target_width`]'s doc comment.
+const DEFAULT_MEDIA_THUMBNAIL_TARGET_WIDTH: u32 = 400;
+
+/// Default for `media.thumbnail_target_height` (400px). See
+/// [`MediaConfig::thumbnail_target_height`]'s doc comment.
+const DEFAULT_MEDIA_THUMBNAIL_TARGET_HEIGHT: u32 = 400;
+
+/// Default for `media.worker_concurrency` (2 workers). See
+/// [`MediaConfig::worker_concurrency`]'s doc comment for rationale.
+const DEFAULT_MEDIA_WORKER_CONCURRENCY: u32 = 2;
+
+/// Default for `media.max_retry_attempts` (5 attempts). See
+/// [`MediaConfig::max_retry_attempts`]'s doc comment.
+const DEFAULT_MEDIA_MAX_RETRY_ATTEMPTS: u32 = 5;
+
+/// Default for `media.lease_duration_secs`, in seconds (5 minutes). See
+/// [`MediaConfig::lease_duration`]'s doc comment for why this specific
+/// value (task 1.2's own example of "well above the expected processing
+/// time").
+const DEFAULT_MEDIA_LEASE_DURATION_SECS: u64 = 5 * 60;
+
+/// Default for `media.storage_root`: `media_storage`, resolved relative to
+/// the process's current working directory. See
+/// [`MediaConfig::storage_root`]'s doc comment for why a relative default is
+/// safe here (mirrors [`DEFAULT_CONFIG_PATH`]'s own convention).
+fn default_media_storage_root() -> PathBuf {
+    PathBuf::from("media_storage")
+}
+
+/// Default for `media.supported_formats`: the four raster formats a later
+/// pure-Rust `MediaProcessor` is expected to decode without native
+/// dependencies. See [`MediaConfig::supported_formats`]'s doc comment.
+fn default_media_supported_formats() -> Vec<String> {
+    vec![
+        "image/jpeg".to_string(),
+        "image/png".to_string(),
+        "image/gif".to_string(),
+        "image/webp".to_string(),
+    ]
+}
 
 fn default_bind_addr() -> SocketAddr {
     "0.0.0.0:3000".parse().expect("valid hardcoded default")
@@ -696,6 +909,83 @@ fn validate_owner_password(raw: &str) -> Result<String, String> {
         return Err("must be at least 8 characters".to_string());
     }
     Ok(trimmed.to_string())
+}
+
+/// Validates `media.storage_root`: non-empty after trimming. Deliberately
+/// permissive about shape (relative or absolute, existing or not — a later
+/// `LocalFsStore` is responsible for creating/validating the directory at
+/// use time); this validator only rejects the degenerate empty-string case,
+/// mirroring [`validate_domain`]'s minimal non-emptiness floor.
+fn validate_media_storage_root(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("must not be empty".to_string());
+    }
+    Ok(PathBuf::from(trimmed))
+}
+
+/// Validates `media.max_upload_size_bytes`: a positive whole number of
+/// bytes. Zero is rejected — a zero-byte ceiling would reject every upload,
+/// which is never the intent of a size *limit* (Requirement 1.4).
+fn parse_max_upload_size_bytes(raw: &str) -> Result<u64, String> {
+    let value = raw
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| format!("'{raw}' is not a whole number of bytes: {e}"))?;
+    if value == 0 {
+        return Err("must be greater than 0".to_string());
+    }
+    Ok(value)
+}
+
+/// Validates a thumbnail target dimension (`media.thumbnail_target_width`/
+/// `media.thumbnail_target_height`): a positive whole number of pixels.
+/// Shared by both fields since the parsing rule is identical (Requirement
+/// 6.1); only the dotted config path each is registered under differs.
+fn parse_thumbnail_dimension(raw: &str) -> Result<u32, String> {
+    let value = raw
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| format!("'{raw}' is not a whole number of pixels: {e}"))?;
+    if value == 0 {
+        return Err("must be greater than 0".to_string());
+    }
+    Ok(value)
+}
+
+/// Validates `media.supported_formats`: a comma-separated list of content
+/// types, each trimmed of surrounding whitespace, with empty entries
+/// dropped. At least one entry must remain — an empty accepted-format list
+/// would reject every upload, which is never the intent of Requirement
+/// 1.4's "unsupported format" check (that check exists to reject some
+/// formats, not all of them).
+fn parse_supported_formats(raw: &str) -> Result<Vec<String>, String> {
+    let formats: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if formats.is_empty() {
+        return Err("must list at least one supported content type".to_string());
+    }
+    Ok(formats)
+}
+
+/// Validates `media.worker_concurrency`: a whole number of at least 1. Zero
+/// workers would mean the processing job queue (Requirement 4.2) is never
+/// consumed, which is never a valid startup intent — an operator who wants
+/// processing paused should stop the process, not configure a
+/// zero-concurrency worker pool.
+fn parse_worker_concurrency(raw: &str) -> Result<u32, String> {
+    let value = raw
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| format!("'{raw}' is not a whole number: {e}"))?;
+    if value == 0 {
+        return Err("must be at least 1".to_string());
+    }
+    Ok(value)
 }
 
 /// Merged view over a parsed TOML document and an environment-variable map,

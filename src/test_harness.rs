@@ -89,8 +89,8 @@ use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::actor::{self, ActorModule};
 use crate::config::{
-    ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, OauthConfig,
-    OwnerConfig, Secret, ServerConfig,
+    ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, MediaConfig,
+    OauthConfig, OwnerConfig, Secret, ServerConfig,
 };
 use crate::db;
 use crate::federation::signatures::ReqwestFederationHttpClient;
@@ -545,6 +545,26 @@ pub async fn spawn_test_app() -> TestApp {
             secure_mode: false,
             public_key_cache_ttl: Duration::from_secs(24 * 60 * 60),
             received_activity_retention_days: 14,
+        },
+        // media-pipeline task 1.2: fixed, non-production values mirroring
+        // `load_config_from`'s own defaults (`src/config.rs`) — this test
+        // harness constructs `AppConfig` directly rather than through TOML/
+        // env parsing, the same way every other startup-config group above
+        // is fixed here rather than loaded.
+        media: MediaConfig {
+            storage_root: std::path::PathBuf::from("media_storage"),
+            max_upload_size_bytes: 10 * 1024 * 1024,
+            thumbnail_target_width: 400,
+            thumbnail_target_height: 400,
+            supported_formats: vec![
+                "image/jpeg".to_string(),
+                "image/png".to_string(),
+                "image/gif".to_string(),
+                "image/webp".to_string(),
+            ],
+            worker_concurrency: 2,
+            max_retry_attempts: 5,
+            lease_duration: Duration::from_secs(5 * 60),
         },
     };
 
