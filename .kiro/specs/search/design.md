@@ -154,8 +154,8 @@ migrations/
 └── 0010_search.sql              # search_tags / search_status_tags（0001-0009 と非衝突。0003=api-foundation(oauth) / 0008=federation-core の確定連番。研究ログ「Migration Numbering Coordination」参照）
 
 src/
+├── search.rs                     # SearchModule 組み立て（サービス/バックエンド/リゾルバ/シリアライザ/インデクサのハンドル束ね）と公開・ルータ装着点
 └── search/
-    ├── mod.rs                    # SearchModule 組み立て（サービス/バックエンド/リゾルバ/シリアライザ/インデクサのハンドル束ね）と公開・ルータ装着点
     ├── model.rs                  # SearchParams, SearchType, ParsedQuery(Plain/Acct/Url), SearchMatches(AccountRef[]/StatusId[]/TagMatch[]), TagView ドメイン型
     ├── query_parser.rs          # QueryParser（q を Plain / Acct(user,domain) / Url に判別・正規化、空クエリ検出）
     ├── ports.rs                  # SearchBackend trait（search_accounts / search_statuses / search_hashtags、識別子のみ返す）+ 既定/モックの差し替え規約

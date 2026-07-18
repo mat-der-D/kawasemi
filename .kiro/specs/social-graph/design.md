@@ -167,8 +167,8 @@ migrations/
 └── 0006_social_graph.sql        # follows / follow_requests / mutes / blocks と各種一意制約・インデックス（0001-0005,0007 と非衝突。0003/0006 の二重利用を回避し 0006 を採用）
 
 src/
+├── social_graph.rs               # SocialGraphModule 組み立て・公開・ルータ装着点・受信ハンドラ/RelationshipStateProvider/AccountCountsProvider/BlockPolicy 登録・NotificationEventSink 注入
 └── social_graph/
-    ├── mod.rs                    # SocialGraphModule 組み立て・公開・ルータ装着点・受信ハンドラ/RelationshipStateProvider/AccountCountsProvider/BlockPolicy 登録・NotificationEventSink 注入
     ├── model.rs                  # Follow, FollowRequest, Mute, Block, RelationshipState, FollowOptions, MuteOptions 等のドメイン型
     ├── repository.rs            # RelationshipRepository（follows/follow_requests/mutes/blocks の取得・upsert・削除・バッチ逆引き・期限考慮）
     ├── approval_policy.rs        # FollowApprovalPolicy（承認要否の単一判定 = 同一サーバー承認スキップ特権の唯一の定義点）
