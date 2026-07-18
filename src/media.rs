@@ -20,7 +20,12 @@
 //!   plus its pure-Rust adapter [`PureRustImageProcessor`] (decode/resize/
 //!   encode via the `image` crate, BlurHash via the `blurhash` crate,
 //!   neither pulling in any native/C dependency) — see [`image_processor`].
-//!   No persistence (`MediaRepository`/`ProcessingJobQueue`, tasks 3.1/3.2),
+//! - Task 3.1 (`Boundary: MediaRepository`): the media attachment's own
+//!   persistence — insertion (owning actor required), owner-scoped lookup
+//!   (never returns another actor's media), description/focus update, and
+//!   state+derived-metadata reflection (`set_ready`/`set_failed`) — see
+//!   [`media_repository`].
+//!   No processing-job persistence (`ProcessingJobQueue`, task 3.2),
 //!   business logic (`MediaService`, task 4.1), or HTTP surface
 //!   (`MediaEndpoints`, task 5.1) exist yet, and this module is not wired
 //!   into `crate::state::AppState`/`crate::bootstrap`/`crate::server` (task
@@ -29,12 +34,14 @@
 
 pub mod image_processor;
 pub mod local_fs;
+pub mod media_repository;
 pub mod model;
 pub mod processor;
 pub mod store;
 
 pub use image_processor::PureRustImageProcessor;
 pub use local_fs::LocalFsStore;
+pub use media_repository::{find_owned, insert_media, set_failed, set_ready, update_metadata};
 pub use model::{
     Dimensions, FOCUS_MAX, FOCUS_MIN, Focus, FocusAxis, FocusRangeError, JobState, Media,
     MediaMeta, MediaState, MediaType, ProcessingJob,
