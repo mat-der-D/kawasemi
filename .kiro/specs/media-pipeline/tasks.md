@@ -23,7 +23,7 @@
   - _Boundary: model_
   - _Depends: 1.1_
 
-- [ ] 2.2 (P) ストレージ抽象境界とローカル FS 実装を実装する
+- [x] 2.2 (P) ストレージ抽象境界とローカル FS 実装を実装する
   - 保管・取得・削除・公開 URL 生成を持つストレージ抽象（port）を定義し、ローカルファイルシステム実装を adapter として提供する。保管パスはメディア識別子由来で決定的にし、保管ルートは起動設定から取る
   - 公開 URL は api-foundation のプロキシ尊重ヘルパで外部ホスト名・スキームを反映した絶対 URL とする
   - ローカル FS で保管した実体が取得・削除でき、公開 URL がプロキシ情報を反映することを単体/統合テストで確認でき、呼び出し側が実装非依存であることを示せる
@@ -124,3 +124,4 @@
 
 - 1.1: マイグレーションファイル名はタスク本文記載の `0004_media.sql` ではなく `0005_media.sql` を使用した。`0001`〜`0004` は実装済み（`0004` は federation-core が先に確保）で、design.md のファイル番号は `/kiro-spec-batch` 生成時に spec 毎に独立採番されたものであり実装順を反映しない（`migrations/0004_federation.sql` のヘッダコメントに同様の説明が既にある）。今後 media-pipeline の設計文書を参照するタスクは、マイグレーション番号のみ実ファイル `0005_media.sql` に読み替えること。
 - 2.1: このサンドボックスでは PostgreSQL が既定で起動していない（`pg_isready` が無応答）。DB 依存テスト（`spawn_test_app` 経由の統合テスト等）を含むフルスイートを実行する前に `service postgresql start` が必要。`media::model` のような DB 非依存の単体テストはこれと無関係に通る。design.md の `model` 型定義（抜粋）は `Focus { pub x, pub y }` と公開フィールドで示すが、範囲外構築を型で拒否するには `x`/`y` を非公開にし `Focus::new(x, y) -> Result<Focus, FocusRangeError>` のフォールブルコンストラクタを介す必要がある（抜粋は API を厳密に強制するものではない）。今後 `Focus` を消費するタスク（2.2 のシリアライズ、4.1 のサービス等）はこのフォールブルコンストラクタ/アクセサ経由で扱うこと。
+- 2.2: design.md の `public_url(&self, key: &ObjectKey, req_uri: &RequestUriContext) -> String` 型シグネチャの `RequestUriContext`（`src/api/pagination.rs`）はフィールド非公開でページネーション `Link` ヘッダ専用の私有 `url_with` しか持たず、単純な絶対 URL 生成には使えない。代わりに同ファイルの公開型 `ForwardedOrigin::resolve(...)` （プロキシ転送ヘッダ由来の scheme/host 解決のみを担う分離されたプリミティブ）を使用した。今後 `MediaStore::public_url` や同種のプロキシ尊重 URL 生成を消費/拡張するタスクはこの `ForwardedOrigin` を再利用すること。また `MediaStore` トレイトはこのクレートの既存慣例（`ReceivedActivityStore` 等）に倣い `#[allow(async_fn_in_trait)]` のネイティブ async fn を用いており、`dyn` オブジェクト安全ではない（`Arc<dyn MediaStore>` が必要になった場合は later task 側でボクシングを追加する）。

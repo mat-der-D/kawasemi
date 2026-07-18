@@ -17,7 +17,7 @@ sha2 = "0.11.0"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres", "migrate", "time"] }
 subtle = "2.6.1"
 time = "0.3.53"
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "signal", "time", "fs"] }
 toml = "1.1.2"
 tower-http = { version = "0.7.0", features = ["trace"] }
 tower-layer = "0.3.3"
