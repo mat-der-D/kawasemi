@@ -31,7 +31,7 @@
   - _Boundary: MediaStore, LocalFsStore_
   - _Depends: 1.2, 2.1_
 
-- [ ] 2.3 (P) 画像処理抽象と pure-Rust 実装を実装する（ネイティブ依存ゲート）
+- [x] 2.3 (P) 画像処理抽象と pure-Rust 実装を実装する（ネイティブ依存ゲート）
   - 入力バイト列からサムネイル・BlurHash・原寸法/アスペクトを生成する処理抽象（port）を定義し、pure-Rust（ネイティブ依存ゼロ）の画像処理 adapter を実装する。MVP は画像のみを対象とし、動画/音声処理のネイティブ依存を要求しない
   - 処理を抽象の背後に隔離し、将来 libvips 等のネイティブ依存実装へ呼び出し側変更なしに差し替えられる境界を維持する（pure-Rust 採用/動画後回し/抽象隔離の判断は research.md に記録済み）
   - 同一入力 + 固定パラメータで同一の BlurHash・サムネイル・寸法が再現され、未対応/破損入力が明示的エラーになることを単体テストで確認できる
@@ -125,3 +125,4 @@
 - 1.1: マイグレーションファイル名はタスク本文記載の `0004_media.sql` ではなく `0005_media.sql` を使用した。`0001`〜`0004` は実装済み（`0004` は federation-core が先に確保）で、design.md のファイル番号は `/kiro-spec-batch` 生成時に spec 毎に独立採番されたものであり実装順を反映しない（`migrations/0004_federation.sql` のヘッダコメントに同様の説明が既にある）。今後 media-pipeline の設計文書を参照するタスクは、マイグレーション番号のみ実ファイル `0005_media.sql` に読み替えること。
 - 2.1: このサンドボックスでは PostgreSQL が既定で起動していない（`pg_isready` が無応答）。DB 依存テスト（`spawn_test_app` 経由の統合テスト等）を含むフルスイートを実行する前に `service postgresql start` が必要。`media::model` のような DB 非依存の単体テストはこれと無関係に通る。design.md の `model` 型定義（抜粋）は `Focus { pub x, pub y }` と公開フィールドで示すが、範囲外構築を型で拒否するには `x`/`y` を非公開にし `Focus::new(x, y) -> Result<Focus, FocusRangeError>` のフォールブルコンストラクタを介す必要がある（抜粋は API を厳密に強制するものではない）。今後 `Focus` を消費するタスク（2.2 のシリアライズ、4.1 のサービス等）はこのフォールブルコンストラクタ/アクセサ経由で扱うこと。
 - 2.2: design.md の `public_url(&self, key: &ObjectKey, req_uri: &RequestUriContext) -> String` 型シグネチャの `RequestUriContext`（`src/api/pagination.rs`）はフィールド非公開でページネーション `Link` ヘッダ専用の私有 `url_with` しか持たず、単純な絶対 URL 生成には使えない。代わりに同ファイルの公開型 `ForwardedOrigin::resolve(...)` （プロキシ転送ヘッダ由来の scheme/host 解決のみを担う分離されたプリミティブ）を使用した。今後 `MediaStore::public_url` や同種のプロキシ尊重 URL 生成を消費/拡張するタスクはこの `ForwardedOrigin` を再利用すること。また `MediaStore` トレイトはこのクレートの既存慣例（`ReceivedActivityStore` 等）に倣い `#[allow(async_fn_in_trait)]` のネイティブ async fn を用いており、`dyn` オブジェクト安全ではない（`Arc<dyn MediaStore>` が必要になった場合は later task 側でボクシングを追加する）。
+- 2.3: 画像処理は `image = "0.25.10"`（`default-features = false`, `features = ["jpeg", "png", "gif", "webp"]`。`avif` 等の重い/不要フォーマットを明示的に除外）と `blurhash = "0.2.3"`（既定機能のみ。`gdk-pixbuf`/`image` 統合機能は任意でオフ）を採用した。両クレートとも `cargo tree` で確認済みでネイティブ/`*-sys` 依存を持たない（Requirement 10.2 の pure-Rust ゲートを満たす）。`ThumbnailSpec` は design.md の抜粋にフィールドが無いため `MediaConfig::thumbnail_target_width`/`thumbnail_target_height` から `target_width`/`target_height: u32` を推論した。`ProcessedImage::content_type` は常に `"image/png"`（サムネイル自体のエンコード形式。原本の content_type とは別物で、アップロード検証側が別途保持する）。サムネイル生成は原寸を超えて拡大しない（`fit_within` ヘルパ、`DynamicImage::resize`/`thumbnail` は使わない）。今後 `MediaProcessor`/`PureRustImageProcessor` を消費するタスク（4.1 のサービス、4.3 のワーカー等）はこれらの型/挙動を前提にすること。

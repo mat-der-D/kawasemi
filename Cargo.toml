@@ -6,9 +6,11 @@ edition = "2024"
 [dependencies]
 axum = "0.8.9"
 base64 = "0.22.1"
+blurhash = "0.2.3"
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
 getrandom = "0.4.3"
 hmac = "0.13.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls"] }
 rsa = "0.9.10"
 serde = { version = "1.0.228", features = ["derive"] }
