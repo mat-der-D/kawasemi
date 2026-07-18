@@ -25,14 +25,20 @@
 //!   (never returns another actor's media), description/focus update, and
 //!   state+derived-metadata reflection (`set_ready`/`set_failed`) — see
 //!   [`media_repository`].
-//!   No processing-job persistence (`ProcessingJobQueue`, task 3.2),
-//!   business logic (`MediaService`, task 4.1), or HTTP surface
+//! - Task 3.2 (`Boundary: ProcessingJobQueue`): the asynchronous processing
+//!   job queue's own persistence — job enqueue, exclusive `FOR UPDATE SKIP
+//!   LOCKED` claim (covering both a fresh queued job and a lease-expired
+//!   `processing` job reclaimed from a crashed worker), completion, and the
+//!   temporary-failure retry/backoff/permanent-failure transition — see
+//!   [`job_queue`].
+//!   No business logic (`MediaService`, task 4.1) or HTTP surface
 //!   (`MediaEndpoints`, task 5.1) exist yet, and this module is not wired
 //!   into `crate::state::AppState`/`crate::bootstrap`/`crate::server` (task
 //!   5.2's job) — see design.md's File Structure Plan for the full planned
 //!   module set.
 
 pub mod image_processor;
+pub mod job_queue;
 pub mod local_fs;
 pub mod media_repository;
 pub mod model;
@@ -40,6 +46,7 @@ pub mod processor;
 pub mod store;
 
 pub use image_processor::PureRustImageProcessor;
+pub use job_queue::{JobOutcome, backoff_delay, claim_due, complete, enqueue, fail_or_retry};
 pub use local_fs::LocalFsStore;
 pub use media_repository::{find_owned, insert_media, set_failed, set_ready, update_metadata};
 pub use model::{
