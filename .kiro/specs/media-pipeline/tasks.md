@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. 基盤の構築（永続スキーマと起動設定）
-- [ ] 1.1 メディアと処理ジョブのマイグレーションを追加する
+- [x] 1.1 メディアと処理ジョブのマイグレーションを追加する
   - `migrations/0004_media.sql` を連番命名・前方追加規約に従って追加し、`media`（識別子・所有アクター・種別・状態・説明・フォーカル座標・原寸法/サムネ寸法・BlurHash・原本/サムネのストレージキー・content_type・タイムスタンプ）と `media_processing_jobs`（対象メディア・状態・試行回数・`run_at`・`locked_at`・最終エラー）のテーブル・制約・インデックスを定義する
   - ジョブ取得効率のため、新規投入分（`queued` かつ `run_at` 到来）とリース期限切れの再取得対象（`processing` かつロック超過）の双方をカバーする `state`・`run_at` の複合インデックスを張り、メディアの `actor_id` にインデックスを張る
   - `spawn_test_app` 起動時にこのマイグレーションが適用され、2 テーブルが存在する状態になる
@@ -119,3 +119,7 @@
   - _Requirements: 6.2, 6.3, 6.4, 7.1, 7.2, 7.3, 8.1, 8.2, 8.3, 8.4, 10.1, 10.3_
   - _Boundary: MediaAttachmentSerializer_
   - _Depends: 5.2, 4.2_
+
+## Implementation Notes
+
+- 1.1: マイグレーションファイル名はタスク本文記載の `0004_media.sql` ではなく `0005_media.sql` を使用した。`0001`〜`0004` は実装済み（`0004` は federation-core が先に確保）で、design.md のファイル番号は `/kiro-spec-batch` 生成時に spec 毎に独立採番されたものであり実装順を反映しない（`migrations/0004_federation.sql` のヘッダコメントに同様の説明が既にある）。今後 media-pipeline の設計文書を参照するタスクは、マイグレーション番号のみ実ファイル `0005_media.sql` に読み替えること。
