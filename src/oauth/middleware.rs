@@ -39,7 +39,7 @@
 //! ## `RequestActorContext::scopes` is `model::ScopeSet` (the placeholder),
 //! not `scope::ScopeSet` (CONCERN — documented judgment call correcting a
 //! wrong assumption)
-//! A shallow reading of `src/oauth/mod.rs`'s `pub use scope::{Scope,
+//! A shallow reading of `src/oauth.rs`'s `pub use scope::{Scope,
 //! ScopeSet};` (with no competing `model::ScopeSet` re-export) might suggest
 //! `crate::oauth::RequestActorContext.scopes` resolves to the real
 //! `scope::ScopeSet`. It does not: `model.rs` (task 2.1) defines and uses
