@@ -26,6 +26,7 @@ pub mod db;
 pub mod domain;
 pub mod error;
 pub mod federation;
+pub mod media;
 pub mod migrate;
 pub mod oauth;
 pub mod runtime;
