@@ -113,7 +113,7 @@
   - _Boundary: ProcessingWorker, ProcessingJobQueue, MediaStore_
   - _Depends: 5.2_
 
-- [ ] 6.3 (P) MediaAttachment 契約テストを実装する
+- [x] 6.3 (P) MediaAttachment 契約テストを実装する
   - 決定的な非決定性境界の上で、処理中（url=null）と完了の双方の MediaAttachment JSON ゴールデンを固定し、focus 既定中央・meta（original/small）・BlurHash・寸法・null 規律が再現可能に一致することを契約ハーネスで検証する
   - 同一入力で安定したゴールデン比較が成立し、契約のドリフトが検出されることを確認できる
   - _Requirements: 6.2, 6.3, 6.4, 7.1, 7.2, 7.3, 8.1, 8.2, 8.3, 8.4, 10.1, 10.3_

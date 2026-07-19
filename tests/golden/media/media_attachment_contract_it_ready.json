@@ -1,0 +1,25 @@
+{
+  "blurhash": "L#HV9Z2Y$5Sgl|azjtf7gcfjfQfj",
+  "description": "a deterministic media-pipeline contract fixture",
+  "id": "424244",
+  "meta": {
+    "focus": {
+      "x": 0.0,
+      "y": 0.0
+    },
+    "original": {
+      "aspect": 1.3333333730697632,
+      "height": 240,
+      "width": 320
+    },
+    "small": {
+      "aspect": 1.3333333730697632,
+      "height": 48,
+      "width": 64
+    }
+  },
+  "preview_url": "https://contract.example.social/media/424244/small",
+  "remote_url": null,
+  "type": "image",
+  "url": "https://contract.example.social/media/424244/original"
+}
