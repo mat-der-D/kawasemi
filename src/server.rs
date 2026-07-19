@@ -45,7 +45,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::FromRef;
+use axum::extract::{DefaultBodyLimit, FromRef};
 use axum::http::{Request, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -63,6 +63,7 @@ use crate::federation::{
     NodeInfoState, OutboxState, WebfingerState, actor_get, actor_inbox, nodeinfo_discovery,
     nodeinfo_document, object_get, outbox_get, shared_inbox, webfinger,
 };
+use crate::media::{self, LocalFsStore, MediaEndpointsState};
 use crate::oauth::apps_endpoint::{self, AppsEndpointState};
 use crate::oauth::authorize_endpoint::{self, AuthorizeEndpointState};
 use crate::oauth::middleware::AuthState;
@@ -110,6 +111,12 @@ const SHARED_INBOX_PATH: &str = "/inbox";
 /// etc. all win over this route for the paths they cover), so this does not
 /// shadow any of the other GET routes mounted below.
 const OBJECT_CATCH_ALL_PATH: &str = "/{*path}";
+
+/// media-pipeline's three endpoints (task 5.2, `_Boundary: MediaModule
+/// wiring_`, design.md's API Contract table): `POST /api/v2/media` (upload),
+/// `GET`/`PUT /api/v1/media/{id}` (poll/update).
+const MEDIA_UPLOAD_PATH: &str = "/api/v2/media";
+const MEDIA_ITEM_PATH: &str = "/api/v1/media/{id}";
 
 /// Rate-limit policy applied to the whole router (task 7.1, api-foundation
 /// Requirements 8.1-8.4): a single-owner deployment ("一人鯖前提") has
@@ -223,6 +230,21 @@ impl FromRef<AppState>
     }
 }
 
+/// Bridges `AppState` to [`MediaEndpointsState<LocalFsStore>`] (task 5.2,
+/// `_Boundary: MediaModule wiring_`), mirroring [`AppsEndpointState`]'s own
+/// `FromRef` bridge above. `LocalFsStore` is the one concrete `MediaStore`
+/// this instance mounts every media endpoint with — see
+/// `crate::media::MediaModule`'s own doc comment.
+impl FromRef<AppState> for MediaEndpointsState<LocalFsStore> {
+    fn from_ref(state: &AppState) -> Self {
+        MediaEndpointsState {
+            media_service: state.media().service(),
+            store: state.media().store().clone(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
 /// Path of the minimal liveness route this task adds (Requirement 1.1).
 pub const HEALTH_PATH: &str = "/health";
 
@@ -236,6 +258,36 @@ struct HealthBody {
 
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, axum::Json(HealthBody { status: "ok" }))
+}
+
+/// media-pipeline's three endpoints (task 5.2), kept as a separate
+/// `.merge()`-able group rather than folded directly into [`router`] itself:
+/// mounting `upload_media` needs to size a [`DefaultBodyLimit`] layer from
+/// `AppConfig::media.max_upload_size_bytes`, a real runtime config value
+/// [`router`] never has access to (it is built before any concrete
+/// `AppState` exists; only [`build_router`] is, so this function is called
+/// from there instead). See `crate::media::endpoints`'s own doc comment
+/// ("CONCERN for task 5.2") for why this layer exists at all: axum's
+/// `Multipart` extractor applies its own hard-coded 2MB body-limit default
+/// unless a `DefaultBodyLimit` layer overrides it on the specific route the
+/// handler is mounted on (`MethodRouter::layer`, scoped to just this one
+/// route — not [`Router::layer`], which would apply to every route
+/// including unrelated ones), and that hard-coded default is smaller than
+/// this config's own default (10 MiB) — so a legitimate upload between
+/// those two sizes would otherwise be silently rejected by axum itself
+/// before `MediaService::accept_upload`'s own size validation ever ran
+/// (Requirements 1.1, 1.4).
+fn media_router(upload_body_limit: usize) -> Router<AppState> {
+    Router::new()
+        .route(
+            MEDIA_UPLOAD_PATH,
+            post(media::upload_media::<LocalFsStore>)
+                .layer(DefaultBodyLimit::max(upload_body_limit)),
+        )
+        .route(
+            MEDIA_ITEM_PATH,
+            get(media::show_media::<LocalFsStore>).put(media::update_media::<LocalFsStore>),
+        )
 }
 
 /// Builds the foundation `Router<AppState>` (Requirement 1.1, and — as of
@@ -317,8 +369,16 @@ pub fn router() -> Router<AppState> {
 pub fn build_router(state: AppState) -> Router {
     let span_state = state.clone();
     let rate_limit_clock = state.runtime().clock.clone();
+    let media_upload_body_limit = state.config().media.max_upload_size_bytes as usize;
 
     router()
+        // task 5.2: mounted here (not inside `router()`) precisely because
+        // sizing `DefaultBodyLimit` needs `state`'s own real config value —
+        // see `media_router`'s own doc comment. Merged before the
+        // rate-limit/`TraceLayer` layers below, so media responses get
+        // wrapped by both exactly the way every other endpoint on this
+        // router already is (Requirement 9.5).
+        .merge(media_router(media_upload_body_limit))
         .layer(rate_limit_layer(
             rate_limit_clock,
             RateLimitPolicy::new(RATE_LIMIT_PER_WINDOW, RATE_LIMIT_WINDOW),
@@ -391,7 +451,17 @@ impl std::error::Error for ServeError {
 /// [`tokio::signal::unix::SignalKind::terminate`]). Unix-only
 /// (`tokio::signal::unix`), consistent with this project's Linux-only
 /// deployment target.
-async fn os_shutdown_signal() {
+///
+/// `pub(crate)` (not private) as of task 5.2: `src/bootstrap.rs` passes this
+/// function directly as every resident `ProcessingWorker`'s own shutdown
+/// signal factory (`crate::media::MediaBackgroundWorkers::spawn`). This is
+/// safe to call more than once concurrently — `tokio::signal::ctrl_c`/
+/// `tokio::signal::unix::signal` both support any number of independent
+/// listeners for the same signal, each observing the same real OS event —
+/// so every worker and [`serve_with_shutdown`]'s own internal call below
+/// observe the identical shutdown trigger without needing a broadcast/watch
+/// channel to fan one call out to several tasks.
+pub(crate) async fn os_shutdown_signal() {
     let mut sigterm = signal(SignalKind::terminate())
         .expect("installing a SIGTERM handler must succeed on a supported Unix target");
     let ctrl_c = tokio::signal::ctrl_c();

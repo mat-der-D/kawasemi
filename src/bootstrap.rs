@@ -96,6 +96,7 @@ use crate::db::{self, DbError};
 use crate::error::AppError;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{self, FederationWiringConfig};
+use crate::media;
 use crate::migrate::{self, MigrateError};
 use crate::oauth::OauthModule;
 use crate::runtime::{RuntimeContext, SnowflakeIdGenerator, SystemClock, SystemRng};
@@ -402,6 +403,25 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     // bind below (Requirement: background tasks must not block startup).
     federation_background.spawn();
 
+    // Assembles the media-pipeline module bundle (task 5.2, Requirements
+    // 1.1, 4.1, 9.5): builds the repository/queue/store/processor/service
+    // wiring (`crate::media::build_media_module`) from this same
+    // `pool`/`runtime`/`cfg.media` every other composition-root component
+    // shares, then starts its resident `ProcessingWorker` pool
+    // (`MediaConfig::worker_concurrency` workers) as detached background
+    // tasks — mirroring `federation_background.spawn()`'s own "never blocks
+    // this function's own startup" contract immediately above. Each
+    // worker's own shutdown signal is `server::os_shutdown_signal` itself
+    // (now `pub(crate)` for exactly this reuse) passed directly as the
+    // signal factory — see `MediaBackgroundWorkers::spawn`'s own doc comment
+    // for why calling it once per worker (plus once more, independently,
+    // inside `serve_with_shutdown`'s own call below) observes the same real
+    // OS shutdown event without needing a broadcast/watch channel to fan one
+    // signal out to several tasks.
+    let (media_module, media_background) =
+        media::build_media_module(pool.clone(), runtime.clone(), cfg.media.clone());
+    media_background.spawn(server::os_shutdown_signal);
+
     Ok(AppState::new(
         pool,
         runtime,
@@ -409,6 +429,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         actor_module,
         oauth_module,
         federation_module,
+        media_module,
     ))
 }
 

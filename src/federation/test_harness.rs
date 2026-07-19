@@ -97,6 +97,7 @@ use crate::config::{
 use crate::db;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{self, FederationWiringConfig};
+use crate::media;
 use crate::migrate;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
@@ -170,6 +171,24 @@ fn unique_pair_schema_name() -> String {
         .as_nanos();
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("kawasemi_federation_pair_{nanos}_{seq}")
+}
+
+/// Generates a `LocalFsStore` root unique to this call, under the OS temp
+/// directory (task 5.2). Mirrors `crate::test_harness::unique_media_storage_root`'s
+/// own doc comment for why: reusing `MediaConfig::storage_root`'s fixed
+/// relative production default here would accumulate never-cleaned files
+/// directly inside this repository's own working directory across every
+/// `spawn_federation_pair` call/`cargo test` run.
+fn unique_pair_media_storage_root() -> std::path::PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "kawasemi_federation_pair_media_storage_{nanos}_{seq}"
+    ))
 }
 
 /// Builds a `DatabaseConfig` pointed at the shared test database, with no
@@ -298,7 +317,7 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         // same way every other startup-config group above is fixed here
         // rather than loaded.
         media: MediaConfig {
-            storage_root: std::path::PathBuf::from("media_storage"),
+            storage_root: unique_pair_media_storage_root(),
             max_upload_size_bytes: 10 * 1024 * 1024,
             thumbnail_target_width: 400,
             thumbnail_target_height: 400,
@@ -348,6 +367,16 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
     );
     federation_background.spawn();
 
+    // Mirrors `crate::test_harness::spawn_test_app`'s own media-pipeline
+    // wiring (task 5.2): builds the module the same way, and starts its
+    // worker pool with a shutdown signal that never resolves — this paired
+    // instance's own listener shutdown (`shutdown_tx` below) is a
+    // single-consumer `oneshot`, which cannot fan out to several worker
+    // tasks either, mirroring `spawn_test_app`'s identical reasoning.
+    let (media_module, media_background) =
+        media::build_media_module(pool.clone(), runtime.clone(), config.media.clone());
+    media_background.spawn(std::future::pending::<()>);
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
@@ -355,6 +384,7 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         actor_module.clone(),
         oauth_module,
         federation_module,
+        media_module,
     );
     let router = server::build_router(state.clone());
 

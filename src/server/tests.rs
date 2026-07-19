@@ -42,6 +42,7 @@ use crate::config::{
 use crate::error::{AppError, GENERIC_SERVER_MESSAGE};
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{FederationWiringConfig, build_federation_module};
+use crate::media;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::telemetry::{REQUEST_ID_FIELD, REQUEST_SPAN_NAME};
@@ -150,6 +151,13 @@ fn test_state(seed: u64) -> AppState {
         ),
         Arc::new(ReqwestFederationHttpClient::new()),
     );
+    // Mirrors the federation-module construction immediately above: builds a
+    // real `MediaModule` against the same `connect_lazy` pool (never dials
+    // it) and deliberately never calls `.spawn()` on the returned
+    // background-workers handle — this suite asserts on router/`TraceLayer`
+    // behavior, not the resident `ProcessingWorker` pool's live behavior.
+    let (media_module, _background_workers_not_spawned) =
+        media::build_media_module(pool.clone(), runtime.clone(), config.media.clone());
     AppState::new(
         pool,
         runtime,
@@ -157,6 +165,7 @@ fn test_state(seed: u64) -> AppState {
         actor_module,
         oauth_module,
         federation_module,
+        media_module,
     )
 }
 

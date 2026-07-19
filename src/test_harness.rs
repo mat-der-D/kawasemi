@@ -95,6 +95,7 @@ use crate::config::{
 use crate::db;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{self, FederationWiringConfig};
+use crate::media;
 use crate::migrate;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
@@ -163,6 +164,34 @@ const TEST_PRUNING_INTERVAL: Duration = Duration::from_secs(5);
 /// [`DEFAULT_TEST_DB_URL`].
 fn base_test_db_url() -> String {
     std::env::var(TEST_DB_URL_ENV).unwrap_or_else(|_| DEFAULT_TEST_DB_URL.to_string())
+}
+
+/// Generates a `LocalFsStore` root unique to this call, under the OS temp
+/// directory rather than a path relative to the process's current working
+/// directory (task 5.2). `crate::config::MediaConfig::storage_root`'s own
+/// production default (`"media_storage"`, resolved against the process's
+/// cwd) is safe for a real single long-running deployment, but every prior
+/// task's own `MediaConfig` fixture in this file used that same literal
+/// relative default without consequence — nothing exercised the real,
+/// composition-root-wired `LocalFsStore` end to end until this task's own
+/// `ProcessingWorker`/mounted endpoints made it actually write bytes.
+/// Reusing that fixed relative path here would mean every `spawn_test_app`
+/// call (and every `cargo test` run) accumulates ever-growing, never-cleaned
+/// files directly inside this repository's own working directory. Mirrors
+/// `src/media/local_fs.rs`'s/`tests/media_endpoints_it.rs`'s own established
+/// `unique_temp_root` convention (counter + wall-clock nanoseconds under
+/// `std::env::temp_dir()`) — left for the OS's own temp-directory lifecycle
+/// to reclaim, exactly like every other test-only temp root in this crate,
+/// rather than adding a bespoke `Drop`-based cleanup path to `TestApp` for
+/// this one config value.
+fn unique_media_storage_root() -> std::path::PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("kawasemi_test_harness_media_storage_{nanos}_{seq}"))
 }
 
 /// Generates a schema name unique to this process/run: a monotonic counter
@@ -552,7 +581,7 @@ pub async fn spawn_test_app() -> TestApp {
         // env parsing, the same way every other startup-config group above
         // is fixed here rather than loaded.
         media: MediaConfig {
-            storage_root: std::path::PathBuf::from("media_storage"),
+            storage_root: unique_media_storage_root(),
             max_upload_size_bytes: 10 * 1024 * 1024,
             thumbnail_target_width: 400,
             thumbnail_target_height: 400,
@@ -610,6 +639,22 @@ pub async fn spawn_test_app() -> TestApp {
     );
     federation_background.spawn();
 
+    // Assembles the media-pipeline module bundle (task 5.2) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::media::build_media_module`), sharing this instance's own
+    // `pool`/`runtime`/`config.media`. Workers are started with a shutdown
+    // signal that never resolves (`std::future::pending`), mirroring
+    // `federation_background.spawn()`'s own established "tests never
+    // explicitly stop this background task; the per-test tokio runtime
+    // simply aborts it when the test function returns" precedent
+    // (`FederationBackgroundTasks`'s own doc comment says as much) — rather
+    // than plumbing this harness's own single-consumer `oneshot`-based HTTP
+    // listener shutdown (which cannot fan out to several worker tasks)
+    // through the worker pool as well.
+    let (media_module, media_background) =
+        media::build_media_module(pool.clone(), runtime.clone(), config.media.clone());
+    media_background.spawn(std::future::pending::<()>);
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
@@ -617,6 +662,7 @@ pub async fn spawn_test_app() -> TestApp {
         actor_module.clone(),
         oauth_module,
         federation_module,
+        media_module,
     );
     let router = server::build_router(state.clone());
 

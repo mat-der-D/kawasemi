@@ -120,6 +120,28 @@
 //!   CONCERN task 5.2 must address (axum's built-in 2MB body-limit default
 //!   vs. `MediaConfig::max_upload_size_bytes`).
 
+//! - Task 5.2 (`Boundary: MediaModule wiring`): the Composition-Root wiring
+//!   itself — [`MediaModule`] (the `AppState`-shared handle:
+//!   `Arc<MediaService<LocalFsStore>>` + `LocalFsStore`) and
+//!   [`build_media_module`], which constructs every media component with one
+//!   concrete production store/processor pair
+//!   ([`LocalFsStore`]/[`PureRustImageProcessor`]) and returns the
+//!   not-yet-started [`MediaBackgroundWorkers`] pool (one `ProcessingWorker`
+//!   per `MediaConfig::worker_concurrency`) — mirroring
+//!   `crate::federation::module`'s identical `FederationModule`/
+//!   `build_federation_module`/`FederationBackgroundTasks` shape. `src/state.rs`
+//!   stores the resulting [`MediaModule`] on `AppState`; `src/bootstrap.rs`
+//!   (production) and `src/test_harness.rs` (`spawn_test_app`) both call
+//!   [`build_media_module`] and then [`MediaBackgroundWorkers::spawn`] to
+//!   actually start the worker pool; `src/server.rs` mounts
+//!   [`endpoints::upload_media`]/[`endpoints::show_media`]/
+//!   [`endpoints::update_media`] (monomorphized over [`LocalFsStore`]) behind
+//!   the same cross-cutting layers (Bearer auth, error conversion, rate
+//!   limiting) every other endpoint on the real router sits behind, sized
+//!   with a `DefaultBodyLimit` layer from `MediaConfig::max_upload_size_bytes`
+//!   (resolving the CONCERN task 5.1 documented — see `endpoints.rs`'s own
+//!   doc comment).
+
 pub mod endpoints;
 pub mod image_processor;
 pub mod job_queue;
@@ -131,6 +153,15 @@ pub mod serializer;
 pub mod service;
 pub mod store;
 pub mod worker;
+
+use std::future::Future;
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
+
+use sqlx::PgPool;
+
+use crate::config::MediaConfig;
+use crate::runtime::RuntimeContext;
 
 pub use endpoints::{
     MediaEndpointsState, ResolvedOrigin, UpdateMediaRequest, show_media, update_media, upload_media,
@@ -152,3 +183,157 @@ pub use serializer::{
 pub use service::{MediaService, MetadataPatch, UploadInput};
 pub use store::{MediaStore, ObjectKey, ObjectVariant};
 pub use worker::{DEFAULT_POLL_INTERVAL, ProcessingWorker, WorkerOutcome};
+
+/// The media-pipeline module bundle `AppState` shares across concurrent
+/// request handlers (design.md's `MediaModule(bootstrap wiring)` component;
+/// task 5.2, Requirements 1.1, 4.1, 9.5). Bundles exactly what
+/// `src/server.rs`'s mounted endpoints need: the shared, `Arc`-wrapped
+/// [`MediaService`] business layer and the shared [`LocalFsStore`] (needed
+/// again directly by [`serializer::to_media_attachment`] for proxy-aware
+/// URL resolution — see `endpoints.rs`'s own `MediaEndpointsState<S>` doc
+/// comment for why both are needed, not just the service). `LocalFsStore` is
+/// the one concrete [`MediaStore`] this instance mounts every media-generic
+/// component with (mirroring `crate::federation::module`'s "one concrete
+/// type per non-`dyn`-safe trait" convention, task 4.1's/4.3's own
+/// established precedent for `MediaService<S: MediaStore>`/
+/// `ProcessingWorker<S, P>`).
+///
+/// This type does not construct its own dependencies — [`build_media_module`]
+/// does that (mirrors `AppState::new`'s own "bundle, don't build" contract,
+/// and `FederationModule::new`'s identical precedent).
+pub struct MediaModule {
+    service: Arc<MediaService<LocalFsStore>>,
+    store: LocalFsStore,
+}
+
+impl MediaModule {
+    /// The shared `MediaService` handle `src/server.rs`'s
+    /// `FromRef<AppState> for MediaEndpointsState<LocalFsStore>` bridge
+    /// clones into every mounted media endpoint's own state — an `Arc`
+    /// clone (cheap, one atomic increment), not a freshly constructed
+    /// service.
+    pub fn service(&self) -> Arc<MediaService<LocalFsStore>> {
+        Arc::clone(&self.service)
+    }
+
+    /// The shared `LocalFsStore` handle the same bridge clones for
+    /// `MediaEndpointsState::store` (needed directly by
+    /// `MediaAttachmentSerializer::to_media_attachment`, not routed through
+    /// `MediaService`).
+    pub fn store(&self) -> &LocalFsStore {
+        &self.store
+    }
+}
+
+/// The not-yet-started resident `ProcessingWorker` pool [`build_media_module`]
+/// returns alongside [`MediaModule`] — mirrors
+/// `crate::federation::module::FederationBackgroundTasks`'s identical
+/// "constructing is synchronous and cheap; only [`Self::spawn`] actually
+/// starts anything" contract, so constructing this never blocks
+/// `bootstrap()`'s/`spawn_test_app`'s own startup. One worker per
+/// `MediaConfig::worker_concurrency` — Requirement 4.2's exclusive `FOR
+/// UPDATE SKIP LOCKED` claim is exactly what lets more than one of these
+/// safely run concurrently against the same DB queue.
+pub struct MediaBackgroundWorkers {
+    workers: Vec<ProcessingWorker<LocalFsStore, PureRustImageProcessor>>,
+    poll_interval: StdDuration,
+}
+
+impl MediaBackgroundWorkers {
+    /// Starts every worker in the pool as its own detached `tokio::spawn`
+    /// task and returns immediately (never awaits any of them) — the
+    /// caller's own startup sequence is never blocked on this call,
+    /// mirroring `FederationBackgroundTasks::spawn`'s identical
+    /// non-blocking contract.
+    ///
+    /// Unlike `FederationBackgroundTasks::spawn` (whose delivery-worker loop
+    /// has no shutdown hook at all), [`ProcessingWorker::run`] was built
+    /// (task 4.3) specifically to accept an injectable shutdown signal
+    /// mirroring `crate::server::serve_with_shutdown_and_signal`'s
+    /// convention — see `worker.rs`'s own doc comment, "`run`'s shutdown
+    /// signal", which explicitly names this task as the one expected to
+    /// wire a real signal through rather than leaving that parameter
+    /// permanently unexercised. `signal_factory` is called once *per
+    /// worker* (not once total) because each [`ProcessingWorker::run`] call
+    /// needs to own a distinct `Future` — `crate::server::os_shutdown_signal`
+    /// (made `pub(crate)` by this task specifically for this reuse, passed
+    /// directly as this factory by `src/bootstrap.rs`) supports exactly
+    /// this: tokio's `ctrl_c()`/`signal(SignalKind::terminate())` both
+    /// support any number of concurrent independent listeners, so calling it
+    /// once per worker (plus once more, independently, inside
+    /// `crate::server::serve_with_shutdown`'s own internal call) is not a
+    /// race — every listener observes the same real OS signal, and an
+    /// in-flight `run_once` is always allowed to finish before a worker's
+    /// own loop returns (drain, not abort — see `worker.rs`'s doc comment).
+    /// `src/test_harness.rs` passes a factory that never resolves
+    /// (`std::future::pending`) instead, mirroring
+    /// `FederationBackgroundTasks`'s own tests-never-stop-the-worker
+    /// precedent (a `#[tokio::test]`'s own per-test runtime simply aborts
+    /// every still-running spawned task, detached workers included, when
+    /// the test function returns).
+    pub fn spawn<F, Fut>(self, signal_factory: F)
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        for worker in self.workers {
+            let signal = signal_factory();
+            let poll_interval = self.poll_interval;
+            tokio::spawn(async move {
+                worker.run(poll_interval, signal).await;
+            });
+        }
+    }
+}
+
+/// Assembles every media component with one concrete production
+/// store/processor pair ([`LocalFsStore`]/[`PureRustImageProcessor`]),
+/// bundles them as a [`MediaModule`], and returns the not-yet-started
+/// [`MediaBackgroundWorkers`] pool (task 5.2, Requirements 1.1, 4.1). Shared
+/// by `src/bootstrap.rs` (production) and `src/test_harness.rs`
+/// (`spawn_test_app`), mirroring
+/// `crate::federation::module::build_federation_module`'s identical "one
+/// composition function, two callers" precedent.
+///
+/// `pool`/`runtime` are already-established (this function never opens its
+/// own pool or builds its own `RuntimeContext`) — threaded through from
+/// whichever stage of `build_state`/`spawn_test_app` already built them,
+/// mirroring `build_federation_module`'s identical parameter contract.
+/// `config` is `AppConfig.media` (task 1.2): `storage_root` seeds
+/// [`LocalFsStore::new`]; every worker shares one clone of `config` (and of
+/// `store`/`processor` — `LocalFsStore` is cheap to clone, a `PathBuf`
+/// underneath; `PureRustImageProcessor` is zero-sized and `Copy`).
+pub fn build_media_module(
+    pool: PgPool,
+    runtime: RuntimeContext,
+    config: MediaConfig,
+) -> (MediaModule, MediaBackgroundWorkers) {
+    let store = LocalFsStore::new(config.storage_root.clone());
+    let processor = PureRustImageProcessor::new();
+
+    let service = Arc::new(MediaService::new(
+        pool.clone(),
+        runtime.clone(),
+        config.clone(),
+        store.clone(),
+    ));
+
+    let workers = (0..config.worker_concurrency)
+        .map(|_| {
+            ProcessingWorker::new(
+                pool.clone(),
+                runtime.clone(),
+                config.clone(),
+                store.clone(),
+                processor,
+            )
+        })
+        .collect();
+
+    let module = MediaModule { service, store };
+    let background = MediaBackgroundWorkers {
+        workers,
+        poll_interval: DEFAULT_POLL_INTERVAL,
+    };
+    (module, background)
+}

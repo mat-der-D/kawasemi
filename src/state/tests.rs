@@ -29,6 +29,7 @@ use crate::config::{
 };
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{FederationModule, FederationWiringConfig, build_federation_module};
+use crate::media::{self, MediaModule};
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 
@@ -172,6 +173,26 @@ fn sample_federation_module(
     federation
 }
 
+/// Builds a `MediaModule` sharing `pool`/`runtime`/`config.media` (task
+/// 5.2), mirroring `sample_federation_module`'s own "no real I/O beyond what
+/// construction itself needs" property: `build_media_module`'s own
+/// constructors only ever store `pool`/config values (never dial it), so
+/// this is safe against the same `connect_lazy` pool this suite's other
+/// fixtures use. The returned background-workers handle is deliberately
+/// dropped without calling `.spawn()` for the same reason
+/// `sample_federation_module` never spawns its own background tasks — these
+/// tests assert only on `AppState`'s own bundling/cloning behavior, not on
+/// the resident `ProcessingWorker` pool's live behavior.
+fn sample_media_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    config: &AppConfig,
+) -> MediaModule {
+    let (media, _background_workers_not_spawned) =
+        media::build_media_module(pool, runtime, config.media.clone());
+    media
+}
+
 /// Requirements 1.1, 3.3, 5.5, 5.6: downstream code must be able to retrieve
 /// the pool, the injection boundaries (via `RuntimeContext`), and the
 /// validated config values from `AppState`, unchanged from what was passed
@@ -186,8 +207,17 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
     let oauth = sample_oauth_module(pool.clone(), runtime.clone(), &config);
     let federation =
         sample_federation_module(pool.clone(), runtime.clone(), Arc::clone(actor.directory()));
+    let media = sample_media_module(pool.clone(), runtime.clone(), &config);
 
-    let state = AppState::new(pool, runtime, config.clone(), actor, oauth, federation);
+    let state = AppState::new(
+        pool,
+        runtime,
+        config.clone(),
+        actor,
+        oauth,
+        federation,
+        media,
+    );
 
     // Config values are retrievable and match what was supplied.
     assert_eq!(state.config().server.domain, "state.example.test");
@@ -238,8 +268,9 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
     let oauth = sample_oauth_module(pool.clone(), runtime.clone(), &config);
     let federation =
         sample_federation_module(pool.clone(), runtime.clone(), Arc::clone(actor.directory()));
+    let media = sample_media_module(pool.clone(), runtime.clone(), &config);
 
-    let state = AppState::new(pool, runtime, config, actor, oauth, federation);
+    let state = AppState::new(pool, runtime, config, actor, oauth, federation, media);
     assert_eq!(Arc::strong_count(&state.inner), 1);
 
     let cloned = state.clone();

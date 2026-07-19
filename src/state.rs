@@ -34,6 +34,7 @@ use sqlx::PgPool;
 use crate::actor::ActorModule;
 use crate::config::AppConfig;
 use crate::federation::FederationModule;
+use crate::media::MediaModule;
 use crate::oauth::OauthModule;
 use crate::runtime::RuntimeContext;
 
@@ -51,6 +52,11 @@ struct AppStateInner {
     /// concrete production type, shared the same way `actor`/`oauth` are —
     /// see `crate::federation::FederationModule`'s own doc comment.
     federation: FederationModule,
+    /// media-pipeline's module bundle (task 5.2, Requirements 1.1, 4.1,
+    /// 9.5): the shared `MediaService`/`LocalFsStore` handle
+    /// `src/server.rs`'s mounted media endpoints derive their own state
+    /// from — see `crate::media::MediaModule`'s own doc comment.
+    media: MediaModule,
 }
 
 /// Immutable, cheaply-cloneable shared handle bundling the database
@@ -71,9 +77,11 @@ impl AppState {
     /// already-constructed runtime context, an already-validated config, an
     /// already-assembled actor-model service bundle, and an
     /// already-assembled OAuth service bundle (task 7.1, api-foundation's
-    /// `OauthModule`). Callers (the Bootstrap composition root, task 7.4/6.1
-    /// and 7.1) are responsible for constructing each of these first — this
-    /// constructor only bundles them.
+    /// `OauthModule`), an already-assembled federation-core port bundle, and
+    /// an already-assembled media-pipeline module bundle (task 5.2). Callers
+    /// (the Bootstrap composition root, task 7.4/6.1/7.1/5.2) are
+    /// responsible for constructing each of these first — this constructor
+    /// only bundles them.
     pub fn new(
         pool: PgPool,
         runtime: RuntimeContext,
@@ -81,6 +89,7 @@ impl AppState {
         actor: ActorModule,
         oauth: OauthModule,
         federation: FederationModule,
+        media: MediaModule,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -90,6 +99,7 @@ impl AppState {
                 actor,
                 oauth,
                 federation,
+                media,
             }),
         }
     }
@@ -146,5 +156,14 @@ impl AppState {
     /// own doc comment for the full downstream-registration surface.
     pub fn federation(&self) -> &FederationModule {
         &self.inner.federation
+    }
+
+    /// The shared media-pipeline module bundle (task 5.2, Requirements 1.1,
+    /// 4.1, 9.5): `src/server.rs`'s `FromRef<AppState> for
+    /// MediaEndpointsState<LocalFsStore>` bridge derives every mounted media
+    /// endpoint's own state from this handle, rather than each constructing
+    /// its own `MediaService`/`LocalFsStore`.
+    pub fn media(&self) -> &MediaModule {
+        &self.inner.media
     }
 }
