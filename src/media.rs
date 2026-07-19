@@ -31,11 +31,28 @@
 //!   `processing` job reclaimed from a crashed worker), completion, and the
 //!   temporary-failure retry/backoff/permanent-failure transition — see
 //!   [`job_queue`].
-//!   No business logic (`MediaService`, task 4.1) or HTTP surface
-//!   (`MediaEndpoints`, task 5.1) exist yet, and this module is not wired
-//!   into `crate::state::AppState`/`crate::bootstrap`/`crate::server` (task
-//!   5.2's job) — see design.md's File Structure Plan for the full planned
-//!   module set.
+//! - Task 4.1 (`Boundary: MediaService`): the media business-service layer —
+//!   upload acceptance (format/size/focus validation -> original storage via
+//!   [`MediaStore::put`] -> [`media_repository::insert_media`] in
+//!   [`MediaState::Processing`] -> [`job_queue::enqueue`]), owner-scoped
+//!   status lookup, and description/focus metadata update (accepted while
+//!   still `processing`, out-of-range focus rejected the same way at both
+//!   upload and update time) — see [`service`] and its
+//!   [`service::MediaService`]. `MediaService<S: MediaStore>` takes its
+//!   store as a generic type parameter rather than `Arc<dyn MediaStore>`
+//!   (`MediaStore` is not `dyn`-object-safe, mirroring
+//!   `src/federation/`'s established precedent for other non-object-safe
+//!   async ports — see `service.rs`'s own doc comment). design.md's
+//!   `UploadInput`/`MetadataPatch` are named but never field-defined in the
+//!   excerpted Service Interface; this task defines both minimally (see
+//!   `service.rs`'s doc comment, "`UploadInput`/`MetadataPatch` shapes",
+//!   for the exact shape chosen and why `focus` is a raw `(f32, f32)`
+//!   coordinate pair on both, validated internally via [`Focus::new`]
+//!   rather than pre-validated by the caller).
+//!   No HTTP surface (`MediaEndpoints`, task 5.1) exists yet, and this
+//!   module is not wired into `crate::state::AppState`/`crate::bootstrap`/
+//!   `crate::server` (task 5.2's job) — see design.md's File Structure Plan
+//!   for the full planned module set.
 
 pub mod image_processor;
 pub mod job_queue;
@@ -43,6 +60,7 @@ pub mod local_fs;
 pub mod media_repository;
 pub mod model;
 pub mod processor;
+pub mod service;
 pub mod store;
 
 pub use image_processor::PureRustImageProcessor;
@@ -54,4 +72,5 @@ pub use model::{
     MediaMeta, MediaState, MediaType, ProcessingJob,
 };
 pub use processor::{MediaProcessor, ProcessedImage, ThumbnailSpec};
+pub use service::{MediaService, MetadataPatch, UploadInput};
 pub use store::{MediaStore, ObjectKey, ObjectVariant};
