@@ -105,7 +105,22 @@
 //!   `tests/golden/media/` (Requirements 8.3, 8.4). Does not implement
 //!   `ProcessingWorker` (task 4.3) or any HTTP surface/runtime wiring
 //!   (tasks 5.1/5.2) — this module has no `axum`/router/`AppState` code.
+//! - Task 5.1 (`Boundary: MediaEndpoints`): the HTTP surface — `POST
+//!   /api/v2/media` ([`upload_media`]), `GET /api/v1/media/:id`
+//!   ([`show_media`]), `PUT /api/v1/media/:id` ([`update_media`]), all
+//!   requiring `write:media` (reusing api-foundation's
+//!   `oauth::middleware::RequiredActor`/`require_scope`, never
+//!   reimplementing auth/scope), returning `202`/`206`/`200`/`404`/`422`
+//!   per design.md's System Flows, with every failure rendered through
+//!   `AppError`'s already-wired Mastodon-compatible error body — see
+//!   [`endpoints`] and [`MediaEndpointsState`]. Not yet mounted on the live
+//!   application router (task 5.2's job); see `endpoints`'s own doc comment
+//!   for the test-local-router precedent this task's own integration
+//!   coverage (`tests/media_endpoints_it.rs`) follows, and for a documented
+//!   CONCERN task 5.2 must address (axum's built-in 2MB body-limit default
+//!   vs. `MediaConfig::max_upload_size_bytes`).
 
+pub mod endpoints;
 pub mod image_processor;
 pub mod job_queue;
 pub mod local_fs;
@@ -117,6 +132,9 @@ pub mod service;
 pub mod store;
 pub mod worker;
 
+pub use endpoints::{
+    MediaEndpointsState, ResolvedOrigin, UpdateMediaRequest, show_media, update_media, upload_media,
+};
 pub use image_processor::PureRustImageProcessor;
 pub use job_queue::{JobOutcome, backoff_delay, claim_due, complete, enqueue, fail_or_retry};
 pub use local_fs::LocalFsStore;
