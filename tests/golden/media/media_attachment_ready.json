@@ -1,0 +1,25 @@
+{
+  "blurhash": "LKO2?U%2Tw=w]~RBVZRi};RPxuwH",
+  "description": "a golden retriever mid-fetch",
+  "id": "2002",
+  "meta": {
+    "focus": {
+      "x": 0.25,
+      "y": -0.5
+    },
+    "original": {
+      "aspect": 1.7777777910232544,
+      "height": 1080,
+      "width": 1920
+    },
+    "small": {
+      "aspect": 1.7777777910232544,
+      "height": 225,
+      "width": 400
+    }
+  },
+  "preview_url": "https://example.social/media/2002/small",
+  "remote_url": null,
+  "type": "image",
+  "url": "https://example.social/media/2002/original"
+}

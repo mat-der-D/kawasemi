@@ -53,6 +53,24 @@
 //!   module is not wired into `crate::state::AppState`/`crate::bootstrap`/
 //!   `crate::server` (task 5.2's job) — see design.md's File Structure Plan
 //!   for the full planned module set.
+//! - Task 4.2 (`Boundary: MediaAttachmentSerializer`): the pure
+//!   Mastodon-compatible MediaAttachment JSON serializer —
+//!   [`serializer::to_media_attachment`]/[`serializer::to_json`], consuming
+//!   an already-persisted [`Media`] plus a [`MediaStore`] (for proxy-aware
+//!   `url`/`preview_url` resolution via [`MediaStore::public_url`]) and a
+//!   [`crate::api::pagination::ForwardedOrigin`] — see [`serializer`]. `url`
+//!   is `null` unless `Media::state == MediaState::Ready`; `preview_url` is
+//!   `null` until thumbnail dimensions are actually confirmed (a narrower,
+//!   data-driven gate — see `serializer.rs`'s own doc comment for why this
+//!   is not simply the same `state == Ready` check repeated); `meta.original`/
+//!   `meta.small` are omitted (not `null`) until confirmed; `meta.focus`
+//!   defaults to center via [`Focus::default`]; `remote_url` is always
+//!   `null` (no remote-media-cache concept in this MVP). Both the
+//!   `Processing` and `Ready` variants of this contract are registered as
+//!   goldens with api-foundation's [`crate::contract`] harness under
+//!   `tests/golden/media/` (Requirements 8.3, 8.4). Does not implement
+//!   `ProcessingWorker` (task 4.3) or any HTTP surface/runtime wiring
+//!   (tasks 5.1/5.2) — this module has no `axum`/router/`AppState` code.
 
 pub mod image_processor;
 pub mod job_queue;
@@ -60,6 +78,7 @@ pub mod local_fs;
 pub mod media_repository;
 pub mod model;
 pub mod processor;
+pub mod serializer;
 pub mod service;
 pub mod store;
 
@@ -72,5 +91,8 @@ pub use model::{
     MediaMeta, MediaState, MediaType, ProcessingJob,
 };
 pub use processor::{MediaProcessor, ProcessedImage, ThumbnailSpec};
+pub use serializer::{
+    DimensionsJson, FocusJson, MediaAttachmentJson, MediaMetaJson, to_json, to_media_attachment,
+};
 pub use service::{MediaService, MetadataPatch, UploadInput};
 pub use store::{MediaStore, ObjectKey, ObjectVariant};
