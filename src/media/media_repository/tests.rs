@@ -11,7 +11,7 @@
 //! actor rows keeps these tests representative of the real call shape a
 //! future `MediaService`, task 4.1, will drive).
 
-use super::{find_owned, insert_media, set_failed, set_ready, update_metadata};
+use super::{find_by_id, find_owned, insert_media, set_failed, set_ready, update_metadata};
 use crate::actor::model::{ActorState, ActorType, Handle, LocalActor};
 use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
@@ -391,6 +391,57 @@ async fn insert_media_round_trips_an_initial_description() {
         .expect("find_owned must succeed")
         .expect("media must be found");
     assert_eq!(found.description.as_deref(), Some("a photo of a cat"));
+
+    app.cleanup().await;
+}
+
+/// Task 4.3 addition: `find_by_id` returns the row regardless of which
+/// actor owns it (unlike `find_owned`, no ownership scoping is applied at
+/// all) — a `ProcessingWorker` has only a bare `media_id` from its claimed
+/// job, never a requesting actor.
+#[tokio::test]
+async fn find_by_id_returns_the_media_row_without_any_owner_scoping() {
+    let app = spawn_test_app().await;
+    let owning_actor = create_test_actor(&app, "judy").await;
+    let unrelated_actor = create_test_actor(&app, "kevin").await;
+
+    let media_id = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+    let media = sample_media(media_id, owning_actor, now);
+    insert_media(&app.pool, &media, "9/original", "image/png")
+        .await
+        .expect("insert_media must succeed");
+
+    let found = find_by_id(&app.pool, media_id)
+        .await
+        .expect("find_by_id must succeed")
+        .expect("media must be found even though the caller supplies no actor at all");
+    assert_eq!(found.id, media_id);
+    assert_eq!(found.actor_id, owning_actor);
+
+    // Sanity check that this really is unscoped, not accidentally still
+    // filtering by some ambient actor: an unrelated actor querying via
+    // `find_owned` must NOT see this row, while `find_by_id` does not even
+    // accept an actor argument to filter by.
+    let not_owned = find_owned(&app.pool, media_id, unrelated_actor)
+        .await
+        .expect("find_owned must succeed");
+    assert!(not_owned.is_none());
+
+    app.cleanup().await;
+}
+
+/// `find_by_id` returns `Ok(None)` for a `media_id` that was never
+/// inserted, the same "not found" contract `find_owned` has for that case.
+#[tokio::test]
+async fn find_by_id_returns_none_for_a_nonexistent_media_id() {
+    let app = spawn_test_app().await;
+    let missing = crate::domain::Id::from_i64(999_999_999);
+
+    let found = find_by_id(&app.pool, missing)
+        .await
+        .expect("find_by_id must succeed even for a nonexistent id");
+    assert!(found.is_none());
 
     app.cleanup().await;
 }

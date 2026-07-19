@@ -107,6 +107,18 @@ async fn read_job_row(
     .expect("the job row must still exist")
 }
 
+/// Reads back a job row's `last_error` column directly (Requirement 4.5;
+/// task 4.3's `error_message` parameter addition to `fail_or_retry` — see
+/// this module's doc comment, "`fail_or_retry` gains an `error_message`
+/// parameter").
+async fn read_last_error(pool: &sqlx::PgPool, job_id: Id) -> Option<String> {
+    sqlx::query_scalar("SELECT last_error FROM media_processing_jobs WHERE id = $1")
+        .bind(job_id.as_i64())
+        .fetch_one(pool)
+        .await
+        .expect("the job row must still exist")
+}
+
 /// Requirements 4.1, 4.2: `enqueue` inserts a `queued` row with `attempts =
 /// 0` that `claim_due` can immediately pick up when `run_at <= now`.
 #[tokio::test]
@@ -221,7 +233,7 @@ async fn fail_or_retry_below_max_attempts_retries_with_growing_backoff() {
         .expect("job must be claimable");
     let original_run_at = job.run_at;
 
-    let outcome1 = fail_or_retry(&app.pool, &job, 10, now)
+    let outcome1 = fail_or_retry(&app.pool, &job, 10, now, "simulated transient failure #1")
         .await
         .expect("fail_or_retry must succeed");
     assert_eq!(outcome1, JobOutcome::Retried);
@@ -236,6 +248,11 @@ async fn fail_or_retry_below_max_attempts_retries_with_growing_backoff() {
         locked_at1.is_none(),
         "a retried job must have its lock cleared"
     );
+    assert_eq!(
+        read_last_error(&app.pool, job.id).await.as_deref(),
+        Some("simulated transient failure #1"),
+        "a retried job must also have its diagnostic message persisted (Requirement 4.5)"
+    );
 
     // Claim it again (it's due again once we advance `now` to its new
     // run_at) and fail it a second time; the backoff must grow further.
@@ -248,9 +265,15 @@ async fn fail_or_retry_below_max_attempts_retries_with_growing_backoff() {
         "reclaiming here is a normal due-claim, not a reclaim"
     );
 
-    let outcome2 = fail_or_retry(&app.pool, &job2, 10, run_at1)
-        .await
-        .expect("fail_or_retry must succeed");
+    let outcome2 = fail_or_retry(
+        &app.pool,
+        &job2,
+        10,
+        run_at1,
+        "simulated transient failure #2",
+    )
+    .await
+    .expect("fail_or_retry must succeed");
     assert_eq!(outcome2, JobOutcome::Retried);
     let (state2, attempts2, run_at2, _locked_at2) = read_job_row(&app.pool, job.id).await;
     assert_eq!(state2, "queued");
@@ -284,7 +307,7 @@ async fn fail_or_retry_at_max_attempts_fails_the_job() {
         .expect("job must be claimable");
 
     // max_attempts = 1: the very first failure already reaches the limit.
-    let outcome = fail_or_retry(&app.pool, &job, 1, now)
+    let outcome = fail_or_retry(&app.pool, &job, 1, now, "simulated terminal failure")
         .await
         .expect("fail_or_retry must succeed");
     assert_eq!(outcome, JobOutcome::Failed);
@@ -295,6 +318,12 @@ async fn fail_or_retry_at_max_attempts_fails_the_job() {
     assert!(
         locked_at.is_none(),
         "a failed job must have its lock cleared"
+    );
+    assert_eq!(
+        read_last_error(&app.pool, job.id).await.as_deref(),
+        Some("simulated terminal failure"),
+        "a terminally failed job must also have its diagnostic message persisted \
+         (Requirement 4.5's \"原因特定に十分な診断情報を出力する\")"
     );
 
     // A failed job must never be claimable again.
@@ -405,7 +434,7 @@ async fn repeated_reclaims_accumulate_into_fail_or_retry_s_own_attempts_accounti
 
     // A worker finally observes a real transient failure: max_attempts = 3
     // means this third increment (2 -> 3) hits the cap and fails the job.
-    let outcome = fail_or_retry(&app.pool, &reclaim2, 3, t2)
+    let outcome = fail_or_retry(&app.pool, &reclaim2, 3, t2, "simulated third failure")
         .await
         .expect("fail_or_retry must succeed");
     assert_eq!(

@@ -374,6 +374,38 @@ pub async fn find_owned(
     Ok(row.map(row_to_media))
 }
 
+/// Looks up the [`Media`] persisted under `media_id` with **no** owner
+/// scoping at all (task 4.3 addition, `Boundary: ProcessingWorker`; unlike
+/// [`find_owned`], which this module's doc comment already documents).
+/// `media_processing_jobs` (`migrations/0005_media.sql`) carries only a bare
+/// `media_id`, never an `actor_id` — a `ProcessingWorker` claiming a job via
+/// `job_queue::claim_due` is not acting on behalf of any particular
+/// requesting actor, so it structurally cannot supply the `actor_id`
+/// [`find_owned`] requires. This mirrors the same "extend the previously-
+/// committed repository in the direction a later task actually needs,
+/// document why" convention this module's own doc comment already applied
+/// to `insert_media`/`update_metadata`/`set_ready`/`set_failed`.
+///
+/// Returns `Ok(None)` only when `media_id` does not exist at all — there is
+/// no "found but not yours" case to collapse into that same `None` here,
+/// since this function performs no ownership check whatsoever. Not intended
+/// for any HTTP-reachable code path (`MediaEndpoints`, task 5.1, must keep
+/// using [`find_owned`]) — only a same-process worker acting on a job it
+/// already exclusively holds is expected to call this.
+pub async fn find_by_id(pool: &PgPool, media_id: Id) -> Result<Option<Media>, AppError> {
+    let row: Option<MediaRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        media_row_columns!(),
+        " FROM media WHERE id = $1"
+    ))
+    .bind(media_id.as_i64())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_query_error)?;
+
+    Ok(row.map(row_to_media))
+}
+
 /// Updates the description and/or focal point of the [`Media`] persisted
 /// under `media_id`, scoped to `actor_id` (Requirements 3.1, 3.3, 3.4):
 /// returns the updated [`Media`] on success, or `Ok(None)` when `media_id`

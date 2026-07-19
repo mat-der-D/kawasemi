@@ -53,6 +53,40 @@
 //!   module is not wired into `crate::state::AppState`/`crate::bootstrap`/
 //!   `crate::server` (task 5.2's job) — see design.md's File Structure Plan
 //!   for the full planned module set.
+//! - Task 4.3 (`Boundary: ProcessingWorker`): the resident DB-queue-
+//!   consuming worker — [`worker::ProcessingWorker`], generic over `S:
+//!   MediaStore, P: MediaProcessor` (mirroring [`service::MediaService`]'s
+//!   own generic-over-store precedent) — see [`worker`]. Its
+//!   [`worker::ProcessingWorker::run_once`] claims and fully resolves at
+//!   most one due job (claim -> load original -> `process_image` -> store
+//!   thumbnail -> `set_ready` -> `complete`), and
+//!   [`worker::ProcessingWorker::run`] is the actual resident poll loop
+//!   built on top of it, accepting an injectable shutdown signal shaped
+//!   like [`crate::server::serve_with_shutdown_and_signal`]'s (task 5.2 can
+//!   wire this in without modification). Classifies every failure
+//!   `attempt` can produce into design.md's flowchart's two distinct edges:
+//!   a storage-boundary I/O failure is `-->|transient fail| Retry` (goes
+//!   through `job_queue::fail_or_retry`'s normal attempts-budget/backoff
+//!   accounting), while `MediaProcessor::process_image` returning `Err`
+//!   (Requirement 6.5's decode/generation failure) is
+//!   `-->|decode fail| Failed` — forced immediately terminal by calling
+//!   `fail_or_retry` with `max_attempts = 0`, bypassing the retry budget
+//!   entirely rather than merely reaching it faster. Closes the
+//!   `last_error` diagnostic gap tasks.md's "3.2 レビュー所見" flagged
+//!   (Requirement 4.5): `job_queue::fail_or_retry` (task 3.2's module) is
+//!   extended here with an `error_message: &str` parameter it now persists
+//!   into `media_processing_jobs.last_error` on both its branches, built by
+//!   this module's `diagnostic_message` helper — paired with a
+//!   `tracing::warn!`/`tracing::error!` event on every failure path.
+//!   Idempotent re-runs (Requirement 4.6) short-circuit on `Media::state`
+//!   (the truth source) rather than re-deriving/re-storing anything once a
+//!   job's media already left `Processing`. Also adds
+//!   [`media_repository::find_by_id`] (an unscoped-by-actor lookup
+//!   `media_repository.rs`'s task 3.1 implementation did not previously
+//!   expose — a worker has only a bare `media_id` from its claimed job,
+//!   never a requesting actor). Does not wire itself into `AppState`/
+//!   `bootstrap.rs`/`server.rs` (task 5.2) and does not implement
+//!   `MediaEndpoints` (task 5.1).
 //! - Task 4.2 (`Boundary: MediaAttachmentSerializer`): the pure
 //!   Mastodon-compatible MediaAttachment JSON serializer —
 //!   [`serializer::to_media_attachment`]/[`serializer::to_json`], consuming
@@ -81,11 +115,14 @@ pub mod processor;
 pub mod serializer;
 pub mod service;
 pub mod store;
+pub mod worker;
 
 pub use image_processor::PureRustImageProcessor;
 pub use job_queue::{JobOutcome, backoff_delay, claim_due, complete, enqueue, fail_or_retry};
 pub use local_fs::LocalFsStore;
-pub use media_repository::{find_owned, insert_media, set_failed, set_ready, update_metadata};
+pub use media_repository::{
+    find_by_id, find_owned, insert_media, set_failed, set_ready, update_metadata,
+};
 pub use model::{
     Dimensions, FOCUS_MAX, FOCUS_MIN, Focus, FocusAxis, FocusRangeError, JobState, Media,
     MediaMeta, MediaState, MediaType, ProcessingJob,
@@ -96,3 +133,4 @@ pub use serializer::{
 };
 pub use service::{MediaService, MetadataPatch, UploadInput};
 pub use store::{MediaStore, ObjectKey, ObjectVariant};
+pub use worker::{DEFAULT_POLL_INTERVAL, ProcessingWorker, WorkerOutcome};

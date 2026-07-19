@@ -89,6 +89,29 @@
 //! ([`DEFAULT_MEDIA_BASE_DELAY`], [`DEFAULT_MEDIA_MAX_DELAY`]) sized for
 //! media processing rather than reused verbatim — see those constants' own
 //! doc comments for the sizing rationale.
+//!
+//! ## `fail_or_retry` gains an `error_message: &str` parameter (task 4.3
+//! signature extension, closing the `last_error` gap tasks.md's "3.2 レビ
+//! ュー所見" flagged)
+//! `media_processing_jobs.last_error` (`migrations/0005_media.sql`) exists
+//! specifically to hold Requirement 4.5's "原因特定に十分な診断情報"
+//! (diagnostic detail sufficient to identify the cause of a failure), but
+//! this module's original signature had no error-message parameter for
+//! [`fail_or_retry`] to persist there at all — task 3.2's own review note
+//! flagged this as a gap `ProcessingWorker` (task 4.3) must resolve, since
+//! task 3.2's acceptance text never asked for it and design.md's excerpted
+//! `fail_or_retry(pool, job, max_attempts, now) -> Result<JobOutcome,
+//! AppError>` signature has no such parameter either. Following the same
+//! "extend a previously-committed signature in the direction the schema/a
+//! later task actually needs, document why" convention this module's own
+//! doc comment already used for `claim_due`'s attempts accounting and
+//! `media_repository.rs`/`store.rs` used for their own documented
+//! deviations, [`fail_or_retry`] now takes `error_message: &str` and writes
+//! it into `last_error` on *both* branches (a reschedule and a terminal
+//! failure both get a diagnostic recorded, not just the terminal one) —
+//! `ProcessingWorker` (task 4.3) is the sole caller and supplies a message
+//! derived from the underlying `AppError` it classified as transient or
+//! decode/terminal (see `worker.rs`'s `diagnostic_message` helper).
 
 #[cfg(test)]
 mod tests;
@@ -341,21 +364,33 @@ pub async fn complete(pool: &PgPool, job_id: Id) -> Result<(), AppError> {
 /// this function never reads a wall clock itself. See this module's doc
 /// comment ("`fail_or_retry`/`complete` need no `FOR UPDATE`/subquery
 /// dance") for why a plain `UPDATE ... WHERE id = $n` is sufficient here.
+///
+/// `error_message` is persisted into `last_error` on both branches
+/// (Requirement 4.5; see this module's doc comment, "`fail_or_retry` gains
+/// an `error_message` parameter", for why this signature was extended past
+/// design.md's excerpt). A caller that forces an immediate terminal failure
+/// regardless of its own configured retry budget (a decode/non-retryable
+/// error, per `worker.rs`'s classification) passes `max_attempts = 0`:
+/// `attempts` (always `>= 1` after the unconditional increment below) then
+/// always satisfies `attempts >= max_attempts`, so this always takes the
+/// `Failed` branch on the very first call regardless of `job.attempts`.
 pub async fn fail_or_retry(
     pool: &PgPool,
     job: &ProcessingJob,
     max_attempts: u32,
     now: OffsetDateTime,
+    error_message: &str,
 ) -> Result<JobOutcome, AppError> {
     let attempts = job.attempts.saturating_add(1);
 
     if attempts >= max_attempts {
         sqlx::query(
             "UPDATE media_processing_jobs \
-             SET state = 'failed', attempts = $1, locked_at = NULL \
-             WHERE id = $2",
+             SET state = 'failed', attempts = $1, locked_at = NULL, last_error = $2 \
+             WHERE id = $3",
         )
         .bind(attempts as i32)
+        .bind(error_message)
         .bind(job.id.as_i64())
         .execute(pool)
         .await
@@ -367,11 +402,13 @@ pub async fn fail_or_retry(
 
         sqlx::query(
             "UPDATE media_processing_jobs \
-             SET state = 'queued', attempts = $1, run_at = $2, locked_at = NULL \
-             WHERE id = $3",
+             SET state = 'queued', attempts = $1, run_at = $2, locked_at = NULL, \
+                 last_error = $3 \
+             WHERE id = $4",
         )
         .bind(attempts as i32)
         .bind(run_at)
+        .bind(error_message)
         .bind(job.id.as_i64())
         .execute(pool)
         .await
