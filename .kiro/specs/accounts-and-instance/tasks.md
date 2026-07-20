@@ -14,7 +14,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 2.2, 5.2, 6.1, 7.2, 8.1, 9.2_
   - _Boundary: model_
   - _Depends: 1.1_
-- [ ] 1.3 下流所有情報の委譲境界（port + 既定実装 + レジストリ）を定義する
+- [x] 1.3 下流所有情報の委譲境界（port + 既定実装 + レジストリ）を定義する
   - `AccountStatusesProvider`（既定: 空ページ）/ `RelationshipStateProvider`（既定: 関係なし）/ `AccountCountsProvider`（既定: 0）を定義し既定実装を提供
   - 委譲レジストリを用意し、下流 spec が後から実装を差し替えられる形にする
   - 観測可能な完了条件: 既定実装が DB/ネットワークに触れず空・全 false/0・件数 0 を返す単体テストが green
