@@ -74,7 +74,7 @@
   - _Requirements: 8.1, 8.2, 8.3, 8.4_
   - _Boundary: InstanceSerializer_
   - _Depends: 1.2, 2.4_
-- [ ] 3.4 (P) CustomEmoji シリアライザを実装する
+- [x] 3.4 (P) CustomEmoji シリアライザを実装する
   - `CustomEmojiView` から CustomEmoji JSON を生成し、Account の `emojis` と同一表現を共有
   - 観測可能な完了条件: shortcode/url/static_url/visible_in_picker/category を持つ JSON を生成する単体テストが green
   - _Requirements: 9.2, 9.4_
@@ -156,6 +156,8 @@
   - _Depends: 3.5_
 
 ## Implementation Notes
+
+- タスク 3.4: `CustomEmojiSerializer::to_custom_emoji_json` は task 3.1 の `AccountSerializer`（`serializer.rs`）が定義した `pub` な `CustomEmojiJson` 型をそのまま再利用し Req 9.4 の表現共有を型レベルで満たしているが、`serializer.rs::emoji_to_json`（マッピング関数自体）は非公開のままのため、フィールドマッピングのロジックは２箇所に独立実装されている（現状は完全に同一挙動で、両者を突き合わせる回帰テストで担保）。将来のクリーンアップタスクで `emoji_to_json` を `pub(crate)` にして `custom_emoji_serializer.rs` から直接呼び出す形に統合する余地がある（レビューでの提案、本 run では対応不要と判断）。
 
 - タスク 2.1: `AccountProfileRepository::find_profile` は design.md の Service Interface の文字どおり `Option<AccountProfile>` を返す（プロフィール未作成時は `None`）。task 文の「未作成アクターには安全な既定を返す」は `AccountProfile::default_for(actor_id)`（`profile_repository.rs` 内、呼び出し側が `None` 時に使う既定値コンストラクタ）で満たす。後続タスク（5.1 AccountService 等）で `find_profile` を使う際は `Option` を明示的に `default_for` へフォールバックさせること。`CredentialSource::follow_requests_count` は本リポジトリでは常に `0`（social-graph 委譲、`account_profiles` に対応列なし）。
 - タスク 2.2: `RemoteAccountRepository` も同型パターン。design.md の Service Interface に無い「`fetched_at` による陳腐化判定」は `is_stale(fetched_at, now, ttl)`（`remote_repository.rs` 内の純粋関数、TTL は呼び出し側指定）として追加。TTL の実値は spec のどこにも規定が無いため、実際のキャッシュポリシー決定は `RemoteAccountFetcher`（task 4）の責務とする。`upsert_remote` は `ON CONFLICT (actor_uri) DO UPDATE` で `id` 列を SET から除外し、同一 `actor_uri` の再 upsert では既存行の `id` を保持する（`remote_accounts.id` はアプリ採番・DB 非採番のため、呼び出し側が入力に異なる `id` を渡しても無視され、戻り値の実際の行が正）。後続タスクで `upsert_remote` を呼ぶ側は戻り値の `id` を正として扱うこと（入力の `id` をそのまま信用しない）。

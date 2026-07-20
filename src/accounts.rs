@@ -70,7 +70,14 @@
 //!   JSON contract from [`model::InstanceSettings`] and a real
 //!   media-pipeline-derived [`instance_serializer::ServerCapabilities`]
 //!   snapshot — see [`instance_serializer`].
+//!
+//! - Task 3.4 (`Boundary: CustomEmojiSerializer`): maps a
+//!   [`model::CustomEmojiView`] onto the CustomEmoji JSON contract, reusing
+//!   [`serializer::CustomEmojiJson`] (task 3.1's already-`pub` type) so the
+//!   representation is shared, not re-derived, with Account's `emojis`
+//!   entries (Requirement 9.4) — see [`custom_emoji_serializer`].
 
+pub mod custom_emoji_serializer;
 pub mod emoji_repository;
 pub mod instance_serializer;
 pub mod model;
@@ -81,6 +88,9 @@ pub mod remote_repository;
 pub mod serializer;
 pub mod settings_repository;
 
+pub use custom_emoji_serializer::{
+    CustomEmojiSerializer, custom_emoji_to_json, to_custom_emoji_json,
+};
 pub use instance_serializer::{
     ConfigurationJson, ContactJson, InstanceJson, InstanceSerializer, MediaAttachmentsConfigJson,
     RegistrationsJson, RuleJson, ServerCapabilities, UsageJson, UsageUsersJson, instance_to_json,
