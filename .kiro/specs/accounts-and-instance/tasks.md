@@ -68,7 +68,7 @@
   - _Requirements: 5.1, 5.2, 5.4_
   - _Boundary: RelationshipSerializer_
   - _Depends: 1.2_
-- [ ] 3.3 (P) Instance(v2) シリアライザを実装する
+- [x] 3.3 (P) Instance(v2) シリアライザを実装する
   - `title`/`description`/`contact`/`rules`/`registrations`/`thumbnail`/`languages` は運用設定（`InstanceSettings`）から供給し、`version`/`source_url` はビルド時定数（`env!("CARGO_PKG_VERSION")` 等）から、`usage.users.active_month` は MVP 固定値プレースホルダから供給して Instance(v2) JSON を合成。`configuration` は media-pipeline の上限等と整合させる
   - 観測可能な完了条件: 運用設定値が反映され、未設定項目が既定で埋まり、`version`/`source_url`/`usage.users.active_month` が決定的に再現され、`configuration` が実制約と整合する単体テストが green
   - _Requirements: 8.1, 8.2, 8.3, 8.4_

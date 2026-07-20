@@ -65,8 +65,14 @@
 //! - Task 3.2 (`Boundary: RelationshipSerializer`): maps a
 //!   [`model::RelationshipView`] onto the `relationships` JSON contract —
 //!   see [`relationship_serializer`].
+//!
+//! - Task 3.3 (`Boundary: InstanceSerializer`): synthesizes the Instance(v2)
+//!   JSON contract from [`model::InstanceSettings`] and a real
+//!   media-pipeline-derived [`instance_serializer::ServerCapabilities`]
+//!   snapshot — see [`instance_serializer`].
 
 pub mod emoji_repository;
+pub mod instance_serializer;
 pub mod model;
 pub mod ports;
 pub mod profile_repository;
@@ -75,6 +81,11 @@ pub mod remote_repository;
 pub mod serializer;
 pub mod settings_repository;
 
+pub use instance_serializer::{
+    ConfigurationJson, ContactJson, InstanceJson, InstanceSerializer, MediaAttachmentsConfigJson,
+    RegistrationsJson, RuleJson, ServerCapabilities, UsageJson, UsageUsersJson, instance_to_json,
+    to_instance_json,
+};
 pub use model::{
     AccountCounts, AccountProfile, AccountView, AccountViewFields, Acct, CredentialSource,
     CustomEmojiView, InstanceSettings, ProfileField, ProfilePatch, RelationshipView, RemoteAccount,
