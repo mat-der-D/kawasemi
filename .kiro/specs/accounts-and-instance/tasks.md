@@ -29,7 +29,7 @@
   - _Depends: 1.3_
 
 - [ ] 2. データ層: リポジトリ
-- [ ] 2.1 (P) ローカルプロフィール拡張リポジトリを実装する
+- [x] 2.1 (P) ローカルプロフィール拡張リポジトリを実装する
   - actor_id での取得と、`update_credentials` 用の部分 upsert（指定項目のみ更新、時刻は `RuntimeContext`）を提供。未作成アクターには安全な既定を返す
   - 観測可能な完了条件: upsert が patch 外の項目を変更しないことを検証する統合テストが green
   - _Requirements: 1.4, 2.2, 6.1, 6.5_
@@ -154,3 +154,7 @@
   - 観測可能な完了条件: 契約ゴールデンテストが決定的に再現し green
   - _Requirements: 1.6, 2.4, 5.6, 8.5, 9.5_
   - _Depends: 3.5_
+
+## Implementation Notes
+
+- タスク 2.1: `AccountProfileRepository::find_profile` は design.md の Service Interface の文字どおり `Option<AccountProfile>` を返す（プロフィール未作成時は `None`）。task 文の「未作成アクターには安全な既定を返す」は `AccountProfile::default_for(actor_id)`（`profile_repository.rs` 内、呼び出し側が `None` 時に使う既定値コンストラクタ）で満たす。後続タスク（5.1 AccountService 等）で `find_profile` を使う際は `Option` を明示的に `default_for` へフォールバックさせること。`CredentialSource::follow_requests_count` は本リポジトリでは常に `0`（social-graph 委譲、`account_profiles` に対応列なし）。
