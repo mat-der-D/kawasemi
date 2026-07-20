@@ -41,7 +41,7 @@
   - _Requirements: 3.1, 3.2, 7.2, 7.3_
   - _Boundary: RemoteAccountRepository_
   - _Depends: 1.1_
-- [ ] 2.3 (P) カスタム絵文字読み取りリポジトリを実装する
+- [x] 2.3 (P) カスタム絵文字読み取りリポジトリを実装する
   - `visible_in_picker` を含む一覧取得とショートコード→絵文字解決を read 専用で提供（書き込み API を持たない）
   - 観測可能な完了条件: 投入済み絵文字に対し一覧取得とショートコード解決が期待値を返す統合テストが green
   - _Requirements: 1.4, 9.1, 9.3_
@@ -159,3 +159,4 @@
 
 - タスク 2.1: `AccountProfileRepository::find_profile` は design.md の Service Interface の文字どおり `Option<AccountProfile>` を返す（プロフィール未作成時は `None`）。task 文の「未作成アクターには安全な既定を返す」は `AccountProfile::default_for(actor_id)`（`profile_repository.rs` 内、呼び出し側が `None` 時に使う既定値コンストラクタ）で満たす。後続タスク（5.1 AccountService 等）で `find_profile` を使う際は `Option` を明示的に `default_for` へフォールバックさせること。`CredentialSource::follow_requests_count` は本リポジトリでは常に `0`（social-graph 委譲、`account_profiles` に対応列なし）。
 - タスク 2.2: `RemoteAccountRepository` も同型パターン。design.md の Service Interface に無い「`fetched_at` による陳腐化判定」は `is_stale(fetched_at, now, ttl)`（`remote_repository.rs` 内の純粋関数、TTL は呼び出し側指定）として追加。TTL の実値は spec のどこにも規定が無いため、実際のキャッシュポリシー決定は `RemoteAccountFetcher`（task 4）の責務とする。`upsert_remote` は `ON CONFLICT (actor_uri) DO UPDATE` で `id` 列を SET から除外し、同一 `actor_uri` の再 upsert では既存行の `id` を保持する（`remote_accounts.id` はアプリ採番・DB 非採番のため、呼び出し側が入力に異なる `id` を渡しても無視され、戻り値の実際の行が正）。後続タスクで `upsert_remote` を呼ぶ側は戻り値の `id` を正として扱うこと（入力の `id` をそのまま信用しない）。
+- タスク 2.3: `CustomEmojiRepository::resolve_emojis`/`list_visible_emojis` は **いずれも domain フィルタを持たない**（ローカル/リモート問わず全ドメインの custom_emojis 行が対象）。初回実装は `resolve_emojis` を `domain = ''`（ローカルのみ）に絞る判断をしたがレビューで REJECTED — design.md の「accounts/:id 取得」フロー図がローカル/リモート両方で同一の emoji 解決ステップを通ること、`AccountSerializer::build_account_remote` が `build_account_local` と同じ `emojis: &[CustomEmojiView]` 引数を取ること、Requirement 9.4（emojis 構築は常に同一読み取りモデル）、`migrations/0006_accounts.sql` のコメント（リモートドメイン別の行は想定内）と矛盾するため。後続タスク（3.1 AccountSerializer 等）で `resolve_emojis` を呼ぶ際は、ローカル/リモートどちらのアカウントに対しても同じ呼び出しで良い（呼び出し側でのドメイン絞り込みは不要）。

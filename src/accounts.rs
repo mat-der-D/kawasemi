@@ -52,6 +52,7 @@
 //!   real HTTP surface is task group 6's own boundary
 //!   (`_Boundary: AccountsEndpoints, AccountsModule_`).
 
+pub mod emoji_repository;
 pub mod model;
 pub mod ports;
 pub mod profile_repository;
