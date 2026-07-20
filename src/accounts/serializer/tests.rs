@@ -590,6 +590,140 @@ fn profile_fields_propagate_including_verified_at() {
 
 // ---- group is always false (no group-actor concept exists yet) ----
 
+// ---- Requirements 1.6, 2.4, 3.5: contract-harness golden registration ----
+//
+// Registers Account (local + remote) and CredentialAccount's JSON shape as
+// goldens via `crate::contract::assert_golden` (task 3.5), reusing this
+// file's own literal fixtures. Mirrors `media/serializer/tests.rs`'s (task
+// 4.2, this crate's only prior art for the harness) own precedent: a pure
+// serializer has nothing non-deterministic upstream to inject a
+// `RuntimeContext` boundary for (see `serializer.rs`'s doc comment,
+// "Deliberate deviations", on why `created_at` is an explicit caller
+// parameter rather than clock-sourced) -- literal `datetime!`/`Id::from_i64`
+// fixtures already satisfy "決定的" (deterministic) reproducibility the same
+// way every other test in this file does.
+
+fn golden_fields() -> Vec<ProfileField> {
+    vec![
+        ProfileField {
+            name: "Pronouns".to_string(),
+            value: "she/her".to_string(),
+            verified_at: None,
+        },
+        ProfileField {
+            name: "Website".to_string(),
+            value: "https://alice.example".to_string(),
+            verified_at: Some(datetime!(2026-01-01 00:00:00 UTC)),
+        },
+    ]
+}
+
+#[test]
+fn local_account_json_matches_the_registered_contract_golden() {
+    let ser = serializer();
+    let actor = resolved_actor(1, "alice");
+    let mut profile = bare_profile(1);
+    profile.display_name = "Alice :blobcat:".to_string();
+    profile.note = "hello world :blobcat:".to_string();
+    profile.fields = golden_fields();
+    let counts = AccountCounts {
+        followers: 12,
+        following: 3,
+        statuses: 44,
+        last_status_at: Some(datetime!(2026-02-01 00:00:00 UTC)),
+    };
+    let candidates = [
+        emoji("blobcat", "https://kawasemi.example/emoji/blobcat.png"),
+        emoji("unused", "https://kawasemi.example/emoji/unused.png"),
+    ];
+
+    let json = ser.build_account_local(
+        &actor,
+        &profile,
+        datetime!(2025-06-01 12:00:00 UTC),
+        &counts,
+        &store(),
+        &origin(),
+        &candidates,
+    );
+
+    // Requirement 1.5: avatar/header are non-null even though this fixture
+    // sets no avatar_media/header_media.
+    assert_ne!(json["avatar"], Value::Null);
+    assert_ne!(json["header"], Value::Null);
+    // Requirement 1.1/1.4: emojis is a populated array (non-empty shape).
+    assert!(json["emojis"].is_array());
+    assert_eq!(json["emojis"].as_array().unwrap().len(), 1);
+    // fields is a populated array too.
+    assert!(json["fields"].is_array());
+    assert_eq!(json["fields"].as_array().unwrap().len(), 2);
+
+    crate::contract::assert_golden("tests/golden/accounts/account_local.json", &json);
+}
+
+#[test]
+fn remote_account_json_matches_the_registered_contract_golden() {
+    let ser = serializer();
+    let mut remote_account = remote(9, "bob", "remote.example");
+    remote_account.avatar_url = Some("https://remote.example/avatars/bob.png".to_string());
+    let counts = zero_counts();
+
+    let json = ser.build_account_remote(&remote_account, &counts, &[]);
+
+    // Requirement 1.5: header falls back to the non-null default even though
+    // avatar resolves to a real remote URL -- proves the null discipline
+    // holds per-field, not merely "at least one field happens to be set".
+    assert_ne!(json["avatar"], Value::Null);
+    assert_ne!(json["header"], Value::Null);
+    // Requirement 1.1: emojis/fields are `[]`, never `null`, when empty.
+    assert_eq!(json["emojis"], serde_json::json!([]));
+    assert_eq!(json["fields"], serde_json::json!([]));
+    assert_eq!(json["last_status_at"], Value::Null);
+
+    crate::contract::assert_golden("tests/golden/accounts/account_remote.json", &json);
+}
+
+#[test]
+fn credential_account_json_matches_the_registered_contract_golden() {
+    let ser = serializer();
+    let actor = resolved_actor(1, "alice");
+    let mut profile = bare_profile(1);
+    profile.fields = golden_fields();
+    profile.source = CredentialSource {
+        privacy: Visibility::Unlisted,
+        sensitive: true,
+        language: Some("en".to_string()),
+        note: "editing bio".to_string(),
+        fields: golden_fields(),
+        follow_requests_count: 3,
+    };
+    let counts = AccountCounts {
+        followers: 12,
+        following: 3,
+        statuses: 44,
+        last_status_at: None,
+    };
+
+    let json = ser.build_credential_account(
+        &actor,
+        &profile,
+        datetime!(2025-06-01 12:00:00 UTC),
+        &counts,
+        &store(),
+        &origin(),
+        &[],
+    );
+
+    // Requirement 2.4/1.5: same null discipline as Account -- avatar/header
+    // are non-null on a CredentialAccount too.
+    assert_ne!(json["avatar"], Value::Null);
+    assert_ne!(json["header"], Value::Null);
+    assert!(json["source"].is_object());
+    assert!(json["role"].is_object());
+
+    crate::contract::assert_golden("tests/golden/accounts/credential_account.json", &json);
+}
+
 #[test]
 fn group_is_always_false_for_local_and_remote() {
     let ser = serializer();

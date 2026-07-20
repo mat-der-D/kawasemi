@@ -1,0 +1,47 @@
+{
+  "configuration": {
+    "media_attachments": {
+      "image_size_limit": 10485760,
+      "supported_mime_types": [
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/webp"
+      ]
+    }
+  },
+  "contact": {
+    "account_id": "7",
+    "email": "owner@kawasemi.example"
+  },
+  "description": "A single-owner Mastodon-compatible server.",
+  "domain": "kawasemi.example",
+  "languages": [
+    "en",
+    "ja"
+  ],
+  "registrations": {
+    "approval_required": true,
+    "enabled": true,
+    "message": "Applications reviewed manually."
+  },
+  "rules": [
+    {
+      "id": "1",
+      "text": "Be excellent to each other."
+    },
+    {
+      "id": "2",
+      "text": "No spam."
+    }
+  ],
+  "source_url": "https://github.com/mat-der-D/kawasemi",
+  "thumbnail": "https://kawasemi.example/thumbnail.png",
+  "title": "Kawasemi Test Instance",
+  "usage": {
+    "users": {
+      "active_month": 1
+    }
+  },
+  "version": "0.1.0"
+}

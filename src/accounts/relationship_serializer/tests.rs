@@ -166,6 +166,46 @@ fn same_input_produces_the_same_json_deterministically() {
     assert_eq!(first, second);
 }
 
+// ---- Requirements 5.6, 3.5: contract-harness golden registration ----
+//
+// Registers Relationship's JSON shape as a golden via
+// `crate::contract::assert_golden` (task 3.5), reusing `full_relationship`
+// (a literal, hand-constructed fixture already used above) -- no clock/id/
+// rng source is involved anywhere in this pure mapping, so the literal
+// fixture already satisfies "決定的" (deterministic) reproducibility, the
+// same precedent `media/serializer/tests.rs` and `accounts/serializer/
+// tests.rs` (task 3.5) establish for this crate's other golden tests.
+
+#[test]
+fn full_relationship_json_matches_the_registered_contract_golden() {
+    let view = full_relationship(99);
+
+    let json = relationship_to_json(&view);
+
+    // Requirement 5.2: every field present with the right type.
+    assert!(json["id"].is_string());
+    for flag in [
+        "following",
+        "showing_reblogs",
+        "notifying",
+        "followed_by",
+        "blocking",
+        "blocked_by",
+        "muting",
+        "muting_notifications",
+        "requested",
+        "requested_by",
+        "domain_blocking",
+        "endorsed",
+    ] {
+        assert!(json[flag].is_boolean(), "{flag} must be a bool");
+    }
+    assert!(json["languages"].is_array());
+    assert!(json["note"].is_string());
+
+    crate::contract::assert_golden("tests/golden/accounts/relationship.json", &json);
+}
+
 #[test]
 fn build_relationship_on_the_serializer_matches_the_free_function() {
     let view = no_relationship(1);

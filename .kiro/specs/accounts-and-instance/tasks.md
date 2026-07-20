@@ -80,7 +80,7 @@
   - _Requirements: 9.2, 9.4_
   - _Boundary: CustomEmojiSerializer_
   - _Depends: 1.2_
-- [ ] 3.5 全エンティティ契約を api-foundation 契約ハーネスにゴールデン登録する
+- [x] 3.5 全エンティティ契約を api-foundation 契約ハーネスにゴールデン登録する
   - Account / CredentialAccount / Relationship / Instance(v2) / CustomEmoji を決定的 `RuntimeContext` 上でゴールデン固定し、フィールド有無・型・null 規律（avatar/header 非 null、emojis/fields 形）を比較
   - 観測可能な完了条件: 各エンティティのゴールデン比較テストが green で、差分が箇所特定で報告される
   - _Requirements: 1.6, 2.4, 5.6, 8.5, 9.5_

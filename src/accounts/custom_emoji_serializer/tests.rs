@@ -112,6 +112,30 @@ fn to_custom_emoji_json_maps_every_field_straight_across() {
     assert_eq!(json.category, view.category);
 }
 
+// ---- Requirements 9.5, 3.5: contract-harness golden registration ----
+//
+// Registers CustomEmoji's JSON shape as a golden via
+// `crate::contract::assert_golden` (task 3.5), reusing `blobcat` (a literal,
+// hand-constructed fixture already used above). No clock/id/rng source is
+// involved in this pure mapping, so the literal fixture already satisfies
+// "決定的" (deterministic) reproducibility, the same precedent this crate's
+// other golden tests (task 3.5) establish.
+
+#[test]
+fn custom_emoji_json_matches_the_registered_contract_golden() {
+    let view = blobcat();
+
+    let json = custom_emoji_to_json(&view);
+
+    // Requirement 9.2: every field present with the right type.
+    assert!(json["shortcode"].is_string());
+    assert!(json["url"].is_string());
+    assert!(json["static_url"].is_string());
+    assert!(json["visible_in_picker"].is_boolean());
+
+    crate::contract::assert_golden("tests/golden/accounts/custom_emoji.json", &json);
+}
+
 // ---- Requirement 9.4: shared representation with Account's `emojis` ----
 //
 // These tests prove — not just assert in a doc comment — that this module's

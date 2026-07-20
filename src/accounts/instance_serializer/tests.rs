@@ -282,6 +282,33 @@ fn domain_comes_from_the_serializer_not_from_instance_settings() {
     assert_eq!(json.domain, "other.example");
 }
 
+// ---- Requirements 8.5, 3.5: contract-harness golden registration ----
+//
+// Registers Instance(v2)'s JSON shape as a golden via
+// `crate::contract::assert_golden` (task 3.5), reusing `full_settings`/
+// `real_default_caps` (literal, hand-constructed fixtures already used
+// above). `version` is a build-time constant and `usage.users.active_month`
+// a fixed MVP placeholder (see this module's own doc comment, "Field
+// provenance") -- both already deterministic across runs of the same source
+// tree, so no `RuntimeContext` boundary is needed here either.
+
+#[test]
+fn instance_v2_json_matches_the_registered_contract_golden() {
+    let settings = full_settings();
+    let caps = real_default_caps();
+
+    let json = instance_to_json("kawasemi.example", &settings, &caps);
+
+    // Requirement 8.1/8.2: operational fields present with correct types,
+    // populated (non-null/non-omitted) shape.
+    assert!(json["thumbnail"].is_string());
+    assert!(json["languages"].is_array());
+    assert!(json["rules"].is_array());
+    assert_eq!(json["version"], env!("CARGO_PKG_VERSION"));
+
+    crate::contract::assert_golden("tests/golden/accounts/instance_v2.json", &json);
+}
+
 #[test]
 fn build_instance_v2_on_the_serializer_matches_the_free_function() {
     let settings = full_settings();
