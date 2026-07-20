@@ -35,7 +35,7 @@
   - _Requirements: 1.4, 2.2, 6.1, 6.5_
   - _Boundary: AccountProfileRepository_
   - _Depends: 1.1_
-- [ ] 2.2 (P) リモートアカウント正規化リポジトリを実装する
+- [x] 2.2 (P) リモートアカウント正規化リポジトリを実装する
   - actor_uri / 内部 id での取得、正規化結果の upsert、`fetched_at` による陳腐化判定を提供
   - 観測可能な完了条件: 同一 actor_uri の再 upsert が重複行を作らず最新値で更新される統合テストが green
   - _Requirements: 3.1, 3.2, 7.2, 7.3_
@@ -158,3 +158,4 @@
 ## Implementation Notes
 
 - タスク 2.1: `AccountProfileRepository::find_profile` は design.md の Service Interface の文字どおり `Option<AccountProfile>` を返す（プロフィール未作成時は `None`）。task 文の「未作成アクターには安全な既定を返す」は `AccountProfile::default_for(actor_id)`（`profile_repository.rs` 内、呼び出し側が `None` 時に使う既定値コンストラクタ）で満たす。後続タスク（5.1 AccountService 等）で `find_profile` を使う際は `Option` を明示的に `default_for` へフォールバックさせること。`CredentialSource::follow_requests_count` は本リポジトリでは常に `0`（social-graph 委譲、`account_profiles` に対応列なし）。
+- タスク 2.2: `RemoteAccountRepository` も同型パターン。design.md の Service Interface に無い「`fetched_at` による陳腐化判定」は `is_stale(fetched_at, now, ttl)`（`remote_repository.rs` 内の純粋関数、TTL は呼び出し側指定）として追加。TTL の実値は spec のどこにも規定が無いため、実際のキャッシュポリシー決定は `RemoteAccountFetcher`（task 4）の責務とする。`upsert_remote` は `ON CONFLICT (actor_uri) DO UPDATE` で `id` 列を SET から除外し、同一 `actor_uri` の再 upsert では既存行の `id` を保持する（`remote_accounts.id` はアプリ採番・DB 非採番のため、呼び出し側が入力に異なる `id` を渡しても無視され、戻り値の実際の行が正）。後続タスクで `upsert_remote` を呼ぶ側は戻り値の `id` を正として扱うこと（入力の `id` をそのまま信用しない）。
