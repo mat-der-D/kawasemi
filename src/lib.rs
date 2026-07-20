@@ -17,6 +17,7 @@
 //! now calls `kawasemi::bootstrap::bootstrap()` instead of declaring its own
 //! `mod bootstrap;`.
 
+pub mod accounts;
 pub mod actor;
 pub mod api;
 pub mod bootstrap;

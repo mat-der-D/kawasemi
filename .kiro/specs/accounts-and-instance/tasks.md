@@ -7,7 +7,7 @@
   - `remote_accounts.actor_uri` UNIQUE、`custom_emojis` 複合主キー（shortcode, domain）、`instance_settings` 単一行（id=1 CHECK、`thumbnail`/`languages` 列を含む）を含める
   - 観測可能な完了条件: `spawn_test_app` 起動時に 0005 が自動適用され、4 テーブルが存在しクエリ可能
   - _Requirements: 6.5, 7.2, 8.2, 9.1_
-- [ ] 1.2 アカウント関連のドメイン型を定義する
+- [x] 1.2 アカウント関連のドメイン型を定義する
   - `AccountView` / `ProfileField` / `CredentialSource` / `AccountProfile`（`display_name`/`note` を含む） / `ProfilePatch`（項目別部分更新入力、`None` は変更なし） / `RemoteAccount` / `CustomEmojiView` / `RelationshipView` / `AccountCounts` / `InstanceSettings` を定義
   - `AccountRef` / `Visibility` は本 spec では定義せず、core-runtime の `domain` モジュールが所有する正準共有型を import して使用する
   - 観測可能な完了条件: 各型が `cargo build` でコンパイルでき、Account 必須フィールドとリモート/ローカルの acct 規律差を型で表現できる
