@@ -91,6 +91,24 @@ impl AppState {
     /// Callers (the Bootstrap composition root, task 7.4/6.1/7.1/5.2/1.4)
     /// are responsible for constructing each of these first — this
     /// constructor only bundles them.
+    ///
+    /// ## `too_many_arguments`: inherent to this constructor's role, not a
+    /// smell to refactor away
+    /// `AppState::new` takes one positional argument per module bundle
+    /// because that *is* its job: this module is the Composition Root's
+    /// single bundling point (see the module doc comment above — "this
+    /// module does not construct its own dependencies"), and each
+    /// foundation/API spec (core-runtime, actor-model, api-foundation,
+    /// federation-core, media-pipeline, accounts-and-instance, ...) has
+    /// contributed exactly one more bundle here as it landed. That count is
+    /// expected to keep growing as later specs (statuses-core,
+    /// social-graph, timelines, notifications, search, per
+    /// `.kiro/steering/roadmap.md`) add their own module bundles the same
+    /// way — collapsing the parameters into a single params struct would
+    /// only relocate the field list, not remove the coupling this
+    /// constructor is supposed to express, so the lint is suppressed here
+    /// rather than worked around.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
         runtime: RuntimeContext,
