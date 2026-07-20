@@ -76,6 +76,14 @@
 //!   [`serializer::CustomEmojiJson`] (task 3.1's already-`pub` type) so the
 //!   representation is shared, not re-derived, with Account's `emojis`
 //!   entries (Requirement 9.4) — see [`custom_emoji_serializer`].
+//!
+//! - Task 4 (`Boundary: RemoteAccountFetcher`): fetches an ActivityPub actor
+//!   document for a not-yet-cached or stale `actor_uri` via
+//!   `FederationHttpClient`, safely normalizes it (unknown extension
+//!   properties never fail normalization; missing required properties do)
+//!   into a [`model::RemoteAccount`], and upserts it through
+//!   [`remote_repository`]'s already-implemented cache — reusing a fresh
+//!   cache entry without any network call — see [`remote_fetcher`].
 
 pub mod custom_emoji_serializer;
 pub mod emoji_repository;
@@ -84,6 +92,7 @@ pub mod model;
 pub mod ports;
 pub mod profile_repository;
 pub mod relationship_serializer;
+pub mod remote_fetcher;
 pub mod remote_repository;
 pub mod serializer;
 pub mod settings_repository;
@@ -107,6 +116,7 @@ pub use ports::{
 pub use relationship_serializer::{
     RelationshipJson, RelationshipSerializer, relationship_to_json, to_relationship_json,
 };
+pub use remote_fetcher::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 pub use serializer::{
     AccountFieldJson, AccountJson, AccountSerializer, CredentialAccountJson, CredentialSourceJson,
     CustomEmojiJson, RoleJson, account_to_json, to_account_json,

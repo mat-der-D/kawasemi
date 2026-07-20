@@ -86,7 +86,7 @@
   - _Requirements: 1.6, 2.4, 5.6, 8.5, 9.5_
   - _Depends: 3.1, 3.2, 3.3, 3.4_
 
-- [ ] 4. リモートアカウントフェッチャを実装する
+- [x] 4. リモートアカウントフェッチャを実装する
   - 有効キャッシュ時は取得せず、ミス/陳腐化時のみ federation-core の `FederationHttpClient` で取得し、JSON-LD 安全展開で正規化（未知プロパティで失敗させず、必須欠落のみ失敗）、結果をキャッシュ upsert
   - 観測可能な完了条件: `FederationHttpClient` モックで取得→正規化→キャッシュ保存が成立し、未知プロパティ付き文書でも正規化が成功する統合テストが green
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
@@ -163,4 +163,6 @@
 - タスク 2.2: `RemoteAccountRepository` も同型パターン。design.md の Service Interface に無い「`fetched_at` による陳腐化判定」は `is_stale(fetched_at, now, ttl)`（`remote_repository.rs` 内の純粋関数、TTL は呼び出し側指定）として追加。TTL の実値は spec のどこにも規定が無いため、実際のキャッシュポリシー決定は `RemoteAccountFetcher`（task 4）の責務とする。`upsert_remote` は `ON CONFLICT (actor_uri) DO UPDATE` で `id` 列を SET から除外し、同一 `actor_uri` の再 upsert では既存行の `id` を保持する（`remote_accounts.id` はアプリ採番・DB 非採番のため、呼び出し側が入力に異なる `id` を渡しても無視され、戻り値の実際の行が正）。後続タスクで `upsert_remote` を呼ぶ側は戻り値の `id` を正として扱うこと（入力の `id` をそのまま信用しない）。
 - タスク 2.3: `CustomEmojiRepository::resolve_emojis`/`list_visible_emojis` は **いずれも domain フィルタを持たない**（ローカル/リモート問わず全ドメインの custom_emojis 行が対象）。初回実装は `resolve_emojis` を `domain = ''`（ローカルのみ）に絞る判断をしたがレビューで REJECTED — design.md の「accounts/:id 取得」フロー図がローカル/リモート両方で同一の emoji 解決ステップを通ること、`AccountSerializer::build_account_remote` が `build_account_local` と同じ `emojis: &[CustomEmojiView]` 引数を取ること、Requirement 9.4（emojis 構築は常に同一読み取りモデル）、`migrations/0006_accounts.sql` のコメント（リモートドメイン別の行は想定内）と矛盾するため。後続タスク（3.1 AccountSerializer 等）で `resolve_emojis` を呼ぶ際は、ローカル/リモートどちらのアカウントに対しても同じ呼び出しで良い（呼び出し側でのドメイン絞り込みは不要）。
 - タスク 2.4: `InstanceSettingsRepository::load_instance_settings` は `instance_settings` テーブルに行が一切無い状態（初期状態、書き込みは admin-frontend の責務のため本 spec は絶対に INSERT/UPDATE/UPSERT しない）でも、アプリ側で構築した既定値（`migrations/0006_accounts.sql` の各列 `DEFAULT` と一致させた値）を返す。`id=1` 行が存在すればそれをそのまま読む。後続タスク（5.5 InstanceService 等）はこの関数を呼ぶだけでよく、`instance_settings` の未初期化を心配する必要はない。
+- タスク 4: `RemoteAccountFetcher` のキャッシュ TTL は design.md/requirements.md のどこにも規定が無かったため（task 2.2 のノートが本タスクへ委譲）、`key_resolver.rs::DEFAULT_PUBLIC_KEY_CACHE_TTL`（24h）と同値を `DEFAULT_REMOTE_ACCOUNT_CACHE_TTL` として踏襲した（同種のリモートアクター文書由来キャッシュであるため）。`ttl` はコンストラクタ引数であり config 未配線（`key_resolver.rs` と同じ前例）。フェッチ失敗（非成功ステータス/トランスポート失敗）は内部 `AppError` として `404` にマッピングしている（`key_resolver.rs` の `502` とは異なる選択）が、`RemoteAccountFetcher` は現時点でどのエンドポイントにも配線されていないため、実際の HTTP ステータスは task 5.1（`AccountService::show_account`、Requirement 3.3「未存在は404」）が最終的に決定してよい内部既定値に過ぎない。
+
 - タスク群 2 の run スコープ最終レビューでの注意喚起（task 3.1 AccountSerializer 実装時に要確認）: `CustomEmojiRepository::resolve_emojis(pool, shortcodes)` は design.md の文字どおりのシグネチャ（domain 引数なし）に従うため、同一 shortcode がローカルと特定リモートドメインの両方に存在する場合、両方の行を返してしまい呼び出し側では区別できない（`CustomEmojiView`/`custom_emojis` テーブルの複合 PK は `(shortcode, domain)` だが `CustomEmojiView` 自体は `domain` フィールドを持たない — task 1.2 の model.rs 由来、本 run では変更していない）。task 3.1 で「shortcode だけで zip する」ような素朴な実装をすると、衝突時に誤った絵文字 URL を選んでしまう可能性がある。対応方針は task 3.1 実装時に設計判断すること（例: 対象アカウントの domain も渡す/`CustomEmojiView` に domain を追加する等、design.md/model.rs への revalidation が必要になる可能性がある）。
