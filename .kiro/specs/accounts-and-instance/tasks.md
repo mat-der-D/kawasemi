@@ -55,7 +55,7 @@
   - _Depends: 1.1_
 
 - [ ] 3. シリアライザとエンティティ契約ゴールデン
-- [ ] 3.1 (P) Account シリアライザ（ローカル/リモート/Credential 統一）を実装する
+- [x] 3.1 (P) Account シリアライザ（ローカル/リモート/Credential 統一）を実装する
   - ローカル（`ResolvedActor` + `AccountProfile`）とリモート（`RemoteAccount`）を共通 Account JSON へ写像。acct/url/uri 規律分け、avatar/header 既定 URL（非 null）、emojis 解決、CredentialAccount の source/role 付与、counts は `AccountCountsProvider`
   - `display_name`/`note` はローカルは `AccountProfile`、リモートは `RemoteAccount` の同名フィールドから供給する
   - 観測可能な完了条件: 同一入力で決定的 JSON を生成し、avatar/header が常に非 null になる単体テストが green

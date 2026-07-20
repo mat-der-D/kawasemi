@@ -51,12 +51,23 @@
 //!   not wired into `crate::server` beyond that placeholder mount point —
 //!   real HTTP surface is task group 6's own boundary
 //!   (`_Boundary: AccountsEndpoints, AccountsModule_`).
+//!
+//! - Tasks 2.1-2.4 (`Boundary: AccountProfileRepository` /
+//!   `RemoteAccountRepository` / `CustomEmojiRepository` /
+//!   `InstanceSettingsRepository`): the data layer — see
+//!   [`profile_repository`], [`remote_repository`], [`emoji_repository`],
+//!   [`settings_repository`].
+//!
+//! - Task 3.1 (`Boundary: AccountSerializer`): maps a local actor
+//!   (`ResolvedActor` + [`AccountProfile`]) or a [`RemoteAccount`] onto the
+//!   unified Account/CredentialAccount JSON contract — see [`serializer`].
 
 pub mod emoji_repository;
 pub mod model;
 pub mod ports;
 pub mod profile_repository;
 pub mod remote_repository;
+pub mod serializer;
 pub mod settings_repository;
 
 pub use model::{
@@ -66,6 +77,10 @@ pub use model::{
 pub use ports::{
     AccountCountsProvider, AccountPortsRegistry, AccountStatusesProvider, EmptyStatusesProvider,
     NoRelationshipProvider, RelationshipStateProvider, StatusesQuery, ZeroCountsProvider,
+};
+pub use serializer::{
+    AccountFieldJson, AccountJson, AccountSerializer, CredentialAccountJson, CredentialSourceJson,
+    CustomEmojiJson, RoleJson, account_to_json, to_account_json,
 };
 
 /// The Composition Root's accounts-and-instance module bundle (design.md's
