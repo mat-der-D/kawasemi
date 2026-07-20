@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. 基盤: マイグレーション・ドメイン型・委譲境界・モジュール配線
-- [ ] 1.1 マイグレーション 0005 で本 spec 所有テーブルを定義する
+- [x] 1.1 マイグレーション 0005 で本 spec 所有テーブルを定義する
   - `migrations/0005_accounts.sql` に `account_profiles` / `remote_accounts` / `custom_emojis` / `instance_settings` を作成（0001 core-runtime / 0002 actor-model / 0003 federation+oauth 衝突 / 0004 media と非衝突の番号として 0005 を採用）
   - `account_profiles` に `display_name` / `note`（Account/CredentialAccount の同名フィールド供給元）を含める
   - `remote_accounts.actor_uri` UNIQUE、`custom_emojis` 複合主キー（shortcode, domain）、`instance_settings` 単一行（id=1 CHECK、`thumbnail`/`languages` 列を含む）を含める
