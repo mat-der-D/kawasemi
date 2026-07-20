@@ -61,11 +61,16 @@
 //! - Task 3.1 (`Boundary: AccountSerializer`): maps a local actor
 //!   (`ResolvedActor` + [`AccountProfile`]) or a [`RemoteAccount`] onto the
 //!   unified Account/CredentialAccount JSON contract — see [`serializer`].
+//!
+//! - Task 3.2 (`Boundary: RelationshipSerializer`): maps a
+//!   [`model::RelationshipView`] onto the `relationships` JSON contract —
+//!   see [`relationship_serializer`].
 
 pub mod emoji_repository;
 pub mod model;
 pub mod ports;
 pub mod profile_repository;
+pub mod relationship_serializer;
 pub mod remote_repository;
 pub mod serializer;
 pub mod settings_repository;
@@ -77,6 +82,9 @@ pub use model::{
 pub use ports::{
     AccountCountsProvider, AccountPortsRegistry, AccountStatusesProvider, EmptyStatusesProvider,
     NoRelationshipProvider, RelationshipStateProvider, StatusesQuery, ZeroCountsProvider,
+};
+pub use relationship_serializer::{
+    RelationshipJson, RelationshipSerializer, relationship_to_json, to_relationship_json,
 };
 pub use serializer::{
     AccountFieldJson, AccountJson, AccountSerializer, CredentialAccountJson, CredentialSourceJson,

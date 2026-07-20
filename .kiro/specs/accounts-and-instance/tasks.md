@@ -62,7 +62,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.2_
   - _Boundary: AccountSerializer_
   - _Depends: 1.2, 2.1, 2.3_
-- [ ] 3.2 (P) Relationship シリアライザを実装する
+- [x] 3.2 (P) Relationship シリアライザを実装する
   - `RelationshipView`（既定: 関係なし）から Req 5.2 の全フラグを持つ JSON を生成
   - 観測可能な完了条件: 既定値で全フラグ false・件数 0・note 空の JSON を生成する単体テストが green
   - _Requirements: 5.1, 5.2, 5.4_
