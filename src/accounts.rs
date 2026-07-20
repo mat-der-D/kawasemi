@@ -57,6 +57,7 @@ pub mod model;
 pub mod ports;
 pub mod profile_repository;
 pub mod remote_repository;
+pub mod settings_repository;
 
 pub use model::{
     AccountCounts, AccountProfile, AccountView, AccountViewFields, Acct, CredentialSource,
