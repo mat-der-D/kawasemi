@@ -32,6 +32,7 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
 use super::*;
+use crate::accounts;
 use crate::actor::build_actor_module;
 use crate::actor::keys::cache::KeyCache;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
@@ -158,6 +159,12 @@ fn test_state(seed: u64) -> AppState {
     // behavior, not the resident `ProcessingWorker` pool's live behavior.
     let (media_module, _background_workers_not_spawned) =
         media::build_media_module(pool.clone(), runtime.clone(), config.media.clone());
+    // Mirrors the media-module construction immediately above: builds the
+    // accounts-and-instance module bundle (task 1.4) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::accounts::build_accounts_module`) — this bundle has no I/O to
+    // avoid at construction time (see that function's own doc comment).
+    let accounts_module = accounts::build_accounts_module();
     AppState::new(
         pool,
         runtime,
@@ -166,6 +173,7 @@ fn test_state(seed: u64) -> AppState {
         oauth_module,
         federation_module,
         media_module,
+        accounts_module,
     )
 }
 

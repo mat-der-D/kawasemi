@@ -20,6 +20,7 @@ use std::time::Duration;
 use sqlx::postgres::PgPoolOptions;
 
 use super::*;
+use crate::accounts::{self, AccountsModule};
 use crate::actor::keys::cache::KeyCache;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::{ActorModule, build_actor_module};
@@ -193,6 +194,14 @@ fn sample_media_module(
     media
 }
 
+/// Builds an `AccountsModule` (task 1.4): `build_accounts_module` takes no
+/// `pool`/`runtime`/config — at this wiring-only stage it only defaults
+/// task 1.3's `AccountPortsRegistry`, touching neither the database nor the
+/// clock (see `crate::accounts::build_accounts_module`'s own doc comment).
+fn sample_accounts_module() -> AccountsModule {
+    accounts::build_accounts_module()
+}
+
 /// Requirements 1.1, 3.3, 5.5, 5.6: downstream code must be able to retrieve
 /// the pool, the injection boundaries (via `RuntimeContext`), and the
 /// validated config values from `AppState`, unchanged from what was passed
@@ -208,6 +217,7 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
     let federation =
         sample_federation_module(pool.clone(), runtime.clone(), Arc::clone(actor.directory()));
     let media = sample_media_module(pool.clone(), runtime.clone(), &config);
+    let accounts = sample_accounts_module();
 
     let state = AppState::new(
         pool,
@@ -217,6 +227,7 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         oauth,
         federation,
         media,
+        accounts,
     );
 
     // Config values are retrievable and match what was supplied.
@@ -269,8 +280,11 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
     let federation =
         sample_federation_module(pool.clone(), runtime.clone(), Arc::clone(actor.directory()));
     let media = sample_media_module(pool.clone(), runtime.clone(), &config);
+    let accounts = sample_accounts_module();
 
-    let state = AppState::new(pool, runtime, config, actor, oauth, federation, media);
+    let state = AppState::new(
+        pool, runtime, config, actor, oauth, federation, media, accounts,
+    );
     assert_eq!(Arc::strong_count(&state.inner), 1);
 
     let cloned = state.clone();

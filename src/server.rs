@@ -48,7 +48,7 @@ use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, FromRef};
 use axum::http::{Request, Response, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
@@ -117,6 +117,19 @@ const OBJECT_CATCH_ALL_PATH: &str = "/{*path}";
 /// `GET`/`PUT /api/v1/media/{id}` (poll/update).
 const MEDIA_UPLOAD_PATH: &str = "/api/v2/media";
 const MEDIA_ITEM_PATH: &str = "/api/v1/media/{id}";
+
+/// accounts-and-instance's route paths (task 1.4, `_Boundary: AccountsModule_`,
+/// design.md's `AccountsModule（wiring）` API Contract table, verbatim):
+/// mounted here with placeholder handlers only (`_Boundary:
+/// AccountsEndpoints_`'s real handlers are task group 6's own job — see
+/// `crate::accounts`'s module doc comment).
+const ACCOUNTS_VERIFY_CREDENTIALS_PATH: &str = "/api/v1/accounts/verify_credentials";
+const ACCOUNTS_RELATIONSHIPS_PATH: &str = "/api/v1/accounts/relationships";
+const ACCOUNTS_UPDATE_CREDENTIALS_PATH: &str = "/api/v1/accounts/update_credentials";
+const ACCOUNTS_SHOW_PATH: &str = "/api/v1/accounts/{id}";
+const ACCOUNTS_STATUSES_PATH: &str = "/api/v1/accounts/{id}/statuses";
+const INSTANCE_V2_PATH: &str = "/api/v2/instance";
+const CUSTOM_EMOJIS_PATH: &str = "/api/v1/custom_emojis";
 
 /// Rate-limit policy applied to the whole router (task 7.1, api-foundation
 /// Requirements 8.1-8.4): a single-owner deployment ("一人鯖前提") has
@@ -290,6 +303,54 @@ fn media_router(upload_body_limit: usize) -> Router<AppState> {
         )
 }
 
+/// Explicit placeholder response for every accounts/instance/custom_emojis
+/// route [`accounts_router`] mounts (task 1.4, `_Boundary: AccountsModule_`):
+/// `501 Not Implemented`, deliberately not a routing-level `404`, so a
+/// caller (or a test asserting on this wiring, see
+/// `tests/accounts_module_wiring_it.rs`) can tell "this route exists but its
+/// real handler is not implemented yet" apart from "this route does not
+/// exist at all" — task text's own "ハンドラは後続で実装" (real handlers land
+/// at task group 6, `_Boundary: AccountsEndpoints, AccountsModule_`).
+/// Reused across every accounts/instance/custom_emojis route below since
+/// none of them need any per-request state or body parsing at this
+/// wiring-only stage.
+async fn accounts_not_implemented() -> impl IntoResponse {
+    StatusCode::NOT_IMPLEMENTED
+}
+
+/// accounts-and-instance's placeholder route group (task 1.4, `_Boundary:
+/// AccountsModule_`, design.md's `AccountsModule（wiring）` API Contract
+/// table): every accounts/instance/custom_emojis path design.md names,
+/// mounted onto [`accounts_not_implemented`] rather than a real handler
+/// (task group 6's own job — see `crate::accounts`'s module doc comment).
+/// Kept as a separate `.merge()`-able group mirroring [`media_router`]'s own
+/// precedent, even though (unlike `media_router`) no real per-instance
+/// config is needed to build it — this keeps the accounts-and-instance route
+/// set visually and structurally distinct from [`router`]'s own directly
+/// inlined routes, and gives task group 6 a single, already-established
+/// place to swap each placeholder `.route(...)` call for its real handler
+/// without restructuring this file. No `impl FromRef<AppState> for ...`
+/// bridge exists for this group (unlike `MediaEndpointsState<LocalFsStore>`'s
+/// bridge above [`media_router`]): [`accounts_not_implemented`] takes no
+/// extractors, so it needs no per-request state derived from `AppState` at
+/// all.
+fn accounts_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            ACCOUNTS_VERIFY_CREDENTIALS_PATH,
+            get(accounts_not_implemented),
+        )
+        .route(ACCOUNTS_RELATIONSHIPS_PATH, get(accounts_not_implemented))
+        .route(
+            ACCOUNTS_UPDATE_CREDENTIALS_PATH,
+            patch(accounts_not_implemented),
+        )
+        .route(ACCOUNTS_SHOW_PATH, get(accounts_not_implemented))
+        .route(ACCOUNTS_STATUSES_PATH, get(accounts_not_implemented))
+        .route(INSTANCE_V2_PATH, get(accounts_not_implemented))
+        .route(CUSTOM_EMOJIS_PATH, get(accounts_not_implemented))
+}
+
 /// Builds the foundation `Router<AppState>` (Requirement 1.1, and — as of
 /// task 7.1 — api-foundation Requirements 1.1, 2.1, 3.1, 5.1): the minimal
 /// `GET /health` liveness route, the four OAuth endpoints
@@ -379,6 +440,11 @@ pub fn build_router(state: AppState) -> Router {
         // wrapped by both exactly the way every other endpoint on this
         // router already is (Requirement 9.5).
         .merge(media_router(media_upload_body_limit))
+        // task 1.4: merged the same way `media_router` is, immediately
+        // above — see `accounts_router`'s own doc comment for why no
+        // `state`-derived sizing (unlike `media_router`'s `DefaultBodyLimit`)
+        // is needed here.
+        .merge(accounts_router())
         .layer(rate_limit_layer(
             rate_limit_clock,
             RateLimitPolicy::new(RATE_LIMIT_PER_WINDOW, RATE_LIMIT_WINDOW),

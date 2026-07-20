@@ -86,6 +86,7 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
+use crate::accounts;
 use crate::actor;
 use crate::actor::ActorModule;
 use crate::actor::keys::cache::KeyCache;
@@ -422,6 +423,17 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         media::build_media_module(pool.clone(), runtime.clone(), cfg.media.clone());
     media_background.spawn(server::os_shutdown_signal);
 
+    // Assembles the accounts-and-instance Composition Root wiring skeleton
+    // (task 1.4, Requirements 10.1, 10.5): defaults task 1.3's
+    // `AccountPortsRegistry` to its built-in safe implementations
+    // (`EmptyStatusesProvider`/`NoRelationshipProvider`/`ZeroCountsProvider`)
+    // via `crate::accounts::build_accounts_module`. No background task to
+    // spawn here — unlike `federation_background`/`media_background` above,
+    // this bundle owns no resident worker at this wiring-only stage (no
+    // repositories/services exist yet, see `AccountsModule`'s own doc
+    // comment).
+    let accounts_module = accounts::build_accounts_module();
+
     Ok(AppState::new(
         pool,
         runtime,
@@ -430,6 +442,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         oauth_module,
         federation_module,
         media_module,
+        accounts_module,
     ))
 }
 

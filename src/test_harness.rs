@@ -85,6 +85,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::accounts;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::actor::{self, ActorModule};
@@ -655,6 +656,12 @@ pub async fn spawn_test_app() -> TestApp {
         media::build_media_module(pool.clone(), runtime.clone(), config.media.clone());
     media_background.spawn(std::future::pending::<()>);
 
+    // Assembles the accounts-and-instance module bundle (task 1.4) the same
+    // way `bootstrap()`'s production path does
+    // (`crate::accounts::build_accounts_module`) — no background task to
+    // spawn (see `bootstrap.rs`'s identical comment at its own call site).
+    let accounts_module = accounts::build_accounts_module();
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
@@ -663,6 +670,7 @@ pub async fn spawn_test_app() -> TestApp {
         oauth_module,
         federation_module,
         media_module,
+        accounts_module,
     );
     let router = server::build_router(state.clone());
 

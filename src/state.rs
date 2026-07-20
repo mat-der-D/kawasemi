@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
+use crate::accounts::AccountsModule;
 use crate::actor::ActorModule;
 use crate::config::AppConfig;
 use crate::federation::FederationModule;
@@ -57,6 +58,13 @@ struct AppStateInner {
     /// `src/server.rs`'s mounted media endpoints derive their own state
     /// from — see `crate::media::MediaModule`'s own doc comment.
     media: MediaModule,
+    /// accounts-and-instance's Composition Root wiring skeleton (task 1.4,
+    /// Requirements 10.1, 10.5): the shared delegation-ports registry
+    /// (`AccountPortsRegistry`, task 1.3) a downstream spec
+    /// (statuses-core/social-graph) registers its own real provider into
+    /// after this instance is already live — see
+    /// `crate::accounts::AccountsModule`'s own doc comment.
+    accounts: AccountsModule,
 }
 
 /// Immutable, cheaply-cloneable shared handle bundling the database
@@ -77,11 +85,12 @@ impl AppState {
     /// already-constructed runtime context, an already-validated config, an
     /// already-assembled actor-model service bundle, and an
     /// already-assembled OAuth service bundle (task 7.1, api-foundation's
-    /// `OauthModule`), an already-assembled federation-core port bundle, and
-    /// an already-assembled media-pipeline module bundle (task 5.2). Callers
-    /// (the Bootstrap composition root, task 7.4/6.1/7.1/5.2) are
-    /// responsible for constructing each of these first — this constructor
-    /// only bundles them.
+    /// `OauthModule`), an already-assembled federation-core port bundle, an
+    /// already-assembled media-pipeline module bundle (task 5.2), and an
+    /// already-assembled accounts-and-instance module bundle (task 1.4).
+    /// Callers (the Bootstrap composition root, task 7.4/6.1/7.1/5.2/1.4)
+    /// are responsible for constructing each of these first — this
+    /// constructor only bundles them.
     pub fn new(
         pool: PgPool,
         runtime: RuntimeContext,
@@ -90,6 +99,7 @@ impl AppState {
         oauth: OauthModule,
         federation: FederationModule,
         media: MediaModule,
+        accounts: AccountsModule,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -100,6 +110,7 @@ impl AppState {
                 oauth,
                 federation,
                 media,
+                accounts,
             }),
         }
     }
@@ -165,5 +176,15 @@ impl AppState {
     /// its own `MediaService`/`LocalFsStore`.
     pub fn media(&self) -> &MediaModule {
         &self.inner.media
+    }
+
+    /// The shared accounts-and-instance module bundle (task 1.4,
+    /// Requirements 10.1, 10.5): at this wiring-only stage, downstream code
+    /// reaches task 1.3's `AccountPortsRegistry` through
+    /// `state.accounts().ports()` to register a real delegation-port
+    /// implementation into the already-live registry — see
+    /// `crate::accounts::AccountsModule`'s own doc comment.
+    pub fn accounts(&self) -> &AccountsModule {
+        &self.inner.accounts
     }
 }

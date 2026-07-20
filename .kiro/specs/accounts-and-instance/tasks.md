@@ -21,7 +21,7 @@
   - _Requirements: 4.3, 5.4, 1.1_
   - _Boundary: ports_
   - _Depends: 1.2_
-- [ ] 1.4 AccountsModule の配線骨格を core-runtime Composition Root に追加する
+- [x] 1.4 AccountsModule の配線骨格を core-runtime Composition Root に追加する
   - `AccountsModule` を組み立て、委譲 port を既定実装で初期化して `AppState` に格納、accounts/instance/custom_emojis のルータ装着点を用意（ハンドラは後続で実装）
   - 観測可能な完了条件: `spawn_test_app` 起動後、`AppState` から `AccountsModule` ハンドルが取得でき、ルータが空ハンドラ/プレースホルダで mount される
   - _Requirements: 10.1, 10.5_

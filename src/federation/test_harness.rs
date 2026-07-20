@@ -87,6 +87,7 @@ use sqlx::Executor;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
+use crate::accounts;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::actor::{self, ActorModule};
@@ -377,6 +378,11 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         media::build_media_module(pool.clone(), runtime.clone(), config.media.clone());
     media_background.spawn(std::future::pending::<()>);
 
+    // Mirrors `crate::test_harness::spawn_test_app`'s own accounts-and-
+    // instance wiring (task 1.4): no background task to spawn (see that
+    // call site's identical comment).
+    let accounts_module = accounts::build_accounts_module();
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
@@ -385,6 +391,7 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         oauth_module,
         federation_module,
         media_module,
+        accounts_module,
     );
     let router = server::build_router(state.clone());
 
