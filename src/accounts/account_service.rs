@@ -1,21 +1,26 @@
 //! `AccountService` (design.md "Service / サービス層" -> "AccountService /
 //! InstanceService / CustomEmojiService"; Requirements 2.1, 3.1, 3.2, 3.3,
-//! 4.1, 4.2, 4.4, 4.5; tasks 5.1/5.2, `Boundary: AccountService`): resolves
-//! the single actor bound to a Bearer token into a CredentialAccount
+//! 4.1, 4.2, 4.4, 4.5; tasks 5.1/5.2/5.3, `Boundary: AccountService`):
+//! resolves the single actor bound to a Bearer token into a CredentialAccount
 //! ([`AccountService::verify_credentials`]), resolves an arbitrary
 //! local/known-remote/needs-fetching identifier into an Account
-//! ([`AccountService::show_account`]), and (task 5.2) resolves an account's
+//! ([`AccountService::show_account`]), (task 5.2) resolves an account's
 //! Status page via the [`crate::accounts::ports::AccountStatusesProvider`]
-//! delegation boundary ([`AccountService::list_statuses`]).
+//! delegation boundary ([`AccountService::list_statuses`]), and (task 5.3)
+//! resolves a batch of target ids' relationship state via the
+//! [`crate::accounts::ports::RelationshipStateProvider`] delegation
+//! boundary, serialized with task 3.2's `RelationshipSerializer`
+//! ([`AccountService::relationships`]).
 //!
-//! Scope: this module owns the operations tasks 5.1/5.2 name —
-//! `verify_credentials`/`show_account`/`list_statuses` — orchestrating
-//! already-implemented collaborators (`ActorDirectory`, task 2.1-2.3's
-//! repositories, task 3.1's `AccountSerializer`, task 4's
-//! `RemoteAccountFetcher`, task 1.3's `AccountPortsRegistry`). It does not
-//! implement `relationships` (task 5.3) or `update_credentials` (task 5.4) —
-//! those are separate later boundaries on this same eventual `AccountService`
-//! type, added by their own tasks, not sketched out here as stubs.
+//! Scope: this module owns the operations tasks 5.1/5.2/5.3 name —
+//! `verify_credentials`/`show_account`/`list_statuses`/`relationships` —
+//! orchestrating already-implemented collaborators (`ActorDirectory`, task
+//! 2.1-2.3's repositories, task 3.1's `AccountSerializer`, task 3.2's
+//! `RelationshipSerializer`, task 4's `RemoteAccountFetcher`, task 1.3's
+//! `AccountPortsRegistry`). It does not implement `update_credentials` (task
+//! 5.4) — that is a separate later boundary on this same eventual
+//! `AccountService` type, added by its own task, not sketched out here as a
+//! stub.
 //!
 //! ## `AccountService<S: MediaStore, H: FederationHttpClient>`, not `Arc<dyn ..>`
 //! Mirrors `crate::media::service::MediaService<S: MediaStore>`'s and
@@ -168,6 +173,7 @@ use crate::accounts::emoji_repository::list_visible_emojis;
 use crate::accounts::model::{AccountProfile, CustomEmojiView};
 use crate::accounts::ports::{AccountPortsRegistry, StatusesQuery};
 use crate::accounts::profile_repository::find_profile;
+use crate::accounts::relationship_serializer::RelationshipSerializer;
 use crate::accounts::remote_fetcher::RemoteAccountFetcher;
 use crate::accounts::remote_repository::find_remote_by_id;
 use crate::accounts::serializer::AccountSerializer;
@@ -433,5 +439,71 @@ impl<S: MediaStore, H: FederationHttpClient> AccountService<S, H> {
             exclude_reblogs: query.exclude_reblogs,
         };
         self.ports.list_statuses(&statuses_query).await
+    }
+
+    /// Resolves each of `ids` (Requirement 5.1) to an [`AccountRef`] —
+    /// reusing [`Self::resolve_account_ref`]'s exact local/known-remote/
+    /// needs-fetching discipline, the same one [`Self::list_statuses`]
+    /// already reuses — then queries the currently registered
+    /// [`crate::accounts::ports::RelationshipStateProvider`] (via
+    /// [`AccountPortsRegistry::relationships`]) for `ctx.actor_id`'s (the
+    /// viewer, the Bearer-token-bound actor — same source
+    /// [`Self::verify_credentials`] reads) relationship to every resolved
+    /// target, and serializes each returned
+    /// [`crate::accounts::model::RelationshipView`] via
+    /// [`RelationshipSerializer::build_relationship`] into a JSON array, in
+    /// the same order as the resolved targets (Requirements 5.1, 5.2, 5.3).
+    ///
+    /// While no real provider is registered, the built-in
+    /// [`crate::accounts::ports::NoRelationshipProvider`] default already
+    /// returns the Requirement 5.4 "no relationship" value (every boolean
+    /// flag `false`, every count 0, `note` empty) for every resolved target
+    /// — this method still responds `Ok`, not an error, in that case.
+    ///
+    /// `RelationshipSerializer` is instantiated locally rather than held as
+    /// a constructor-injected field: unlike `AccountSerializer` (which needs
+    /// a server domain) it is a zero-field, stateless unit struct (its own
+    /// doc comment: "carries no state and performs no I/O"), so there is no
+    /// collaborator state for this service to own or thread through
+    /// construction.
+    ///
+    /// ## Unresolvable ids: skipped, not a batch-wide 404
+    /// Neither Requirement 5 nor design.md's `AccountService.relationships`
+    /// bullet specifies what happens when one id among several does not
+    /// resolve to any known local/remote/fetchable account — unlike
+    /// Requirements 3.3/4's explicit single-id 404 contract for
+    /// `show_account`/`list_statuses`. Mastodon's own `relationships`
+    /// endpoint does not fail an entire batch over one bad id; it simply
+    /// omits ids it cannot resolve from the response. This method follows
+    /// that precedent: an id for which [`Self::resolve_account_ref`] returns
+    /// an `Err` is silently omitted from `ids` before the provider is ever
+    /// queried, rather than aborting the whole request with a batch-wide
+    /// error. This is consistent with Requirement 5.4's "既定は関係なし"
+    /// spirit (a nonexistent target trivially has no relationship to
+    /// report), but it is a judgment call, not a literal requirement —
+    /// flagged in this task's status report CONCERNS for reviewer
+    /// confirmation, since a stricter reading could instead argue for a
+    /// batch-wide 404 the way `show_account`/`list_statuses` apply to a
+    /// single id.
+    pub async fn relationships(
+        &self,
+        ctx: &RequestActorContext,
+        ids: &[String],
+    ) -> Result<Value, AppError> {
+        let mut targets = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Ok(account_ref) = self.resolve_account_ref(id).await {
+                targets.push(account_ref);
+            }
+        }
+
+        let views = self.ports.relationships(ctx.actor_id, &targets).await?;
+
+        let relationship_serializer = RelationshipSerializer::new();
+        let array = views
+            .iter()
+            .map(|view| relationship_serializer.build_relationship(view))
+            .collect();
+        Ok(Value::Array(array))
     }
 }

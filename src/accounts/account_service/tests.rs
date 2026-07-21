@@ -20,8 +20,10 @@ use axum::http::StatusCode;
 use time::OffsetDateTime;
 
 use super::{AccountService, StatusesQueryInput};
-use crate::accounts::model::{ProfileField, RemoteAccount};
-use crate::accounts::ports::{AccountPortsRegistry, AccountStatusesProvider, StatusesQuery};
+use crate::accounts::model::{ProfileField, RelationshipView, RemoteAccount};
+use crate::accounts::ports::{
+    AccountPortsRegistry, AccountStatusesProvider, RelationshipStateProvider, StatusesQuery,
+};
 use crate::accounts::remote_fetcher::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::accounts::remote_repository::upsert_remote;
 use crate::accounts::serializer::AccountSerializer;
@@ -447,6 +449,220 @@ async fn list_statuses_threads_filters_and_pagination_to_the_provider() {
     assert!(captured.only_media);
     assert!(captured.exclude_replies);
     assert!(captured.exclude_reblogs);
+
+    app.cleanup().await;
+}
+
+/// Requirement 5.4: while no real `RelationshipStateProvider` is registered
+/// (the default `NoRelationshipProvider`), `relationships` for multiple real
+/// target ids still responds normally — one all-default Relationship JSON
+/// per target (every flag false, every count 0, `note` empty) — not an
+/// error.
+#[tokio::test]
+async fn relationships_returns_all_default_when_no_provider_is_registered() {
+    let app = spawn_test_app().await;
+    let viewer_id = create_test_actor(&app, "erin").await;
+    let target_a = create_test_actor(&app, "frank").await;
+    let target_b = create_test_actor(&app, "grace").await;
+    let mock = Arc::new(MockFederationHttpClient::new());
+    let svc = service(&app, mock);
+
+    let ctx = RequestActorContext {
+        actor_id: viewer_id,
+        scopes: ScopeSet::new(["read:follows"]),
+    };
+    let ids = vec![target_a.as_i64().to_string(), target_b.as_i64().to_string()];
+
+    let relationships = svc
+        .relationships(&ctx, &ids)
+        .await
+        .expect("relationships must respond normally with the default provider");
+
+    let array = relationships
+        .as_array()
+        .expect("relationships must return a JSON array");
+    assert_eq!(array.len(), 2);
+
+    for (entry, expected_id) in array.iter().zip(&ids) {
+        assert_eq!(entry["id"], *expected_id);
+        assert_eq!(entry["following"], false);
+        assert_eq!(entry["showing_reblogs"], false);
+        assert_eq!(entry["notifying"], false);
+        assert_eq!(entry["followed_by"], false);
+        assert_eq!(entry["blocking"], false);
+        assert_eq!(entry["blocked_by"], false);
+        assert_eq!(entry["muting"], false);
+        assert_eq!(entry["muting_notifications"], false);
+        assert_eq!(entry["requested"], false);
+        assert_eq!(entry["requested_by"], false);
+        assert_eq!(entry["domain_blocking"], false);
+        assert_eq!(entry["endorsed"], false);
+        assert_eq!(entry["note"], "");
+        assert_eq!(entry["languages"].as_array().unwrap().len(), 0);
+    }
+
+    app.cleanup().await;
+}
+
+/// This task's own account-scoping judgment call (see
+/// `AccountService::relationships`'s own doc comment, "Unresolvable ids"):
+/// an id matching no local actor and no cached/fetchable remote account is
+/// silently omitted from the result, rather than failing the whole batch.
+#[tokio::test]
+async fn relationships_omits_an_unresolvable_id_instead_of_failing_the_batch() {
+    let app = spawn_test_app().await;
+    let viewer_id = create_test_actor(&app, "harold").await;
+    let target = create_test_actor(&app, "ivy").await;
+    let mock = Arc::new(MockFederationHttpClient::new());
+    mock.queue_fetch_error(StatusCode::NOT_FOUND, "gone");
+    let svc = service(&app, mock);
+
+    let ctx = RequestActorContext {
+        actor_id: viewer_id,
+        scopes: ScopeSet::new(["read:follows"]),
+    };
+    let ids = vec!["999999999999".to_string(), target.as_i64().to_string()];
+
+    let relationships = svc
+        .relationships(&ctx, &ids)
+        .await
+        .expect("an unresolvable id must not fail the whole batch");
+
+    let array = relationships
+        .as_array()
+        .expect("relationships must return a JSON array");
+    assert_eq!(array.len(), 1, "only the resolvable id must be reflected");
+    assert_eq!(array[0]["id"], target.as_i64().to_string());
+
+    app.cleanup().await;
+}
+
+/// A capturing test-double `RelationshipStateProvider`: records the exact
+/// `viewer`/`targets` it is called with (so a test can assert
+/// `AccountService::relationships` threaded the token-bound viewer and the
+/// resolved targets through unchanged, Requirement 5.1/5.3) and returns a
+/// distinguishable `RelationshipView` per target (`following`/`note` derived
+/// from the target's own id) so a test can prove the JSON array reflects
+/// the provider's per-target values correctly, in the right order — not
+/// merely that the array has the right length.
+struct CapturingRelationshipProvider {
+    captured: Mutex<Option<(Id, Vec<AccountRef>)>>,
+}
+
+impl CapturingRelationshipProvider {
+    fn new() -> Self {
+        CapturingRelationshipProvider {
+            captured: Mutex::new(None),
+        }
+    }
+}
+
+impl RelationshipStateProvider for CapturingRelationshipProvider {
+    fn relationships<'a>(
+        &'a self,
+        viewer: Id,
+        targets: &'a [AccountRef],
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Vec<RelationshipView>, AppError>> + Send + 'a>,
+    > {
+        let captured_targets = targets.to_vec();
+        Box::pin(async move {
+            *self
+                .captured
+                .lock()
+                .expect("CapturingRelationshipProvider lock must not be poisoned") =
+                Some((viewer, captured_targets));
+            Ok(targets
+                .iter()
+                .enumerate()
+                .map(|(index, target)| {
+                    let id = match *target {
+                        AccountRef::Local(id) => id,
+                        AccountRef::Remote(id) => id,
+                    };
+                    // distinguishable per target: alternate `following`,
+                    // and encode the target's own position in `note`.
+                    RelationshipView {
+                        id,
+                        following: index % 2 == 0,
+                        showing_reblogs: false,
+                        notifying: false,
+                        languages: Vec::new(),
+                        followed_by: index % 2 == 1,
+                        blocking: false,
+                        blocked_by: false,
+                        muting: false,
+                        muting_notifications: false,
+                        requested: false,
+                        requested_by: false,
+                        domain_blocking: false,
+                        endorsed: false,
+                        note: format!("relationship-{index}"),
+                    }
+                })
+                .collect())
+        })
+    }
+}
+
+/// This task's own "複数 id で Relationship 配列を返す" acceptance criterion
+/// (Requirements 5.1, 5.2, 5.3): with a registered test-double provider that
+/// returns distinguishable values per target, the resulting JSON array must
+/// reflect exactly those per-target values, in the same order as the input
+/// ids — and the provider must have been called with the viewer's own
+/// `ctx.actor_id` and the correctly resolved `AccountRef`s (not, say, all
+/// `AccountRef::Remote` or a viewer id that doesn't match the token).
+#[tokio::test]
+async fn relationships_returns_a_relationship_array_from_a_registered_provider() {
+    let app = spawn_test_app().await;
+    let viewer_id = create_test_actor(&app, "jack").await;
+    let target_a = create_test_actor(&app, "karen").await;
+    let target_b = create_test_actor(&app, "leo").await;
+    let mock = Arc::new(MockFederationHttpClient::new());
+    let ports = AccountPortsRegistry::new();
+    let provider = Arc::new(CapturingRelationshipProvider::new());
+    ports.set_relationship_provider(Arc::clone(&provider) as Arc<dyn RelationshipStateProvider>);
+    let svc = service_with_ports(&app, mock, ports);
+
+    let ctx = RequestActorContext {
+        actor_id: viewer_id,
+        scopes: ScopeSet::new(["read:follows"]),
+    };
+    let ids = vec![target_a.as_i64().to_string(), target_b.as_i64().to_string()];
+
+    let relationships = svc
+        .relationships(&ctx, &ids)
+        .await
+        .expect("relationships must succeed with a registered provider");
+
+    let array = relationships
+        .as_array()
+        .expect("relationships must return a JSON array");
+    assert_eq!(array.len(), 2);
+
+    // Order preserved, and each entry reflects its own target's
+    // distinguishable provider value — not just a length check.
+    assert_eq!(array[0]["id"], target_a.as_i64().to_string());
+    assert_eq!(array[0]["following"], true);
+    assert_eq!(array[0]["followed_by"], false);
+    assert_eq!(array[0]["note"], "relationship-0");
+
+    assert_eq!(array[1]["id"], target_b.as_i64().to_string());
+    assert_eq!(array[1]["following"], false);
+    assert_eq!(array[1]["followed_by"], true);
+    assert_eq!(array[1]["note"], "relationship-1");
+
+    let (captured_viewer, captured_targets) = provider
+        .captured
+        .lock()
+        .expect("lock must not be poisoned")
+        .clone()
+        .expect("the provider must have been called exactly once");
+    assert_eq!(captured_viewer, viewer_id);
+    assert_eq!(
+        captured_targets,
+        vec![AccountRef::Local(target_a), AccountRef::Local(target_b)]
+    );
 
     app.cleanup().await;
 }
