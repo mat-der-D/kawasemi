@@ -146,6 +146,7 @@ use crate::runtime::RuntimeContext;
 pub mod account_service;
 pub mod custom_emoji_serializer;
 pub mod emoji_repository;
+pub mod emoji_service;
 pub mod instance_serializer;
 pub mod instance_service;
 pub mod model;
@@ -163,6 +164,7 @@ pub use account_service::{
 pub use custom_emoji_serializer::{
     CustomEmojiSerializer, custom_emoji_to_json, to_custom_emoji_json,
 };
+pub use emoji_service::CustomEmojiService;
 pub use instance_serializer::{
     ConfigurationJson, ContactJson, InstanceJson, InstanceSerializer, MediaAttachmentsConfigJson,
     RegistrationsJson, RuleJson, ServerCapabilities, UsageJson, UsageUsersJson, instance_to_json,
@@ -212,6 +214,7 @@ pub struct AccountsModule {
     ports: AccountPortsRegistry,
     service: Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>>,
     instance: Arc<InstanceService>,
+    emojis: Arc<CustomEmojiService>,
 }
 
 impl AccountsModule {
@@ -247,6 +250,16 @@ impl AccountsModule {
     /// atomic increment), not a freshly constructed service.
     pub fn instance(&self) -> Arc<InstanceService> {
         Arc::clone(&self.instance)
+    }
+
+    /// The shared `CustomEmojiService` handle (task 5.6): a future
+    /// `AccountsEndpoints` (task 6) derives its own `GET /api/v1/custom_emojis`
+    /// endpoint state from this same handle, the same way
+    /// [`AccountsModule::service`]'s/[`AccountsModule::instance`]'s callers do
+    /// — an `Arc` clone (cheap, one atomic increment), not a freshly
+    /// constructed service.
+    pub fn emojis(&self) -> Arc<CustomEmojiService> {
+        Arc::clone(&self.emojis)
     }
 }
 
@@ -318,10 +331,15 @@ pub fn build_accounts_module(
     ));
     let instance_serializer = InstanceSerializer::new(domain);
     let caps = ServerCapabilities::from_media_config(&media_config);
+    let emojis = Arc::new(CustomEmojiService::new(
+        pool.clone(),
+        CustomEmojiSerializer::new(),
+    ));
     let instance = Arc::new(InstanceService::new(pool, instance_serializer, caps));
     AccountsModule {
         ports,
         service,
         instance,
+        emojis,
     }
 }
