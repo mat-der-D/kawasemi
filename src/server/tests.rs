@@ -160,11 +160,19 @@ fn test_state(seed: u64) -> AppState {
     let (media_module, _background_workers_not_spawned) =
         media::build_media_module(pool.clone(), runtime.clone(), config.media.clone());
     // Mirrors the media-module construction immediately above: builds the
-    // accounts-and-instance module bundle (task 1.4) the same way
+    // accounts-and-instance module bundle (task 5.1) the same way
     // `bootstrap()`'s production path does
-    // (`crate::accounts::build_accounts_module`) — this bundle has no I/O to
-    // avoid at construction time (see that function's own doc comment).
-    let accounts_module = accounts::build_accounts_module();
+    // (`crate::accounts::build_accounts_module`) — this bundle performs no
+    // I/O at construction time either (only its later method calls query the
+    // pool), so it stays safe against this suite's `connect_lazy` pool.
+    let accounts_module = accounts::build_accounts_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        media_module.store().clone(),
+    );
     AppState::new(
         pool,
         runtime,

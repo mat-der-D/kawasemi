@@ -284,6 +284,26 @@ impl ActorDirectory {
         Ok(actor.map(local_actor_to_resolved))
     }
 
+    /// Resolves `id`'s local actor creation timestamp (Requirement 1.1's
+    /// `created_at`, needed by accounts-and-instance's `AccountSerializer`,
+    /// which cannot derive it from a `ResolvedActor` alone — see
+    /// `crate::accounts::serializer`'s own doc comment, "Deliberate
+    /// deviations from design.md's literal Service Interface", for the full
+    /// gap this closes). Returns `Ok(None)` — not an error — when no local
+    /// actor is persisted under `id`, mirroring
+    /// [`resolve_actor_by_id`](Self::resolve_actor_by_id)'s own "no error for
+    /// absence" contract.
+    ///
+    /// This is a narrow, well-precedented sibling-method extension — see
+    /// this module's doc comment (`resolve_actor_by_id`/`sole_owner`
+    /// sections) for the two prior additions of this exact shape by other
+    /// specs' own downstream tasks. Added by accounts-and-instance's task 5.1
+    /// (`AccountService`), not this component's original task 5.2 scope.
+    pub async fn actor_created_at(&self, id: Id) -> Result<Option<OffsetDateTime>, AppError> {
+        let actor = find_by_id(&self.pool, id).await?;
+        Ok(actor.map(|actor| actor.created_at))
+    }
+
     /// Protocol-layer operation: returns `actor_id`'s current active signing
     /// key's public material as an owner-free [`ActorPublicKey`] (Requirement
     /// 3.1, 8.3), or `Ok(None)` when `actor_id` has no active key.

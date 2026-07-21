@@ -194,12 +194,27 @@ fn sample_media_module(
     media
 }
 
-/// Builds an `AccountsModule` (task 1.4): `build_accounts_module` takes no
-/// `pool`/`runtime`/config — at this wiring-only stage it only defaults
-/// task 1.3's `AccountPortsRegistry`, touching neither the database nor the
-/// clock (see `crate::accounts::build_accounts_module`'s own doc comment).
-fn sample_accounts_module() -> AccountsModule {
-    accounts::build_accounts_module()
+/// Builds an `AccountsModule` (task 5.1), mirroring
+/// `sample_federation_module`/`sample_media_module`'s own "no real I/O
+/// beyond what construction itself needs" property: `build_accounts_module`
+/// only ever stores `pool`/`runtime`/config values and clones the
+/// caller-supplied `directory`/`store` handles (never dials the database or
+/// the network itself), so this is safe against the same `connect_lazy` pool
+/// this suite's other fixtures use.
+fn sample_accounts_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    directory: Arc<crate::actor::ActorDirectory>,
+    store: crate::media::LocalFsStore,
+) -> AccountsModule {
+    accounts::build_accounts_module(
+        pool,
+        runtime,
+        "state-test.accounts.internal".to_string(),
+        directory,
+        Arc::new(ReqwestFederationHttpClient::new()),
+        store,
+    )
 }
 
 /// Requirements 1.1, 3.3, 5.5, 5.6: downstream code must be able to retrieve
@@ -217,7 +232,12 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
     let federation =
         sample_federation_module(pool.clone(), runtime.clone(), Arc::clone(actor.directory()));
     let media = sample_media_module(pool.clone(), runtime.clone(), &config);
-    let accounts = sample_accounts_module();
+    let accounts = sample_accounts_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        media.store().clone(),
+    );
 
     let state = AppState::new(
         pool,
@@ -280,7 +300,12 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
     let federation =
         sample_federation_module(pool.clone(), runtime.clone(), Arc::clone(actor.directory()));
     let media = sample_media_module(pool.clone(), runtime.clone(), &config);
-    let accounts = sample_accounts_module();
+    let accounts = sample_accounts_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        media.store().clone(),
+    );
 
     let state = AppState::new(
         pool, runtime, config, actor, oauth, federation, media, accounts,

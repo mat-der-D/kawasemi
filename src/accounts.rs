@@ -84,7 +84,36 @@
 //!   into a [`model::RemoteAccount`], and upserts it through
 //!   [`remote_repository`]'s already-implemented cache — reusing a fresh
 //!   cache entry without any network call — see [`remote_fetcher`].
+//!
+//! - Task 5.1 (`Boundary: AccountService`): the first two operations of the
+//!   eventual `AccountService` business layer —
+//!   [`account_service::AccountService::verify_credentials`] (Bearer-token-
+//!   bound actor -> CredentialAccount) and
+//!   [`account_service::AccountService::show_account`] (local/known-remote/
+//!   needs-fetching identifier -> Account, 404 for anything else) —
+//!   orchestrating [`profile_repository`]/[`remote_repository`]/
+//!   [`emoji_repository`]/[`serializer`]/[`remote_fetcher`]/[`ports`] plus
+//!   actor-model's `ActorDirectory` (gaining one narrow, additive method,
+//!   `ActorDirectory::actor_created_at`, this task's own resolution of the
+//!   `created_at` gap `serializer.rs` flagged) — see [`account_service`].
+//!   `list_statuses`/`relationships`/`update_credentials` (tasks 5.2/5.3/5.4)
+//!   do not exist on this type yet. This task also extends
+//!   [`build_accounts_module`]/[`AccountsModule`] to construct and hold the
+//!   real, `LocalFsStore`/`ReqwestFederationHttpClient`-monomorphized
+//!   `AccountService` — the first time this bundle holds anything beyond
+//!   task 1.3's `AccountPortsRegistry`. No HTTP surface (`AccountsEndpoints`,
+//!   task 6) mounts these operations yet.
 
+use std::sync::Arc;
+
+use sqlx::postgres::PgPool;
+
+use crate::actor::ActorDirectory;
+use crate::federation::signatures::ReqwestFederationHttpClient;
+use crate::media::local_fs::LocalFsStore;
+use crate::runtime::RuntimeContext;
+
+pub mod account_service;
 pub mod custom_emoji_serializer;
 pub mod emoji_repository;
 pub mod instance_serializer;
@@ -97,6 +126,7 @@ pub mod remote_repository;
 pub mod serializer;
 pub mod settings_repository;
 
+pub use account_service::AccountService;
 pub use custom_emoji_serializer::{
     CustomEmojiSerializer, custom_emoji_to_json, to_custom_emoji_json,
 };
@@ -129,13 +159,16 @@ pub use serializer::{
 /// `crate::federation::FederationModule`/`crate::oauth::OauthModule` already
 /// are.
 ///
-/// At this wiring-only stage the bundle holds exactly task 1.3's
+/// At this wiring-only stage the bundle holds task 1.3's
 /// [`AccountPortsRegistry`] — the one piece design.md's `AccountsModule`
-/// component explicitly names as this task's own responsibility ("委譲 port
-/// を既定実装で初期化して...レジストリに格納"). Repositories/serializers/
-/// services (design.md's other `AccountsModule`-adjacent components) do not
-/// exist yet (tasks 2.x-5.x); when they land, they extend this struct the
-/// same incremental way `MediaModule` grew from `store`+`service` alone.
+/// component explicitly names as task 1.4's own responsibility ("委譲 port
+/// を既定実装で初期化して...レジストリに格納") — plus, as of task 5.1, the
+/// real, `LocalFsStore`/`ReqwestFederationHttpClient`-monomorphized
+/// [`account_service::AccountService`] (design.md's `AccountsModule`
+/// Responsibilities: "各リポジトリ/サービス/シリアライザを構築し..."). This
+/// mirrors `MediaModule`'s own incremental growth from `store` alone (task
+/// 2.2) to `store`+`service` (task 4.1) as later tasks landed real
+/// components on top of the initial wiring skeleton.
 ///
 /// This type does not construct its own dependencies — [`build_accounts_module`]
 /// does that (mirrors `MediaModule`'s/`FederationModule`'s identical
@@ -143,6 +176,7 @@ pub use serializer::{
 #[derive(Clone)]
 pub struct AccountsModule {
     ports: AccountPortsRegistry,
+    service: Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>>,
 }
 
 impl AccountsModule {
@@ -161,21 +195,57 @@ impl AccountsModule {
     pub fn ports(&self) -> AccountPortsRegistry {
         self.ports.clone()
     }
+
+    /// The shared `AccountService` handle (task 5.1): a future
+    /// `AccountsEndpoints` (task 6) derives its own endpoint state from this
+    /// same handle, the same way `crate::media::MediaModule::service`'s
+    /// callers do — an `Arc` clone (cheap, one atomic increment), not a
+    /// freshly constructed service.
+    pub fn service(&self) -> Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>> {
+        Arc::clone(&self.service)
+    }
 }
 
-/// Assembles the accounts-and-instance module bundle with every delegation
-/// port defaulted to its built-in safe default (task 1.4, Requirements 10.1,
-/// 10.5): [`AccountPortsRegistry::new`] — no DB pool, runtime context, or
-/// config is threaded through here (unlike `crate::media::build_media_module`),
-/// because nothing this task constructs touches the database, the clock, or
-/// startup configuration yet (no repositories/services exist at this
-/// wiring-only stage — see [`AccountsModule`]'s own doc comment for what a
-/// later task will extend this constructor to accept once it does). Shared
-/// by `src/bootstrap.rs` (production) and `src/test_harness.rs`
-/// (`spawn_test_app`), mirroring `crate::media::build_media_module`'s "one
-/// composition function, two callers" precedent.
-pub fn build_accounts_module() -> AccountsModule {
-    AccountsModule {
-        ports: AccountPortsRegistry::new(),
-    }
+/// Assembles the accounts-and-instance module bundle (task 5.1, Requirements
+/// 2.1, 3.1, 3.2, 3.3, 10.1, 10.5): defaults task 1.3's [`AccountPortsRegistry`]
+/// to its built-in safe implementations, and builds the real
+/// [`account_service::AccountService`] — monomorphized over this crate's one
+/// concrete production `MediaStore`/`FederationHttpClient` pair
+/// (`LocalFsStore`/`ReqwestFederationHttpClient`, mirroring
+/// `crate::media::build_media_module`'s/`crate::federation::build_federation_module`'s
+/// identical "one concrete type per non-`dyn`-safe trait" convention) —
+/// around `pool`/`runtime`/`domain`/`directory`/`http_client`/`store`, every
+/// one of which the caller (`src/bootstrap.rs`'s production path,
+/// `src/test_harness.rs`'s `spawn_test_app`) already constructs for its own
+/// other module bundles (actor-model's `ActorDirectory`, federation-core's
+/// `ReqwestFederationHttpClient`, media-pipeline's `LocalFsStore`) and simply
+/// shares here rather than this function constructing a second, independent
+/// instance of any of them. No background task to spawn (unlike
+/// `media`/`federation`'s own `build_*_module` — this bundle owns no
+/// resident worker).
+pub fn build_accounts_module(
+    pool: PgPool,
+    runtime: RuntimeContext,
+    domain: impl Into<String>,
+    directory: Arc<ActorDirectory>,
+    http_client: Arc<ReqwestFederationHttpClient>,
+    store: LocalFsStore,
+) -> AccountsModule {
+    let ports = AccountPortsRegistry::new();
+    let fetcher = RemoteAccountFetcher::new(
+        pool.clone(),
+        http_client,
+        runtime,
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    );
+    let serializer = AccountSerializer::new(domain);
+    let service = Arc::new(AccountService::new(
+        pool,
+        directory,
+        fetcher,
+        serializer,
+        ports.clone(),
+        store,
+    ));
+    AccountsModule { ports, service }
 }

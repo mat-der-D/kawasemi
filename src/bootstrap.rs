@@ -423,16 +423,29 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         media::build_media_module(pool.clone(), runtime.clone(), cfg.media.clone());
     media_background.spawn(server::os_shutdown_signal);
 
-    // Assembles the accounts-and-instance Composition Root wiring skeleton
-    // (task 1.4, Requirements 10.1, 10.5): defaults task 1.3's
+    // Assembles the accounts-and-instance Composition Root wiring (task 5.1,
+    // Requirements 2.1, 3.1, 3.2, 3.3, 10.1, 10.5): defaults task 1.3's
     // `AccountPortsRegistry` to its built-in safe implementations
     // (`EmptyStatusesProvider`/`NoRelationshipProvider`/`ZeroCountsProvider`)
-    // via `crate::accounts::build_accounts_module`. No background task to
-    // spawn here — unlike `federation_background`/`media_background` above,
-    // this bundle owns no resident worker at this wiring-only stage (no
-    // repositories/services exist yet, see `AccountsModule`'s own doc
-    // comment).
-    let accounts_module = accounts::build_accounts_module();
+    // and builds the real `AccountService` (task 5.1) via
+    // `crate::accounts::build_accounts_module`, sharing this same
+    // `pool`/`runtime`/`cfg.server.domain`/`actor_module`'s `ActorDirectory`/
+    // `media_module`'s `LocalFsStore` every other composition-root component
+    // above already shares. Uses its own, separately-constructed
+    // `ReqwestFederationHttpClient` (mirroring `federation_module`'s own
+    // instance immediately above) rather than threading the same `Arc`
+    // through both — this task does not touch `federation::build_federation_module`'s
+    // own call site to add a second consumer of its client. No background
+    // task to spawn here — unlike `federation_background`/`media_background`
+    // above, this bundle owns no resident worker.
+    let accounts_module = accounts::build_accounts_module(
+        pool.clone(),
+        runtime.clone(),
+        cfg.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        media_module.store().clone(),
+    );
 
     Ok(AppState::new(
         pool,

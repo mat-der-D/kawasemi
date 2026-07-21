@@ -656,11 +656,22 @@ pub async fn spawn_test_app() -> TestApp {
         media::build_media_module(pool.clone(), runtime.clone(), config.media.clone());
     media_background.spawn(std::future::pending::<()>);
 
-    // Assembles the accounts-and-instance module bundle (task 1.4) the same
+    // Assembles the accounts-and-instance module bundle (task 5.1) the same
     // way `bootstrap()`'s production path does
-    // (`crate::accounts::build_accounts_module`) — no background task to
+    // (`crate::accounts::build_accounts_module`), sharing this instance's own
+    // `pool`/`runtime`/`config.server.domain`/`actor_module`'s
+    // `ActorDirectory`/`media_module`'s `LocalFsStore`, with its own,
+    // separately-constructed `ReqwestFederationHttpClient` (mirroring
+    // `federation_module`'s own instance above) — no background task to
     // spawn (see `bootstrap.rs`'s identical comment at its own call site).
-    let accounts_module = accounts::build_accounts_module();
+    let accounts_module = accounts::build_accounts_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        media_module.store().clone(),
+    );
 
     let state = AppState::new(
         pool.clone(),

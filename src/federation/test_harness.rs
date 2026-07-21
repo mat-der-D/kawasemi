@@ -364,7 +364,7 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
             delivery_poll_batch_size: 20,
             pruning_interval: PAIR_PRUNING_INTERVAL,
         },
-        http_client,
+        Arc::clone(&http_client),
     );
     federation_background.spawn();
 
@@ -379,9 +379,22 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
     media_background.spawn(std::future::pending::<()>);
 
     // Mirrors `crate::test_harness::spawn_test_app`'s own accounts-and-
-    // instance wiring (task 1.4): no background task to spawn (see that
-    // call site's identical comment).
-    let accounts_module = accounts::build_accounts_module();
+    // instance wiring (task 5.1): shares this paired instance's own
+    // `pool`/`runtime`/`config.server.domain`/`actor_module`'s
+    // `ActorDirectory`/`media_module`'s `LocalFsStore`, reusing the same
+    // caller-supplied `http_client` `federation_module` above was built with
+    // (Requirement 13.1's "insecure_loopback" instance, so this paired
+    // instance's own remote-account fetches can also reach the other paired
+    // instance's plain-HTTP listener) — no background task to spawn (see
+    // that call site's identical comment).
+    let accounts_module = accounts::build_accounts_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        Arc::clone(&http_client),
+        media_module.store().clone(),
+    );
 
     let state = AppState::new(
         pool.clone(),
