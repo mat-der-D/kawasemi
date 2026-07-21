@@ -207,6 +207,7 @@ fn sample_accounts_module(
     directory: Arc<crate::actor::ActorDirectory>,
     store: crate::media::LocalFsStore,
     media: Arc<crate::media::MediaService<crate::media::LocalFsStore>>,
+    media_config: MediaConfig,
 ) -> AccountsModule {
     accounts::build_accounts_module(
         pool,
@@ -216,6 +217,7 @@ fn sample_accounts_module(
         Arc::new(ReqwestFederationHttpClient::new()),
         store,
         media,
+        media_config,
     )
 }
 
@@ -240,6 +242,7 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         Arc::clone(actor.directory()),
         media.store().clone(),
         media.service(),
+        config.media.clone(),
     );
 
     let state = AppState::new(
@@ -309,6 +312,7 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
         Arc::clone(actor.directory()),
         media.store().clone(),
         media.service(),
+        config.media.clone(),
     );
 
     let state = AppState::new(

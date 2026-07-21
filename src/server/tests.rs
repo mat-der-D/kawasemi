@@ -173,6 +173,7 @@ fn test_state(seed: u64) -> AppState {
         Arc::new(ReqwestFederationHttpClient::new()),
         media_module.store().clone(),
         media_module.service(),
+        config.media.clone(),
     );
     AppState::new(
         pool,

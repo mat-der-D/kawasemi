@@ -116,12 +116,28 @@
 //!   its `MediaModule` before its `AccountsModule` already, so this is a
 //!   reused `Arc` clone, never a second, independently-configured
 //!   `MediaService`/`MediaConfig`).
+//!
+//! - Task 5.5 (`Boundary: InstanceService`): the `InstanceService`
+//!   business-layer sibling to `AccountService` —
+//!   [`instance_service::InstanceService::instance_v2`] loads the
+//!   operational `instance_settings` singleton (task 2.4's
+//!   `InstanceSettingsRepository::load_instance_settings`) and combines it
+//!   with a [`instance_serializer::ServerCapabilities`] snapshot (derived
+//!   once, at construction, from this instance's own `MediaConfig`) via task
+//!   3.3's already-implemented `InstanceSerializer::build_instance_v2` — see
+//!   [`instance_service`]. [`build_accounts_module`] gains a new
+//!   `media_config: MediaConfig` parameter (every call site already has its
+//!   own `config.media` value in scope, the same value `MediaService` is
+//!   itself built from) to build that snapshot from, and now also
+//!   constructs and holds the real `InstanceService` alongside
+//!   `AccountService`.
 
 use std::sync::Arc;
 
 use sqlx::postgres::PgPool;
 
 use crate::actor::ActorDirectory;
+use crate::config::MediaConfig;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::media::local_fs::LocalFsStore;
 use crate::media::service::MediaService;
@@ -131,6 +147,7 @@ pub mod account_service;
 pub mod custom_emoji_serializer;
 pub mod emoji_repository;
 pub mod instance_serializer;
+pub mod instance_service;
 pub mod model;
 pub mod ports;
 pub mod profile_repository;
@@ -151,6 +168,7 @@ pub use instance_serializer::{
     RegistrationsJson, RuleJson, ServerCapabilities, UsageJson, UsageUsersJson, instance_to_json,
     to_instance_json,
 };
+pub use instance_service::InstanceService;
 pub use model::{
     AccountCounts, AccountProfile, AccountView, AccountViewFields, Acct, CredentialSource,
     CustomEmojiView, InstanceSettings, ProfileField, ProfilePatch, RelationshipView, RemoteAccount,
@@ -193,6 +211,7 @@ pub use serializer::{
 pub struct AccountsModule {
     ports: AccountPortsRegistry,
     service: Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>>,
+    instance: Arc<InstanceService>,
 }
 
 impl AccountsModule {
@@ -220,6 +239,15 @@ impl AccountsModule {
     pub fn service(&self) -> Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>> {
         Arc::clone(&self.service)
     }
+
+    /// The shared `InstanceService` handle (task 5.5): a future
+    /// `AccountsEndpoints` (task 6) derives its own `GET /api/v2/instance`
+    /// endpoint state from this same handle, the same way
+    /// [`AccountsModule::service`]'s callers do — an `Arc` clone (cheap, one
+    /// atomic increment), not a freshly constructed service.
+    pub fn instance(&self) -> Arc<InstanceService> {
+        Arc::clone(&self.instance)
+    }
 }
 
 /// Assembles the accounts-and-instance module bundle (task 5.1, Requirements
@@ -242,6 +270,23 @@ impl AccountsModule {
 /// `MediaService`/`MediaConfig` this function parses/constructs itself. No
 /// background task to spawn (unlike `media`/`federation`'s own
 /// `build_*_module` — this bundle owns no resident worker).
+///
+/// `media_config` (task 5.5, Requirement 8.4) is the caller's own already-
+/// validated `AppConfig.media` value (a clone, not a second independently
+/// parsed `MediaConfig`) — used once, here, to derive the
+/// [`instance_serializer::ServerCapabilities`] snapshot [`InstanceService`]
+/// is constructed with (see [`instance_service`]'s own doc comment for why a
+/// once-at-construction snapshot never goes stale against a `MediaConfig`
+/// this server never mutates after startup).
+///
+/// `too_many_arguments` is suppressed for the same documented reason
+/// `AppState::new`/`AccountService::new`'s own builders already suppress it
+/// (`src/state.rs`'s own doc comment: "inherent to this constructor's role,
+/// not a smell to refactor away") — one parameter per already-constructed
+/// collaborator this Composition Root function assembles, growing as tasks
+/// land, not something a params struct would actually remove the coupling
+/// of.
+#[allow(clippy::too_many_arguments)]
 pub fn build_accounts_module(
     pool: PgPool,
     runtime: RuntimeContext,
@@ -250,7 +295,9 @@ pub fn build_accounts_module(
     http_client: Arc<ReqwestFederationHttpClient>,
     store: LocalFsStore,
     media: Arc<MediaService<LocalFsStore>>,
+    media_config: MediaConfig,
 ) -> AccountsModule {
+    let domain = domain.into();
     let ports = AccountPortsRegistry::new();
     let fetcher = RemoteAccountFetcher::new(
         pool.clone(),
@@ -258,9 +305,9 @@ pub fn build_accounts_module(
         runtime.clone(),
         DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
     );
-    let serializer = AccountSerializer::new(domain);
+    let serializer = AccountSerializer::new(domain.clone());
     let service = Arc::new(AccountService::new(
-        pool,
+        pool.clone(),
         directory,
         fetcher,
         serializer,
@@ -269,5 +316,12 @@ pub fn build_accounts_module(
         media,
         runtime,
     ));
-    AccountsModule { ports, service }
+    let instance_serializer = InstanceSerializer::new(domain);
+    let caps = ServerCapabilities::from_media_config(&media_config);
+    let instance = Arc::new(InstanceService::new(pool, instance_serializer, caps));
+    AccountsModule {
+        ports,
+        service,
+        instance,
+    }
 }

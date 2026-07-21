@@ -395,6 +395,7 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         Arc::clone(&http_client),
         media_module.store().clone(),
         media_module.service(),
+        config.media.clone(),
     );
 
     let state = AppState::new(

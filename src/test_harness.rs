@@ -672,6 +672,7 @@ pub async fn spawn_test_app() -> TestApp {
         Arc::new(ReqwestFederationHttpClient::new()),
         media_module.store().clone(),
         media_module.service(),
+        config.media.clone(),
     );
 
     let state = AppState::new(
