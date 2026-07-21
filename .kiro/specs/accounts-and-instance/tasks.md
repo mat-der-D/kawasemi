@@ -100,7 +100,7 @@
   - _Requirements: 2.1, 3.1, 3.2, 3.3_
   - _Boundary: AccountService_
   - _Depends: 3.1, 4_
-- [ ] 5.2 accounts/:id/statuses（委譲）を実装する
+- [x] 5.2 accounts/:id/statuses（委譲）を実装する
   - アカウント解決 + ページネーション解釈 + 絞り込み/可視性コンテキストを `AccountStatusesProvider` へ受け渡し、未登録時は空ページを返す
   - 観測可能な完了条件: provider 未登録で空ページ（`Link` 付き）を返し、絞り込み条件が provider へ伝達されるテストが green
   - _Requirements: 4.1, 4.2, 4.4, 4.5_
@@ -168,3 +168,5 @@
 - タスク群 2 の run スコープ最終レビューでの注意喚起（task 3.1 AccountSerializer 実装時に要確認）: `CustomEmojiRepository::resolve_emojis(pool, shortcodes)` は design.md の文字どおりのシグネチャ（domain 引数なし）に従うため、同一 shortcode がローカルと特定リモートドメインの両方に存在する場合、両方の行を返してしまい呼び出し側では区別できない（`CustomEmojiView`/`custom_emojis` テーブルの複合 PK は `(shortcode, domain)` だが `CustomEmojiView` 自体は `domain` フィールドを持たない — task 1.2 の model.rs 由来、本 run では変更していない）。task 3.1 で「shortcode だけで zip する」ような素朴な実装をすると、衝突時に誤った絵文字 URL を選んでしまう可能性がある。対応方針は task 3.1 実装時に設計判断すること（例: 対象アカウントの domain も渡す/`CustomEmojiView` に domain を追加する等、design.md/model.rs への revalidation が必要になる可能性がある）。
 
 - タスク 5.1: `AccountService::verify_credentials`/`show_account` を `src/accounts/account_service.rs` に実装。`emoji_candidates` は `serializer.rs` のショートコード抽出ヘルパーが非公開のため `resolve_emojis`（対象ショートコードのみ）ではなく `list_visible_emojis`（`visible_in_picker=TRUE` の全件）を使っている — 本文に含まれない絵文字も候補に入り得るが、`AccountSerializer` 側の突き合わせで最終的な `emojis` 配列には無関係なものは混入しない（レビューで non-blocking 確認済み）。後続タスクで真にショートコード限定の解決が必要になった場合は、`serializer.rs` 側のヘルパーを `pub(crate)` 化して共有する対応を検討すること。`show_account` の id 解決規律: 数値文字列はローカル actor id → 既知リモート id の順、非数値文字列は `actor_uri` とみなし `RemoteAccountFetcher::fetch_and_normalize` に渡す（design.md のフロー図に明示の「フェッチ」分岐は無いが task 文の「必要時フェッチ」と `_Depends: 3.1, 4_` から導出、レビュー承認済み）。`AccountsModule`/`build_accounts_module` のコンストラクタ引数が増えたため `bootstrap.rs`/`test_harness.rs`/`federation/test_harness.rs`/`server/tests.rs`/`state/tests.rs` を配線更新。`ActorDirectory::actor_created_at`（`src/actor/directory.rs`）を新規追加 — `resolve_actor_by_id`/`sole_owner` と同型の「下流タスクによる narrow な上流追加」パターン。
+
+- タスク 5.2: `AccountService::list_statuses` を追加（`AccountsModule`/コンストラクタの配線変更は不要 — `AccountPortsRegistry` は task 5.1 の時点で既に `AccountService` のフィールドだった）。`StatusesQueryInput`（design.md に型定義は無く、Service Interface のシグネチャ名のみ存在 — フィールド構成 `{ page: PageParams, pinned, only_media, exclude_replies, exclude_reblogs }` は本タスクの判断、レビューで承認済み）を新設し `src/accounts.rs` から re-export（task 6 の `AccountsEndpoints` が使う）。`id` 解決は task 5.1 の `show_account`/`resolve_local` と同じ判別規律を再利用する private helper `resolve_account_ref` を新設。`StatusesQuery.page` は `ports.rs` 定義どおり未パース（生の `PageParams`）のまま `AccountStatusesProvider` へ渡す — カーソル形式の決定は該当 provider（将来の statuses-core 登録）側の責務。フルスイート実行中に `federation::outbound::worker::tests::run_once_delivers_a_due_job_and_marks_it_done`／`run_once_marks_a_job_failed_immediately_when_sender_no_longer_resolves` が単発で flaky に失敗することがある（本 spec の変更と無関係、DB プール競合起因と推測、単体実行では毎回 green）。後続タスクでこの flaky が再発した場合は本 spec の変更を疑う前にまず単体再実行で切り分けること。

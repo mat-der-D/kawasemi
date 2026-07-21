@@ -126,7 +126,7 @@ pub mod remote_repository;
 pub mod serializer;
 pub mod settings_repository;
 
-pub use account_service::AccountService;
+pub use account_service::{AccountService, StatusesQueryInput};
 pub use custom_emoji_serializer::{
     CustomEmojiSerializer, custom_emoji_to_json, to_custom_emoji_json,
 };

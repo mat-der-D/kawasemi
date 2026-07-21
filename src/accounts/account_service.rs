@@ -1,21 +1,21 @@
 //! `AccountService` (design.md "Service / サービス層" -> "AccountService /
-//! InstanceService / CustomEmojiService"; Requirements 2.1, 3.1, 3.2, 3.3;
-//! task 5.1, `Boundary: AccountService`): resolves the single actor bound to
-//! a Bearer token into a CredentialAccount ([`AccountService::verify_credentials`])
-//! and resolves an arbitrary local/known-remote/needs-fetching identifier
-//! into an Account ([`AccountService::show_account`]).
+//! InstanceService / CustomEmojiService"; Requirements 2.1, 3.1, 3.2, 3.3,
+//! 4.1, 4.2, 4.4, 4.5; tasks 5.1/5.2, `Boundary: AccountService`): resolves
+//! the single actor bound to a Bearer token into a CredentialAccount
+//! ([`AccountService::verify_credentials`]), resolves an arbitrary
+//! local/known-remote/needs-fetching identifier into an Account
+//! ([`AccountService::show_account`]), and (task 5.2) resolves an account's
+//! Status page via the [`crate::accounts::ports::AccountStatusesProvider`]
+//! delegation boundary ([`AccountService::list_statuses`]).
 //!
-//! Scope: this module owns exactly the two operations task 5.1 names —
-//! `verify_credentials`/`show_account` — orchestrating already-implemented
-//! collaborators (`ActorDirectory`, task 2.1-2.3's repositories, task 3.1's
-//! `AccountSerializer`, task 4's `RemoteAccountFetcher`, task 1.3's
-//! `AccountPortsRegistry`). It does not implement `list_statuses` (task
-//! 5.2), `relationships` (task 5.3), or `update_credentials` (task 5.4) —
+//! Scope: this module owns the operations tasks 5.1/5.2 name —
+//! `verify_credentials`/`show_account`/`list_statuses` — orchestrating
+//! already-implemented collaborators (`ActorDirectory`, task 2.1-2.3's
+//! repositories, task 3.1's `AccountSerializer`, task 4's
+//! `RemoteAccountFetcher`, task 1.3's `AccountPortsRegistry`). It does not
+//! implement `relationships` (task 5.3) or `update_credentials` (task 5.4) —
 //! those are separate later boundaries on this same eventual `AccountService`
-//! type, added by their own tasks, not sketched out here as stubs (this
-//! task's own instruction: "a bare `AccountService` with only
-//! `verify_credentials`/`show_account` is correct and complete for this
-//! task").
+//! type, added by their own tasks, not sketched out here as stubs.
 //!
 //! ## `AccountService<S: MediaStore, H: FederationHttpClient>`, not `Arc<dyn ..>`
 //! Mirrors `crate::media::service::MediaService<S: MediaStore>`'s and
@@ -166,19 +166,42 @@ use time::OffsetDateTime;
 
 use crate::accounts::emoji_repository::list_visible_emojis;
 use crate::accounts::model::{AccountProfile, CustomEmojiView};
-use crate::accounts::ports::AccountPortsRegistry;
+use crate::accounts::ports::{AccountPortsRegistry, StatusesQuery};
 use crate::accounts::profile_repository::find_profile;
 use crate::accounts::remote_fetcher::RemoteAccountFetcher;
 use crate::accounts::remote_repository::find_remote_by_id;
 use crate::accounts::serializer::AccountSerializer;
 use crate::actor::directory::ActorDirectory;
 use crate::actor::model::ResolvedActor;
-use crate::api::pagination::ForwardedOrigin;
+use crate::api::pagination::{ForwardedOrigin, Page, PageParams};
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
 use crate::federation::signatures::FederationHttpClient;
 use crate::media::store::MediaStore;
 use crate::oauth::model::RequestActorContext;
+
+/// The wire-level pagination/filter parameters `list_statuses` (task 5.2)
+/// accepts, before an account has been resolved to an [`AccountRef`] or a
+/// viewer to an `Option<Id>` — design.md's Service Interface names this
+/// `StatusesQueryInput` in `list_statuses`'s own signature but does not
+/// define its fields (unlike [`StatusesQuery`], whose fields design.md's
+/// ports component spells out verbatim). This type supplies exactly the
+/// fields `list_statuses` still needs from a caller once `target`/`viewer`
+/// are excluded — `page` is carried through to [`StatusesQuery::page`]
+/// **unparsed** (`PageParams`, not a decoded `ParsedPageParams<C>`):
+/// `AccountService` has no way to know which concrete `Cursor` type
+/// statuses-core's eventual real provider will page by, so decoding is left
+/// to whichever provider is registered, exactly the same "recipient decodes"
+/// discipline [`StatusesQuery::page`]'s own field type (`PageParams`, not a
+/// generic `ParsedPageParams<C>`) already establishes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StatusesQueryInput {
+    pub page: PageParams,
+    pub pinned: bool,
+    pub only_media: bool,
+    pub exclude_replies: bool,
+    pub exclude_reblogs: bool,
+}
 
 /// Resolves the single actor bound to a Bearer token into a CredentialAccount
 /// (`verify_credentials`, Requirement 2.1) and resolves an arbitrary
@@ -347,5 +370,68 @@ impl<S: MediaStore, H: FederationHttpClient> AccountService<S, H> {
         Ok(self
             .serializer
             .build_account_remote(&remote, &counts, &emojis))
+    }
+
+    /// Resolves `id` to an [`AccountRef`] — the same local/known-remote/
+    /// needs-fetching resolution order [`Self::show_account`] uses (see this
+    /// module's doc comment, "Local/remote/needs-fetching identifier
+    /// discipline"), reusing [`Self::resolve_local`]/`find_remote_by_id`/
+    /// `fetcher.fetch_and_normalize` directly. Unlike `show_account`, this
+    /// never builds an Account JSON: [`Self::list_statuses`] only needs a
+    /// valid target reference to hand to `AccountStatusesProvider`, not a
+    /// full serialized view. Fails with the same caller-facing `404`
+    /// [`AppError`] as `show_account` for an id matching neither a local
+    /// actor nor a known/fetchable remote account.
+    async fn resolve_account_ref(&self, id: &str) -> Result<AccountRef, AppError> {
+        if let Ok(raw_id) = id.parse::<i64>() {
+            let account_id = Id::from_i64(raw_id);
+
+            if self.resolve_local(account_id).await?.is_some() {
+                return Ok(AccountRef::Local(account_id));
+            }
+
+            if find_remote_by_id(&self.pool, account_id).await?.is_some() {
+                return Ok(AccountRef::Remote(account_id));
+            }
+
+            return Err(AppError::client(
+                StatusCode::NOT_FOUND,
+                format!("account '{id}' was not found"),
+            ));
+        }
+
+        let remote = self.fetcher.fetch_and_normalize(id).await?;
+        Ok(AccountRef::Remote(remote.id))
+    }
+
+    /// Resolves `id` to its [`AccountRef`] (404 for anything else),
+    /// interprets `query`'s pagination/filter parameters and `viewer`'s
+    /// identity into a [`StatusesQuery`], and delegates the actual Status
+    /// page to the currently registered `AccountStatusesProvider`
+    /// (Requirements 4.1, 4.2, 4.4, 4.5; design.md's "AccountService"
+    /// Service Interface, `list_statuses`). While no real provider is
+    /// registered, [`AccountPortsRegistry`]'s built-in
+    /// [`crate::accounts::ports::EmptyStatusesProvider`] default already
+    /// returns an empty [`Page`] without touching the database or network
+    /// (Requirement 4.3) — this method still responds `Ok`, not an error, in
+    /// that case, since an empty page is itself the correct response, not a
+    /// failure.
+    pub async fn list_statuses(
+        &self,
+        id: &str,
+        query: StatusesQueryInput,
+        viewer: Option<&RequestActorContext>,
+    ) -> Result<Page<serde_json::Value>, AppError> {
+        let target = self.resolve_account_ref(id).await?;
+        let statuses_query = StatusesQuery {
+            target,
+            viewer: viewer.map(|ctx| ctx.actor_id),
+            page: query.page,
+            pinned: query.pinned,
+            only_media: query.only_media,
+            exclude_replies: query.exclude_replies,
+            exclude_reblogs: query.exclude_reblogs,
+        };
+        self.ports.list_statuses(&statuses_query).await
     }
 }

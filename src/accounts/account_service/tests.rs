@@ -14,22 +14,23 @@
 //! needs-fetching path is deterministic without any real network call.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::http::StatusCode;
 use time::OffsetDateTime;
 
-use super::AccountService;
+use super::{AccountService, StatusesQueryInput};
 use crate::accounts::model::{ProfileField, RemoteAccount};
-use crate::accounts::ports::AccountPortsRegistry;
+use crate::accounts::ports::{AccountPortsRegistry, AccountStatusesProvider, StatusesQuery};
 use crate::accounts::remote_fetcher::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::accounts::remote_repository::upsert_remote;
 use crate::accounts::serializer::AccountSerializer;
 use crate::actor::model::{ActorState, ActorType, Handle, LocalActor};
 use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
-use crate::api::pagination::ForwardedOrigin;
-use crate::domain::Id;
+use crate::api::pagination::{ForwardedOrigin, Page, PageParams};
+use crate::domain::{AccountRef, Id};
+use crate::error::AppError;
 use crate::federation::signatures::MockFederationHttpClient;
 use crate::media::local_fs::LocalFsStore;
 use crate::oauth::model::{RequestActorContext, ScopeSet};
@@ -106,6 +107,75 @@ fn service(
         AccountPortsRegistry::new(),
         store(),
     )
+}
+
+/// Builds an `AccountService` sharing the caller-supplied `ports` registry
+/// (rather than a fresh `AccountPortsRegistry::new()`) — for tests that
+/// register a test-double provider and need the service under test to
+/// consult the exact same registry, exploiting `AccountPortsRegistry`'s
+/// "cheap `Arc` clone, same interior `RwLock` slots" contract (its own doc
+/// comment, "Registry shape").
+fn service_with_ports(
+    app: &TestApp,
+    mock: Arc<MockFederationHttpClient>,
+    ports: AccountPortsRegistry,
+) -> AccountService<LocalFsStore, MockFederationHttpClient> {
+    let fetcher = RemoteAccountFetcher::new(
+        app.pool.clone(),
+        mock,
+        app.runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    );
+    AccountService::new(
+        app.pool.clone(),
+        Arc::clone(app.actor.directory()),
+        fetcher,
+        AccountSerializer::new("kawasemi.example"),
+        ports,
+        store(),
+    )
+}
+
+/// A capturing test-double `AccountStatusesProvider`: records the exact
+/// `StatusesQuery` it is called with, so a test can assert filter/
+/// pagination values were threaded through unchanged (Requirement 4.4:
+/// "その絞り込み条件を委譲境界へ伝達し"). Always returns an empty page itself
+/// — this double's job is only to observe the query, not to exercise a real
+/// Status page shape.
+struct CapturingStatusesProvider {
+    captured: Mutex<Option<StatusesQuery>>,
+}
+
+impl CapturingStatusesProvider {
+    fn new() -> Self {
+        CapturingStatusesProvider {
+            captured: Mutex::new(None),
+        }
+    }
+}
+
+impl AccountStatusesProvider for CapturingStatusesProvider {
+    fn list_statuses<'a>(
+        &'a self,
+        query: &'a StatusesQuery,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Page<serde_json::Value>, AppError>> + Send + 'a,
+        >,
+    > {
+        let captured = query.clone();
+        Box::pin(async move {
+            *self
+                .captured
+                .lock()
+                .expect("CapturingStatusesProvider lock must not be poisoned") = Some(captured);
+            Ok(Page {
+                items: Vec::new(),
+                prev_cursor: None,
+                next_cursor: None,
+            })
+        })
+    }
 }
 
 fn sample_remote_account(id: Id, actor_uri: &str, fetched_at: OffsetDateTime) -> RemoteAccount {
@@ -271,6 +341,112 @@ async fn verify_credentials_fails_for_an_actor_that_no_longer_exists() {
         .await
         .expect_err("a nonexistent actor id must fail, not panic");
     assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+
+    app.cleanup().await;
+}
+
+/// Requirement 4.3: while no real `AccountStatusesProvider` is registered
+/// (the default `EmptyStatusesProvider`), `list_statuses` still responds
+/// normally — an empty page, not an error — for a real account.
+#[tokio::test]
+async fn list_statuses_returns_an_empty_page_when_no_provider_is_registered() {
+    let app = spawn_test_app().await;
+    let actor_id = create_test_actor(&app, "carol").await;
+    let mock = Arc::new(MockFederationHttpClient::new());
+    let svc = service(&app, mock);
+
+    let page = svc
+        .list_statuses(
+            &actor_id.as_i64().to_string(),
+            StatusesQueryInput::default(),
+            None,
+        )
+        .await
+        .expect("a real account must still respond normally with the default provider");
+
+    assert!(page.items.is_empty());
+    assert!(page.prev_cursor.is_none());
+    assert!(page.next_cursor.is_none());
+
+    app.cleanup().await;
+}
+
+/// This task's own account-scoping precondition: an id matching no local
+/// actor and no cached remote account is a 404, the same discipline
+/// `show_account` (task 5.1) already applies — a provider can only ever be
+/// asked about an account that actually exists.
+#[tokio::test]
+async fn list_statuses_returns_404_for_an_unknown_account() {
+    let app = spawn_test_app().await;
+    let mock = Arc::new(MockFederationHttpClient::new());
+    let svc = service(&app, mock);
+
+    let err = svc
+        .list_statuses("999999999999", StatusesQueryInput::default(), None)
+        .await
+        .expect_err("an id matching nothing must fail");
+    assert_eq!(err.status, StatusCode::NOT_FOUND);
+
+    app.cleanup().await;
+}
+
+/// Requirement 4.4 (and 4.5's viewer context): the filter/pagination
+/// parameters passed into `list_statuses` must reach the registered
+/// `AccountStatusesProvider`'s `StatusesQuery` unchanged — asserted against
+/// the exact captured query, not merely "no panic".
+#[tokio::test]
+async fn list_statuses_threads_filters_and_pagination_to_the_provider() {
+    let app = spawn_test_app().await;
+    let actor_id = create_test_actor(&app, "dave").await;
+    let mock = Arc::new(MockFederationHttpClient::new());
+    let ports = AccountPortsRegistry::new();
+    let provider = Arc::new(CapturingStatusesProvider::new());
+    ports.set_statuses_provider(Arc::clone(&provider) as Arc<dyn AccountStatusesProvider>);
+    let svc = service_with_ports(&app, mock, ports);
+
+    let viewer_id = Id::from_i64(4242);
+    let viewer_ctx = RequestActorContext {
+        actor_id: viewer_id,
+        scopes: ScopeSet::new(["read:statuses"]),
+    };
+
+    let query = StatusesQueryInput {
+        page: PageParams {
+            max_id: Some("100".to_string()),
+            since_id: None,
+            min_id: Some("10".to_string()),
+            limit: Some(5),
+        },
+        pinned: true,
+        only_media: true,
+        exclude_replies: true,
+        exclude_reblogs: true,
+    };
+
+    let page = svc
+        .list_statuses(
+            &actor_id.as_i64().to_string(),
+            query.clone(),
+            Some(&viewer_ctx),
+        )
+        .await
+        .expect("a real account with a registered provider must succeed");
+    assert!(page.items.is_empty());
+
+    let captured = provider
+        .captured
+        .lock()
+        .expect("lock must not be poisoned")
+        .clone()
+        .expect("the provider must have been called exactly once");
+
+    assert_eq!(captured.target, AccountRef::Local(actor_id));
+    assert_eq!(captured.viewer, Some(viewer_id));
+    assert_eq!(captured.page, query.page);
+    assert!(captured.pinned);
+    assert!(captured.only_media);
+    assert!(captured.exclude_replies);
+    assert!(captured.exclude_reblogs);
 
     app.cleanup().await;
 }
