@@ -103,6 +103,19 @@
 //!   `AccountService` — the first time this bundle holds anything beyond
 //!   task 1.3's `AccountPortsRegistry`. No HTTP surface (`AccountsEndpoints`,
 //!   task 6) mounts these operations yet.
+//!
+//! - Task 5.4 (`Boundary: AccountService`, continued): adds
+//!   [`account_service::AccountService::update_credentials`] (validate ->
+//!   ingest avatar/header via media-pipeline's `MediaService` -> partial
+//!   `account_profiles` upsert -> updated CredentialAccount) — see
+//!   [`account_service`]'s own doc comment. [`build_accounts_module`] gains a
+//!   new `media: Arc<MediaService<LocalFsStore>>` parameter, threaded from
+//!   the caller's own already-built `MediaModule::service()` handle (every
+//!   call site — `bootstrap.rs`/`test_harness.rs`/
+//!   `federation/test_harness.rs`/`server/tests.rs`/`state/tests.rs` — builds
+//!   its `MediaModule` before its `AccountsModule` already, so this is a
+//!   reused `Arc` clone, never a second, independently-configured
+//!   `MediaService`/`MediaConfig`).
 
 use std::sync::Arc;
 
@@ -111,6 +124,7 @@ use sqlx::postgres::PgPool;
 use crate::actor::ActorDirectory;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::media::local_fs::LocalFsStore;
+use crate::media::service::MediaService;
 use crate::runtime::RuntimeContext;
 
 pub mod account_service;
@@ -126,7 +140,9 @@ pub mod remote_repository;
 pub mod serializer;
 pub mod settings_repository;
 
-pub use account_service::{AccountService, StatusesQueryInput};
+pub use account_service::{
+    AccountService, MediaUploadInput, ProfileFieldInput, StatusesQueryInput, UpdateCredentialsInput,
+};
 pub use custom_emoji_serializer::{
     CustomEmojiSerializer, custom_emoji_to_json, to_custom_emoji_json,
 };
@@ -214,15 +230,18 @@ impl AccountsModule {
 /// (`LocalFsStore`/`ReqwestFederationHttpClient`, mirroring
 /// `crate::media::build_media_module`'s/`crate::federation::build_federation_module`'s
 /// identical "one concrete type per non-`dyn`-safe trait" convention) —
-/// around `pool`/`runtime`/`domain`/`directory`/`http_client`/`store`, every
-/// one of which the caller (`src/bootstrap.rs`'s production path,
+/// around `pool`/`runtime`/`domain`/`directory`/`http_client`/`store`/`media`,
+/// every one of which the caller (`src/bootstrap.rs`'s production path,
 /// `src/test_harness.rs`'s `spawn_test_app`) already constructs for its own
 /// other module bundles (actor-model's `ActorDirectory`, federation-core's
-/// `ReqwestFederationHttpClient`, media-pipeline's `LocalFsStore`) and simply
-/// shares here rather than this function constructing a second, independent
-/// instance of any of them. No background task to spawn (unlike
-/// `media`/`federation`'s own `build_*_module` — this bundle owns no
-/// resident worker).
+/// `ReqwestFederationHttpClient`, media-pipeline's `LocalFsStore`/
+/// `MediaService`) and simply shares here rather than this function
+/// constructing a second, independent instance of any of them. `media`
+/// (task 5.4, Requirement 6.2) is always the caller's own already-built
+/// `MediaModule::service()` handle — an `Arc` clone, not a second
+/// `MediaService`/`MediaConfig` this function parses/constructs itself. No
+/// background task to spawn (unlike `media`/`federation`'s own
+/// `build_*_module` — this bundle owns no resident worker).
 pub fn build_accounts_module(
     pool: PgPool,
     runtime: RuntimeContext,
@@ -230,12 +249,13 @@ pub fn build_accounts_module(
     directory: Arc<ActorDirectory>,
     http_client: Arc<ReqwestFederationHttpClient>,
     store: LocalFsStore,
+    media: Arc<MediaService<LocalFsStore>>,
 ) -> AccountsModule {
     let ports = AccountPortsRegistry::new();
     let fetcher = RemoteAccountFetcher::new(
         pool.clone(),
         http_client,
-        runtime,
+        runtime.clone(),
         DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
     );
     let serializer = AccountSerializer::new(domain);
@@ -246,6 +266,8 @@ pub fn build_accounts_module(
         serializer,
         ports.clone(),
         store,
+        media,
+        runtime,
     ));
     AccountsModule { ports, service }
 }

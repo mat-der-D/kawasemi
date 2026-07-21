@@ -1,6 +1,8 @@
-//! Service-level tests for `AccountService` (task 5.1), per this task's own
-//! observable completion condition: "ローカル/リモートいずれも Account を
-//! 返し、未存在で 404 を返すサービス単位テストが green".
+//! Service-level tests for `AccountService` (tasks 5.1/5.4), per those tasks'
+//! own observable completion conditions: task 5.1's "ローカル/リモートいずれ
+//! も Account を返し、未存在で 404 を返すサービス単位テストが green" and
+//! task 5.4's "部分更新が verify_credentials/accounts/:id に反映され、検証
+//! 違反で 422 を返すテストが green".
 //!
 //! Mirrors `src/accounts/remote_fetcher/tests.rs`'s/
 //! `src/accounts/profile_repository/tests.rs`'s established convention:
@@ -12,18 +14,37 @@
 //! sense of task 5.1's own boundary — `AccountService` — not in the sense of
 //! "no database at all"), and `MockFederationHttpClient` so the
 //! needs-fetching path is deterministic without any real network call.
+//!
+//! ## Task 5.4's own media fixture
+//! [`service`]/[`service_with_ports`] now also build a real
+//! `MediaService<LocalFsStore>` (task 5.4's new `AccountService` field) —
+//! backed by [`store`]'s same never-actually-touched nonexistent path, which
+//! is fine for every test that never exercises `update_credentials`'
+//! avatar/header ingestion path (`MediaService::accept_upload` is simply
+//! never called by those tests). The one test that *does* exercise avatar
+//! ingestion ([`update_credentials_ingests_an_avatar_upload_via_media_service`])
+//! instead uses [`writable_media_fixture`], a real temp-directory-backed
+//! `LocalFsStore` (mirroring `src/media/local_fs.rs`'s own test module's
+//! "counter + nanos" unique-temp-root convention, copied here rather than
+//! reused since that helper is private to `local_fs.rs`'s own test module).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
 use time::OffsetDateTime;
 
-use super::{AccountService, StatusesQueryInput};
+use super::{
+    AccountService, MAX_PROFILE_FIELDS, MediaUploadInput, ProfileFieldInput, StatusesQueryInput,
+    UpdateCredentialsInput,
+};
 use crate::accounts::model::{ProfileField, RelationshipView, RemoteAccount};
 use crate::accounts::ports::{
     AccountPortsRegistry, AccountStatusesProvider, RelationshipStateProvider, StatusesQuery,
 };
+use crate::accounts::profile_repository::find_profile;
 use crate::accounts::remote_fetcher::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::accounts::remote_repository::upsert_remote;
 use crate::accounts::serializer::AccountSerializer;
@@ -31,10 +52,13 @@ use crate::actor::model::{ActorState, ActorType, Handle, LocalActor};
 use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
 use crate::api::pagination::{ForwardedOrigin, Page, PageParams};
+use crate::config::MediaConfig;
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
 use crate::federation::signatures::MockFederationHttpClient;
 use crate::media::local_fs::LocalFsStore;
+use crate::media::media_repository::find_owned;
+use crate::media::service::MediaService;
 use crate::oauth::model::{RequestActorContext, ScopeSet};
 use crate::test_harness::{TestApp, spawn_test_app};
 
@@ -88,6 +112,86 @@ fn origin() -> ForwardedOrigin {
     ForwardedOrigin::resolve("https", "kawasemi.example", None, None)
 }
 
+/// A `MediaConfig` accepting `image/png`/`image/jpeg` uploads up to 1 MiB —
+/// mirrors `src/media/service/tests.rs::sample_config`'s own shape, reused
+/// here rather than redefined from scratch (same field set, different
+/// values chosen only where this module's own tests need them, e.g. a
+/// generous `max_upload_size_bytes` for the small fixture payloads these
+/// tests upload).
+fn media_config(storage_root: PathBuf) -> MediaConfig {
+    MediaConfig {
+        storage_root,
+        max_upload_size_bytes: 1024 * 1024,
+        thumbnail_target_width: 400,
+        thumbnail_target_height: 400,
+        supported_formats: vec!["image/png".to_string(), "image/jpeg".to_string()],
+        worker_concurrency: 1,
+        max_retry_attempts: 5,
+        lease_duration: std::time::Duration::from_secs(5 * 60),
+    }
+}
+
+/// Builds a `MediaService<LocalFsStore>` against `app`'s own pool/runtime,
+/// backed by `store`. `store` is never actually written to unless a test
+/// calls `AccountService::update_credentials` with an avatar/header upload —
+/// see this module's doc comment ("Task 5.4's own media fixture").
+fn media_service(app: &TestApp, store: LocalFsStore) -> Arc<MediaService<LocalFsStore>> {
+    Arc::new(MediaService::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        media_config(PathBuf::from(
+            "/nonexistent-kawasemi-account-service-test-root/media",
+        )),
+        store,
+    ))
+}
+
+/// Builds a process-unique temp directory path — copied from
+/// `src/media/local_fs.rs`'s own test module's identical helper (private to
+/// that module, so not reusable directly from here) — so concurrently
+/// running tests never collide on the same on-disk root.
+fn unique_temp_root(label: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "kawasemi_account_service_test_{label}_{nanos}_{seq}"
+    ))
+}
+
+/// Best-effort cleanup of a temp root a test created, regardless of whether
+/// the test body panicked — copied from `src/media/local_fs.rs`'s own test
+/// module's identical `TempDirGuard`.
+struct TempDirGuard(PathBuf);
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A real, writable temp-directory-backed `LocalFsStore` + the
+/// `MediaService<LocalFsStore>` built on top of it, for the one test that
+/// actually exercises `update_credentials`' avatar/header ingestion path
+/// (unlike [`media_service`]'s own nonexistent-path store, which is never
+/// touched). The returned guard removes the temp directory on drop.
+fn writable_media_fixture(
+    app: &TestApp,
+    label: &str,
+) -> (Arc<MediaService<LocalFsStore>>, TempDirGuard) {
+    let root = unique_temp_root(label);
+    let store = LocalFsStore::new(root.clone());
+    let media = Arc::new(MediaService::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        media_config(root.clone()),
+        store,
+    ));
+    (media, TempDirGuard(root))
+}
+
 /// Builds an `AccountService` against `app`'s own pool/`ActorDirectory`,
 /// paired with `mock` as the `FederationHttpClient` `RemoteAccountFetcher`
 /// fetches through.
@@ -108,6 +212,8 @@ fn service(
         AccountSerializer::new("kawasemi.example"),
         AccountPortsRegistry::new(),
         store(),
+        media_service(app, store()),
+        app.runtime.clone(),
     )
 }
 
@@ -135,6 +241,35 @@ fn service_with_ports(
         AccountSerializer::new("kawasemi.example"),
         ports,
         store(),
+        media_service(app, store()),
+        app.runtime.clone(),
+    )
+}
+
+/// Builds an `AccountService` whose `media` field is backed by a real,
+/// writable temp directory (`fixture`'s own `MediaService`) rather than
+/// [`service`]'s never-touched nonexistent path — for the one test that
+/// actually exercises avatar/header ingestion.
+fn service_with_media(
+    app: &TestApp,
+    mock: Arc<MockFederationHttpClient>,
+    media: Arc<MediaService<LocalFsStore>>,
+) -> AccountService<LocalFsStore, MockFederationHttpClient> {
+    let fetcher = RemoteAccountFetcher::new(
+        app.pool.clone(),
+        mock,
+        app.runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    );
+    AccountService::new(
+        app.pool.clone(),
+        Arc::clone(app.actor.directory()),
+        fetcher,
+        AccountSerializer::new("kawasemi.example"),
+        AccountPortsRegistry::new(),
+        store(),
+        media,
+        app.runtime.clone(),
     )
 }
 
@@ -663,6 +798,240 @@ async fn relationships_returns_a_relationship_array_from_a_registered_provider()
         captured_targets,
         vec![AccountRef::Local(target_a), AccountRef::Local(target_b)]
     );
+
+    app.cleanup().await;
+}
+
+// ---- task 5.4: update_credentials ----
+
+/// Requirements 6.1, 6.5: a partial `update_credentials` (only
+/// `display_name`) changes just that field and leaves another already-set
+/// profile field (`note`) untouched, reflected in a subsequent
+/// `verify_credentials` call.
+#[tokio::test]
+async fn update_credentials_partial_update_is_reflected_in_verify_credentials_and_leaves_other_fields_untouched()
+ {
+    let app = spawn_test_app().await;
+    let actor_id = create_test_actor(&app, "mia").await;
+    let mock = Arc::new(MockFederationHttpClient::new());
+    let svc = service(&app, mock);
+
+    let ctx = RequestActorContext {
+        actor_id,
+        scopes: ScopeSet::new(["write:accounts"]),
+    };
+
+    // Seed both fields with an initial full update.
+    let seed = UpdateCredentialsInput {
+        display_name: Some("Original Name".to_string()),
+        note: Some("Original bio.".to_string()),
+        ..UpdateCredentialsInput::default()
+    };
+    svc.update_credentials(&ctx, seed, &origin())
+        .await
+        .expect("seeding the initial profile must succeed");
+
+    // Partial update: only display_name.
+    let patch = UpdateCredentialsInput {
+        display_name: Some("New Name".to_string()),
+        ..UpdateCredentialsInput::default()
+    };
+    let updated = svc
+        .update_credentials(&ctx, patch, &origin())
+        .await
+        .expect("a valid partial update must succeed");
+    assert_eq!(updated["display_name"], "New Name");
+    assert_eq!(updated["source"]["note"], "Original bio.");
+
+    let credential = svc
+        .verify_credentials(&ctx, &origin())
+        .await
+        .expect("verify_credentials must succeed");
+    assert_eq!(credential["display_name"], "New Name");
+    assert_eq!(credential["note"], "Original bio.");
+    assert_eq!(credential["source"]["note"], "Original bio.");
+
+    // Task 5.4's own completion condition names both endpoints explicitly
+    // ("部分更新が verify_credentials/accounts/:id に反映され") — `show_account`
+    // reads the exact same `account_profiles` row `verify_credentials` just
+    // read above, so the partial update must be reflected there too, not
+    // only via `verify_credentials`.
+    let account = svc
+        .show_account(&actor_id.as_i64().to_string(), None, &origin())
+        .await
+        .expect("show_account must succeed");
+    assert_eq!(account["display_name"], "New Name");
+    assert_eq!(account["note"], "Original bio.");
+
+    app.cleanup().await;
+}
+
+/// Requirement 6.3: a validation violation (here, more than
+/// `MAX_PROFILE_FIELDS` profile fields) is rejected with a 422 *before* any
+/// write — a subsequent read proves the already-seeded `display_name` was
+/// left untouched by the rejected update's own (different) value.
+#[tokio::test]
+async fn update_credentials_rejects_too_many_profile_fields_with_422_and_does_not_write() {
+    let app = spawn_test_app().await;
+    let actor_id = create_test_actor(&app, "noah").await;
+    let mock = Arc::new(MockFederationHttpClient::new());
+    let svc = service(&app, mock);
+
+    let ctx = RequestActorContext {
+        actor_id,
+        scopes: ScopeSet::new(["write:accounts"]),
+    };
+
+    let seed = UpdateCredentialsInput {
+        display_name: Some("Baseline Name".to_string()),
+        ..UpdateCredentialsInput::default()
+    };
+    svc.update_credentials(&ctx, seed, &origin())
+        .await
+        .expect("seeding must succeed");
+
+    let too_many_fields = (0..=MAX_PROFILE_FIELDS)
+        .map(|i| ProfileFieldInput {
+            name: format!("Field {i}"),
+            value: format!("Value {i}"),
+        })
+        .collect();
+    let violating = UpdateCredentialsInput {
+        display_name: Some("Should Not Apply".to_string()),
+        fields_attributes: Some(too_many_fields),
+        ..UpdateCredentialsInput::default()
+    };
+
+    let err = svc
+        .update_credentials(&ctx, violating, &origin())
+        .await
+        .expect_err("too many profile fields must be rejected");
+    assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Nothing was written: display_name is still the seeded baseline, not
+    // the rejected update's value.
+    let profile = find_profile(&app.pool, actor_id)
+        .await
+        .expect("find_profile must succeed")
+        .expect("the seeded profile row must exist");
+    assert_eq!(profile.display_name, "Baseline Name");
+
+    let credential = svc
+        .verify_credentials(&ctx, &origin())
+        .await
+        .expect("verify_credentials must succeed");
+    assert_eq!(credential["display_name"], "Baseline Name");
+
+    app.cleanup().await;
+}
+
+/// Requirement 6.3: an out-of-range avatar focus is rejected with a 422
+/// *before* the avatar is ever ingested via `MediaService` and before any
+/// `account_profiles` row is written — proving this validation is genuinely
+/// fail-fast (checked before the first side effect), not merely "eventually
+/// errors after ingesting the media".
+#[tokio::test]
+async fn update_credentials_rejects_an_out_of_range_avatar_focus_before_any_write() {
+    let app = spawn_test_app().await;
+    let actor_id = create_test_actor(&app, "piper").await;
+    let mock = Arc::new(MockFederationHttpClient::new());
+    let (media, _guard) = writable_media_fixture(&app, "focus_reject");
+    let svc = service_with_media(&app, mock, media);
+
+    let ctx = RequestActorContext {
+        actor_id,
+        scopes: ScopeSet::new(["write:accounts"]),
+    };
+
+    let input = UpdateCredentialsInput {
+        avatar: Some(MediaUploadInput {
+            bytes: b"bytes".to_vec(),
+            content_type: "image/png".to_string(),
+            focus: Some((2.0, 0.0)),
+        }),
+        ..UpdateCredentialsInput::default()
+    };
+
+    let err = svc
+        .update_credentials(&ctx, input, &origin())
+        .await
+        .expect_err("an out-of-range focus must be rejected");
+    assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let profile = find_profile(&app.pool, actor_id)
+        .await
+        .expect("find_profile must succeed");
+    assert!(
+        profile.is_none(),
+        "no account_profiles row should have been written for a rejected update"
+    );
+
+    app.cleanup().await;
+}
+
+/// Requirement 6.2: a valid avatar upload is ingested through the real
+/// `MediaService::accept_upload` (a genuine `media` row is created, owned by
+/// the actor) and the resulting media id becomes the profile's
+/// `avatar_media`, changing the CredentialAccount's `avatar` URL away from
+/// the default image URL (Requirement 1.5's "既定の画像URLを出力し...null に
+/// しない" — this test proves the *non-default* half: a real avatar was
+/// actually attached).
+#[tokio::test]
+async fn update_credentials_ingests_an_avatar_upload_via_media_service() {
+    let app = spawn_test_app().await;
+    let actor_id = create_test_actor(&app, "olive").await;
+    let mock = Arc::new(MockFederationHttpClient::new());
+    let (media, _guard) = writable_media_fixture(&app, "avatar_ingest");
+    let svc = service_with_media(&app, mock, media);
+
+    let ctx = RequestActorContext {
+        actor_id,
+        scopes: ScopeSet::new(["write:accounts"]),
+    };
+
+    let before = svc
+        .verify_credentials(&ctx, &origin())
+        .await
+        .expect("verify_credentials must succeed");
+    let default_avatar = before["avatar"]
+        .as_str()
+        .expect("avatar must be a string")
+        .to_string();
+
+    let input = UpdateCredentialsInput {
+        avatar: Some(MediaUploadInput {
+            bytes: b"not-a-real-image-but-accept_upload-never-decodes-it".to_vec(),
+            content_type: "image/png".to_string(),
+            focus: None,
+        }),
+        ..UpdateCredentialsInput::default()
+    };
+
+    let updated = svc
+        .update_credentials(&ctx, input, &origin())
+        .await
+        .expect("a valid avatar upload must be accepted");
+
+    let new_avatar = updated["avatar"].as_str().expect("avatar must be a string");
+    assert_ne!(
+        new_avatar, default_avatar,
+        "avatar must change away from the default image URL"
+    );
+    assert!(new_avatar.contains("/media/"), "got {new_avatar}");
+
+    let profile = find_profile(&app.pool, actor_id)
+        .await
+        .expect("find_profile must succeed")
+        .expect("profile row must exist after the update");
+    let avatar_media_id = profile
+        .avatar_media
+        .expect("avatar_media must be set after ingestion");
+
+    let media_row = find_owned(&app.pool, avatar_media_id, actor_id)
+        .await
+        .expect("find_owned must succeed")
+        .expect("the ingested media row must exist and be owned by the actor");
+    assert_eq!(media_row.actor_id, actor_id);
 
     app.cleanup().await;
 }

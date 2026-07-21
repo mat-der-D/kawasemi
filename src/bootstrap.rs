@@ -445,6 +445,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         Arc::clone(actor_module.directory()),
         Arc::new(ReqwestFederationHttpClient::new()),
         media_module.store().clone(),
+        media_module.service(),
     );
 
     Ok(AppState::new(
