@@ -56,6 +56,7 @@ use tokio::sync::oneshot;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
+use crate::accounts::{self, AccountsEndpointsState};
 use crate::api::ratelimit::{RateLimitPolicy, rate_limit_layer};
 use crate::config::ServerConfig;
 use crate::federation::{
@@ -119,10 +120,12 @@ const MEDIA_UPLOAD_PATH: &str = "/api/v2/media";
 const MEDIA_ITEM_PATH: &str = "/api/v1/media/{id}";
 
 /// accounts-and-instance's route paths (task 1.4, `_Boundary: AccountsModule_`,
-/// design.md's `AccountsModule（wiring）` API Contract table, verbatim):
-/// mounted here with placeholder handlers only (`_Boundary:
-/// AccountsEndpoints_`'s real handlers are task group 6's own job — see
-/// `crate::accounts`'s module doc comment).
+/// design.md's `AccountsModule（wiring）`/`AccountsEndpoints` API Contract
+/// tables, verbatim): mounted here with task 1.4's placeholder handlers
+/// through task 5; as of task 6 (`_Boundary: AccountsEndpoints,
+/// AccountsModule_`) [`accounts_router`] mounts the real handlers from
+/// `crate::accounts::endpoints` instead — see that module's doc comment for
+/// every wire-shape judgment call.
 const ACCOUNTS_VERIFY_CREDENTIALS_PATH: &str = "/api/v1/accounts/verify_credentials";
 const ACCOUNTS_RELATIONSHIPS_PATH: &str = "/api/v1/accounts/relationships";
 const ACCOUNTS_UPDATE_CREDENTIALS_PATH: &str = "/api/v1/accounts/update_credentials";
@@ -258,6 +261,23 @@ impl FromRef<AppState> for MediaEndpointsState<LocalFsStore> {
     }
 }
 
+/// Bridges `AppState` to [`AccountsEndpointsState`] (task 6, `_Boundary:
+/// AccountsEndpoints, AccountsModule_`), mirroring
+/// [`MediaEndpointsState<LocalFsStore>`]'s own `FromRef` bridge immediately
+/// above: `AppState::accounts()`'s already-built `AccountService`/
+/// `InstanceService`/`CustomEmojiService` handles (tasks 5.1/5.5/5.6) are
+/// `Arc` clones, never freshly constructed here.
+impl FromRef<AppState> for AccountsEndpointsState {
+    fn from_ref(state: &AppState) -> Self {
+        AccountsEndpointsState {
+            service: state.accounts().service(),
+            instance: state.accounts().instance(),
+            emojis: state.accounts().emojis(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
 /// Path of the minimal liveness route this task adds (Requirement 1.1).
 pub const HEALTH_PATH: &str = "/health";
 
@@ -303,52 +323,37 @@ fn media_router(upload_body_limit: usize) -> Router<AppState> {
         )
 }
 
-/// Explicit placeholder response for every accounts/instance/custom_emojis
-/// route [`accounts_router`] mounts (task 1.4, `_Boundary: AccountsModule_`):
-/// `501 Not Implemented`, deliberately not a routing-level `404`, so a
-/// caller (or a test asserting on this wiring, see
-/// `tests/accounts_module_wiring_it.rs`) can tell "this route exists but its
-/// real handler is not implemented yet" apart from "this route does not
-/// exist at all" — task text's own "ハンドラは後続で実装" (real handlers land
-/// at task group 6, `_Boundary: AccountsEndpoints, AccountsModule_`).
-/// Reused across every accounts/instance/custom_emojis route below since
-/// none of them need any per-request state or body parsing at this
-/// wiring-only stage.
-async fn accounts_not_implemented() -> impl IntoResponse {
-    StatusCode::NOT_IMPLEMENTED
-}
-
-/// accounts-and-instance's placeholder route group (task 1.4, `_Boundary:
-/// AccountsModule_`, design.md's `AccountsModule（wiring）` API Contract
-/// table): every accounts/instance/custom_emojis path design.md names,
-/// mounted onto [`accounts_not_implemented`] rather than a real handler
-/// (task group 6's own job — see `crate::accounts`'s module doc comment).
-/// Kept as a separate `.merge()`-able group mirroring [`media_router`]'s own
-/// precedent, even though (unlike `media_router`) no real per-instance
-/// config is needed to build it — this keeps the accounts-and-instance route
-/// set visually and structurally distinct from [`router`]'s own directly
-/// inlined routes, and gives task group 6 a single, already-established
-/// place to swap each placeholder `.route(...)` call for its real handler
-/// without restructuring this file. No `impl FromRef<AppState> for ...`
-/// bridge exists for this group (unlike `MediaEndpointsState<LocalFsStore>`'s
-/// bridge above [`media_router`]): [`accounts_not_implemented`] takes no
-/// extractors, so it needs no per-request state derived from `AppState` at
-/// all.
+/// accounts-and-instance's route group (task 6, `_Boundary:
+/// AccountsEndpoints, AccountsModule_`, design.md's `AccountsEndpoints` API
+/// Contract table): every accounts/instance/custom_emojis path design.md
+/// names, mounted onto the real handlers from `crate::accounts::endpoints`
+/// (task 1.4's `accounts_not_implemented` `501` placeholders are gone —
+/// every route below now runs real business logic). Kept as a separate
+/// `.merge()`-able group mirroring [`media_router`]'s own precedent, even
+/// though (unlike `media_router`) no real per-instance config is needed to
+/// build it — this keeps the accounts-and-instance route set visually and
+/// structurally distinct from [`router`]'s own directly inlined routes.
+/// `verify_credentials`/`relationships`/`update_credentials` require Bearer
+/// plus the scope `crate::accounts::endpoints`'s own doc comment names for
+/// each (Requirement 10.1); `accounts/:id`/`accounts/:id/statuses`/
+/// `instance`/`custom_emojis` accept an absent token (Requirement 10.2).
+/// See `crate::accounts::endpoints`'s own doc comment for every wire-shape
+/// judgment call these handlers make.
 fn accounts_router() -> Router<AppState> {
     Router::new()
         .route(
             ACCOUNTS_VERIFY_CREDENTIALS_PATH,
-            get(accounts_not_implemented),
+            get(accounts::verify_credentials),
         )
-        .route(ACCOUNTS_RELATIONSHIPS_PATH, get(accounts_not_implemented))
+        .route(ACCOUNTS_RELATIONSHIPS_PATH, get(accounts::relationships))
         .route(
             ACCOUNTS_UPDATE_CREDENTIALS_PATH,
-            patch(accounts_not_implemented),
+            patch(accounts::update_credentials),
         )
-        .route(ACCOUNTS_SHOW_PATH, get(accounts_not_implemented))
-        .route(ACCOUNTS_STATUSES_PATH, get(accounts_not_implemented))
-        .route(INSTANCE_V2_PATH, get(accounts_not_implemented))
-        .route(CUSTOM_EMOJIS_PATH, get(accounts_not_implemented))
+        .route(ACCOUNTS_SHOW_PATH, get(accounts::show_account))
+        .route(ACCOUNTS_STATUSES_PATH, get(accounts::list_statuses))
+        .route(INSTANCE_V2_PATH, get(accounts::instance_v2))
+        .route(CUSTOM_EMOJIS_PATH, get(accounts::custom_emojis))
 }
 
 /// Builds the foundation `Router<AppState>` (Requirement 1.1, and — as of

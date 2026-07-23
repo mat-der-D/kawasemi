@@ -131,6 +131,21 @@
 //!   itself built from) to build that snapshot from, and now also
 //!   constructs and holds the real `InstanceService` alongside
 //!   `AccountService`.
+//!
+//! - Task 6 (`Boundary: AccountsEndpoints, AccountsModule`): the real HTTP
+//!   surface — [`endpoints::verify_credentials`]/[`endpoints::relationships`]/
+//!   [`endpoints::update_credentials`] (Bearer+Scope via
+//!   `crate::oauth::middleware`) and [`endpoints::show_account`]/
+//!   [`endpoints::list_statuses`]/[`endpoints::instance_v2`]/
+//!   [`endpoints::custom_emojis`] (optional/public) — plus
+//!   [`endpoints::AccountsEndpointsState`], the router-local state bundle
+//!   `src/server.rs`'s own `impl FromRef<AppState> for
+//!   AccountsEndpointsState` derives from `AppState`'s already-built
+//!   `AccountsModule` handles, mirroring `crate::media::MediaEndpointsState`'s
+//!   identical precedent — see [`endpoints`] for every wire-shape judgment
+//!   call this task makes. `src/server.rs`'s `accounts_router` now mounts
+//!   these seven handlers in place of task 1.4's `accounts_not_implemented`
+//!   `501` placeholders.
 
 use std::sync::Arc;
 
@@ -147,6 +162,7 @@ pub mod account_service;
 pub mod custom_emoji_serializer;
 pub mod emoji_repository;
 pub mod emoji_service;
+pub mod endpoints;
 pub mod instance_serializer;
 pub mod instance_service;
 pub mod model;
@@ -165,6 +181,10 @@ pub use custom_emoji_serializer::{
     CustomEmojiSerializer, custom_emoji_to_json, to_custom_emoji_json,
 };
 pub use emoji_service::CustomEmojiService;
+pub use endpoints::{
+    AccountsEndpointsState, StatusesQueryParams, custom_emojis, instance_v2, list_statuses,
+    relationships, show_account, update_credentials, verify_credentials,
+};
 pub use instance_serializer::{
     ConfigurationJson, ContactJson, InstanceJson, InstanceSerializer, MediaAttachmentsConfigJson,
     RegistrationsJson, RuleJson, ServerCapabilities, UsageJson, UsageUsersJson, instance_to_json,
