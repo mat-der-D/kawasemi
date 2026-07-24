@@ -8,7 +8,7 @@
   - research.md の「Migration Numbering Coordination」に従い、番号は 0007（core 連番：0008 は federation-core が所有）で確定
   - _Requirements: 1.1, 3.6, 5.1, 7.4, 9.3, 10.4, 11.1, 12.1, 13.1, 13.5_
   - _Boundary: 0007_statuses.sql_
-- [ ] 1.2 投稿ドメイン型を定義する
+- [x] 1.2 投稿ドメイン型を定義する
   - `Status` / `StatusEdit` / `Poll` / `PollOption` / `PollVote` / `IdempotencyRecord` / `Tag` 等を core-runtime の Id/時刻型の上に定義する。`Visibility` と `AccountRef` は再定義せず core-runtime の domain-primitives（正準所有）から import する
   - コア状態モデルに連合方言（引用・絵文字リアクション）フィールドを含めないことを型で保証する
   - 観測可能な完了: 各ドメイン型がコンパイルでき、`Visibility`（core-runtime import）が 4 値、ブースト（`reblog_of_id`）・返信（`in_reply_to_id`）・投票（`poll_id`）の関連が型で表現される

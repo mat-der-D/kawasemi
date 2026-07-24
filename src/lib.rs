@@ -33,5 +33,6 @@ pub mod oauth;
 pub mod runtime;
 pub mod server;
 pub mod state;
+pub mod statuses;
 pub mod telemetry;
 pub mod test_harness;
