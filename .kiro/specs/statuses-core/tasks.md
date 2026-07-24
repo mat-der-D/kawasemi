@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. 基盤: スキーマとドメイン型
-- [ ] 1.1 投稿コアのマイグレーションを追加する
+- [x] 1.1 投稿コアのマイグレーションを追加する
   - `migrations/0007_statuses.sql` に `statuses` / `status_edits` / `status_media` / `favourites` / `bookmarks` / `pins` / `polls` / `poll_options` / `poll_votes` / `status_idempotency_keys` に加えて、ハッシュタグ永続化用の `tags` / `status_tags`（投稿↔タグ関連付け）を作成し、一意制約・外部参照・インデックスを定義する
   - 操作の重複防止（fav/bookmark/pin は (actor_id, status_id) 一意、vote は (poll_id, actor_id, choice) 一意、冪等は (actor_id, idempotency_key) 一意、status_tags は (status_id, tag_id) 一意）を制約で担保する
   - 観測可能な完了: `sqlx migrate` がローカル DB で適用でき、全テーブル（tags / status_tags を含む）と一意制約・インデックスが作成される
