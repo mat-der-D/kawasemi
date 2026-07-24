@@ -149,7 +149,7 @@
   - 観測可能な完了条件: instance/custom_emojis/リモート取得の統合テストがすべて green
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 8.1, 8.2, 9.1_
   - _Depends: 6_
-- [ ] 7.3 エンティティ契約ゴールデンの最終検証を行う
+- [x] 7.3 エンティティ契約ゴールデンの最終検証を行う
   - Account / CredentialAccount / Relationship / Instance(v2) / CustomEmoji のゴールデンが決定的に再現され、null 規律・配列形が固定されていることを最終確認
   - 観測可能な完了条件: 契約ゴールデンテストが決定的に再現し green
   - _Requirements: 1.6, 2.4, 5.6, 8.5, 9.5_
@@ -184,3 +184,5 @@
 - タスク 7.1: `tests/account_show_it.rs`/`account_statuses_it.rs`/`relationships_it.rs`/`update_credentials_it.rs` を新設（既存の task 6 エンドポイントに対する統合テストのみ、`src/` の変更は無し）。task 5.4 の初回レビューで REJECTED になった「`update_credentials` の部分更新が `show_account` にも反映されるか」を本タスクのテストで実際に往復確認済み。avatar/header の focus 範囲バリデーション（Requirement 6.3）は `endpoints.rs` 自身のドキュメントコメントの通り HTTP 経由では到達不能な dead code のため本統合テストの対象外（account_service 単体テストで既にカバー済み）。リモートアカウント解決（`accounts/:id` がリモートアクターを指す場合）は task 7.1 の `_Requirements:_` に含まれないため意図的に対象外とし、task 7.2 の担当とする。
 
 - タスク 7.2: `tests/instance_v2_it.rs`/`custom_emojis_it.rs`/`remote_account_fetch_it.rs` を新設（`src/` の変更は無し）。`instance_v2_it.rs`/`custom_emojis_it.rs` は task 7.1 と同じく `spawn_test_app()` の実ルータ経由（生 TCP）で検証。`remote_account_fetch_it.rs` のみ `AccountService<LocalFsStore, MockFederationHttpClient>` を直接構築する形で検証（実マウント済みエンドポイント経由ではない）— `AccountsModule`/`build_accounts_module`（`src/accounts.rs`）が具象型 `ReqwestFederationHttpClient` にモノモーフィズされておりモック差し替えの継ぎ目が無いこと、`FederationHttpClient`（`async fn` トレイトメソッドのためオブジェクト安全でない）が本コードベース全体で同じ理由により常にジェネリック（`Arc<H>`）として扱われ `Arc<dyn FederationHttpClient>` 化された前例が無いことをレビューで確認済み。`tests/signatures_it.rs`/`inbox_delivery_it.rs` に既に同型の前例（`spawn_test_app()` で実 DB プール/スキーマのみ使い、対象コンポーネントは `MockFederationHttpClient` で直接構築）があり、本タスクもそれに倣った。fetch→normalize→Account・キャッシュ再利用（2 回目呼び出しで fetch 回数が増えないことを `mock.fetched_urls()` で確認）・非成功ステータス/トランスポート失敗→Mastodon 互換エラー応答、をすべてカバー。
+
+- タスク 7.3: 検証のみ、`src/`/`tests/` の変更は無し。task 3.5 が登録済みの 6 ゴールデン（Account ローカル/リモート/CredentialAccount/Relationship/Instance(v2)/CustomEmoji、いずれも `crate::contract::assert_golden` + `tests/golden/accounts/*.json`）を再確認し、決定性（フィクスチャ構築が `Id::from_i64`/`datetime!` 等のリテラルのみで clock/uuid/DB 由来値が無いこと）・null 規律（`last_status_at`/`verified_at` の null と非null の両方をゴールデン内に同居させて個別フィールド粒度で検証、avatar/header は常に非null）・配列形固定（`emojis`/`fields`/`languages`/`rules` が空でも `[]`、要素ありでも固定形）を実コードとゴールデン JSON を直接読んで確認済み。レビューで判明: design.md の File Structure Plan（196行目）は `tests/entity_contract_it.rs` という専用集約ファイルを想定していたが、task 3.5 は実際には各シリアライザの unit `tests.rs` にインラインでゴールデンを配置しており、この逸脱について task 3.5 自身のコミット/Implementation Notes に説明が無かった（本 spec の他の逸脱は全て記録済みなのに対し例外）。7.3 の観測可能完了条件（決定的に再現し green）には影響しないため対応不要と判断（レビューで non-blocking 確認済み）だが、将来 task 3.5 に遡って Implementation Notes を追記する余地がある。
