@@ -147,3 +147,7 @@
   - _Requirements: 9.1, 9.2, 10.1, 13.2_
   - _Boundary: InteractionService, StatusService, PollService_
   - _Depends: 5.1, 5.2, 5.3_
+
+## Implementation Notes
+
+- 1.1/1.2: design.md 自体に自己矛盾があり、モデル抜粋（366行目）は `StatusEdit` に `id` を含めないが、Physical Data Model の SQL（716行目）は `status_edits.id BIGINT PRIMARY KEY` を含む。両タスクは design.md に忠実に実装したためこの矛盾をそのまま引き継いでいる。2.1（投稿リポジトリ、`status_edits` の永続化・履歴取得を含む）の実装者は、`StatusEdit` に `id` フィールドを追加するか `status_edits.id` を内部専用に留めるかを設計判断として解決すること。
