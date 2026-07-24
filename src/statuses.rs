@@ -23,10 +23,16 @@
 //!   updates) and [`tag_repository`] (hashtag persistence against `tags` /
 //!   `status_tags`, and its tag<->status read boundary).
 //!
+//! - Task 2.2 (`Boundary: InteractionRepository`): [`interaction_repository`]
+//!   (favourite/bookmark/pin record/revoke/exists against `favourites` /
+//!   `bookmarks` / `pins`, the bookmark list's own creation-order cursor,
+//!   and reblog's read-only duplicate-check against `statuses` — reblog
+//!   record/revoke itself stays in [`status_repository`], see
+//!   [`interaction_repository`]'s own doc comment).
+//!
 //!   No delegation ports (`RelationshipQuery`, task 1.3), no
-//!   `InteractionRepository` (task 2.2), no `PollRepository`/
-//!   `IdempotencyStore` (task 2.3), no visibility/addressing logic
-//!   (`VisibilityPolicy` / `Addressing`), no Activity generation
+//!   `PollRepository`/`IdempotencyStore` (task 2.3), no visibility/addressing
+//!   logic (`VisibilityPolicy` / `Addressing`), no Activity generation
 //!   (`StatusActivityBuilder`), no serializers (`StatusSerializer` /
 //!   `PollSerializer`), no services (`StatusService` / `InteractionService`
 //!   / `PollService`), no inbound handlers, and no HTTP surface exist yet —
@@ -34,6 +40,7 @@
 //!   `crate::bootstrap`/`crate::server` yet. See design.md's "File
 //!   Structure Plan" for the full planned module set.
 
+pub mod interaction_repository;
 pub mod model;
 pub mod status_repository;
 pub mod tag_repository;
