@@ -111,8 +111,30 @@ pub struct Status {
 /// One prior version of a [`Status`]'s editable fields (Requirement 8.2:
 /// edit history retains the pre-edit body/CW/sensitive per version), one row
 /// per version stored in `status_edits` (`migrations/0007_statuses.sql`).
+///
+/// ## `id` (resolved by task 2.1, `StatusRepository`)
+/// design.md's own model excerpt omits an `id` field here while its Physical
+/// Data Model SQL block declares `status_edits.id BIGINT PRIMARY KEY` — a
+/// self-contradiction tasks 1.1/1.2 knowingly carried forward and left for
+/// task 2.1 (`StatusRepository`'s persistence of this type) to resolve. This
+/// field is the resolution: `id` is kept, matching `status_edits.id` 1:1 and
+/// matching every other entity type in this module (`Status`, `Poll`,
+/// `PollOption`'s addressing, `Tag`, ...), all of which already carry their
+/// own already-minted `Id` set by the caller before reaching a repository —
+/// this crate's own established convention (e.g. `ActorRepository::insert_actor`
+/// takes a `LocalActor` whose `id` the caller already minted via
+/// `RuntimeContext::ids`, never generating one itself) is that repositories
+/// never mint ids; callers do. Without this field, `StatusRepository::apply_edit`
+/// would have no caller-supplied id to give the new `status_edits` row's
+/// primary key, and would be forced to invent a non-standard, ad hoc
+/// id-generation scheme inside the repository layer (the migration's `id
+/// BIGINT PRIMARY KEY` column carries no database-side default/identity,
+/// consistent with every other table in `migrations/0007_statuses.sql` and
+/// prior migrations) — this field keeps `StatusEdit` consistent with that
+/// crate-wide convention instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusEdit {
+    pub id: Id,
     pub status_id: Id,
     pub content: String,
     pub spoiler_text: String,
@@ -351,12 +373,14 @@ mod tests {
     #[test]
     fn status_edit_holds_one_prior_version_of_the_editable_fields() {
         let edit = StatusEdit {
+            id: Id::from_i64(99),
             status_id: Id::from_i64(1),
             content: "previous content".to_string(),
             spoiler_text: "previous cw".to_string(),
             sensitive: true,
             created_at: datetime!(2026-07-23 12:00:00 UTC),
         };
+        assert_eq!(edit.id, Id::from_i64(99));
         assert_eq!(edit.status_id, Id::from_i64(1));
         assert_eq!(edit.content, "previous content");
         assert!(edit.sensitive);

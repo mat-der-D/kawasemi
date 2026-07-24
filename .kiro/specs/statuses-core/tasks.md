@@ -16,7 +16,7 @@
   - _Boundary: model_
 
 - [ ] 2. データ層（リポジトリ）
-- [ ] 2.1 (P) 投稿リポジトリを実装する
+- [x] 2.1 (P) 投稿リポジトリを実装する
   - 投稿の挿入・可視スコープ取得・祖先/子孫走査・編集適用と履歴保存・カウンタ原子更新に加え、`tags` / `status_tags` へのタグ関連付け永続化と、照会可能な読み取り境界（タグ→投稿・投稿→タグ）を実装する（timelines のタグタイムライン・search のハッシュタグインデックスが消費）
   - 削除は物理 FK `ON DELETE CASCADE` が扱わない自己参照 2 点を明示的に処理する: (a) 削除対象を `reblog_of_id` で参照するブースト行の明示的なカスケード削除、(b) 削除対象が返信（`in_reply_to_id` あり）であった場合の親投稿 `replies_count` の 1 減算。両者を同一トランザクションで行う
   - 観測可能な完了: 投稿を挿入し ID で取得でき、削除で当該投稿を参照するブースト行が消え・返信元の `replies_count` が 1 減り（他の関連行は FK CASCADE で整合し）、編集で `edited_at` が更新され履歴が `status_edits` に残り、タグ関連付けが永続化され read-only 照会できる（リポジトリ単体テストがグリーン）
@@ -151,3 +151,4 @@
 ## Implementation Notes
 
 - 1.1/1.2: design.md 自体に自己矛盾があり、モデル抜粋（366行目）は `StatusEdit` に `id` を含めないが、Physical Data Model の SQL（716行目）は `status_edits.id BIGINT PRIMARY KEY` を含む。両タスクは design.md に忠実に実装したためこの矛盾をそのまま引き継いでいる。2.1（投稿リポジトリ、`status_edits` の永続化・履歴取得を含む）の実装者は、`StatusEdit` に `id` フィールドを追加するか `status_edits.id` を内部専用に留めるかを設計判断として解決すること。
+- 2.1: 上記の矛盾は `StatusEdit` に `id: Id` を追加する形で解決した（`status_edits.id` に DB 側デフォルトが無く、本クレートの「id は呼び出し側が `RuntimeContext::ids` で採番し、リポジトリ側では採番しない」規約に合わせるため）。`apply_edit` は同一の `edit: &StatusEdit` 引数で「投稿行へ適用する新内容」と「履歴行の採番済み PK」を兼務する点に注意（詳細は `status_repository.rs` のモジュールdocコメント参照）。また `find_visible`/`ancestors`/`descendants` は未実装の `VisibilityPolicy`（task 3.1）に依存せず、自己完結の fail-closed 可視性規則（public/unlisted は誰でも可視、private/direct は投稿者本人のみ）で暫定実装した。これは完全な可視性ロジックの厳密な部分集合（過剰に見せることはない）であり、3.1 実装時に置き換えが必要。

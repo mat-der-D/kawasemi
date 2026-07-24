@@ -16,9 +16,16 @@
 //!   primitives module) rather than redefined — see [`model`]'s own doc
 //!   comment for why `AccountRef` is not additionally imported here.
 //!
-//!   No delegation ports (`RelationshipQuery`, task 1.3), no repositories
-//!   (`StatusRepository` / `InteractionRepository` / `PollRepository` /
-//!   `IdempotencyStore`, task 2.x), no visibility/addressing logic
+//! - Task 2.1 (`Boundary: StatusRepository, TagRepository`): [`status_repository`]
+//!   (`Status`/`StatusEdit` persistence: insert, visible-scope fetch,
+//!   ancestor/descendant traversal, delete with its two explicit
+//!   self-referential cleanup steps, edit-apply + history, atomic counter
+//!   updates) and [`tag_repository`] (hashtag persistence against `tags` /
+//!   `status_tags`, and its tag<->status read boundary).
+//!
+//!   No delegation ports (`RelationshipQuery`, task 1.3), no
+//!   `InteractionRepository` (task 2.2), no `PollRepository`/
+//!   `IdempotencyStore` (task 2.3), no visibility/addressing logic
 //!   (`VisibilityPolicy` / `Addressing`), no Activity generation
 //!   (`StatusActivityBuilder`), no serializers (`StatusSerializer` /
 //!   `PollSerializer`), no services (`StatusService` / `InteractionService`
@@ -28,5 +35,7 @@
 //!   Structure Plan" for the full planned module set.
 
 pub mod model;
+pub mod status_repository;
+pub mod tag_repository;
 
 pub use model::{IdempotencyRecord, Poll, PollOption, PollVote, Status, StatusEdit, Tag};
