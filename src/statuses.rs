@@ -30,18 +30,27 @@
 //!   record/revoke itself stays in [`status_repository`], see
 //!   [`interaction_repository`]'s own doc comment).
 //!
+//! - Task 2.3 (`Boundary: PollRepository, IdempotencyStore`): [`poll_repository`]
+//!   (`Poll`/`PollOption`/`PollVote` persistence: poll/option insertion, vote
+//!   recording with deadline/range/single-vs-multiple/duplicate validation,
+//!   and aggregate tally retrieval against `polls` / `poll_options` /
+//!   `poll_votes`) and [`idempotency`] (the `Idempotency-Key` ledger:
+//!   `(actor_id, key)` -> `status_id` lookup and resend resolution against
+//!   `status_idempotency_keys`).
+//!
 //!   No delegation ports (`RelationshipQuery`, task 1.3), no
-//!   `PollRepository`/`IdempotencyStore` (task 2.3), no visibility/addressing
-//!   logic (`VisibilityPolicy` / `Addressing`), no Activity generation
-//!   (`StatusActivityBuilder`), no serializers (`StatusSerializer` /
-//!   `PollSerializer`), no services (`StatusService` / `InteractionService`
-//!   / `PollService`), no inbound handlers, and no HTTP surface exist yet —
-//!   this module is not wired into `crate::state::AppState`/
-//!   `crate::bootstrap`/`crate::server` yet. See design.md's "File
-//!   Structure Plan" for the full planned module set.
+//!   visibility/addressing logic (`VisibilityPolicy` / `Addressing`), no
+//!   Activity generation (`StatusActivityBuilder`), no serializers
+//!   (`StatusSerializer` / `PollSerializer`), no services (`StatusService` /
+//!   `InteractionService` / `PollService`), no inbound handlers, and no HTTP
+//!   surface exist yet — this module is not wired into
+//!   `crate::state::AppState`/`crate::bootstrap`/`crate::server` yet. See
+//!   design.md's "File Structure Plan" for the full planned module set.
 
+pub mod idempotency;
 pub mod interaction_repository;
 pub mod model;
+pub mod poll_repository;
 pub mod status_repository;
 pub mod tag_repository;
 

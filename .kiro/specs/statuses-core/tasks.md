@@ -27,7 +27,7 @@
   - 観測可能な完了: 同一 (actor, status) への二重登録が抑止され、ブックマーク一覧がブックマーク固有カーソルで取得できる（リポジトリ単体テストがグリーン）
   - _Requirements: 9.1, 9.3, 9.4, 10.1, 10.3, 10.4, 11.1, 11.2, 11.3, 12.1, 12.2_
   - _Boundary: InteractionRepository_
-- [ ] 2.3 (P) 投票リポジトリと冪等ストアを実装する
+- [x] 2.3 (P) 投票リポジトリと冪等ストアを実装する
   - poll/option/vote の挿入・投票記録（締切/範囲/単複/重複の検証）・集計取得と、(actor_id, key) 一意の冪等記録・再送解決を実装する
   - 観測可能な完了: 締切後/範囲外/重複投票が拒否され集計が反映される、同一冪等キーの再送が記録済み status_id を返す（リポジトリ単体テストがグリーン）
   - _Requirements: 5.1, 5.2, 13.1, 13.2, 13.3, 13.4, 13.5_
@@ -153,3 +153,4 @@
 - 1.1/1.2: design.md 自体に自己矛盾があり、モデル抜粋（366行目）は `StatusEdit` に `id` を含めないが、Physical Data Model の SQL（716行目）は `status_edits.id BIGINT PRIMARY KEY` を含む。両タスクは design.md に忠実に実装したためこの矛盾をそのまま引き継いでいる。2.1（投稿リポジトリ、`status_edits` の永続化・履歴取得を含む）の実装者は、`StatusEdit` に `id` フィールドを追加するか `status_edits.id` を内部専用に留めるかを設計判断として解決すること。
 - 2.1: 上記の矛盾は `StatusEdit` に `id: Id` を追加する形で解決した（`status_edits.id` に DB 側デフォルトが無く、本クレートの「id は呼び出し側が `RuntimeContext::ids` で採番し、リポジトリ側では採番しない」規約に合わせるため）。`apply_edit` は同一の `edit: &StatusEdit` 引数で「投稿行へ適用する新内容」と「履歴行の採番済み PK」を兼務する点に注意（詳細は `status_repository.rs` のモジュールdocコメント参照）。また `find_visible`/`ancestors`/`descendants` は未実装の `VisibilityPolicy`（task 3.1）に依存せず、自己完結の fail-closed 可視性規則（public/unlisted は誰でも可視、private/direct は投稿者本人のみ）で暫定実装した。これは完全な可視性ロジックの厳密な部分集合（過剰に見せることはない）であり、3.1 実装時に置き換えが必要。
 - 2.2: reblog は `favourites`/`bookmarks`/`pins` と異なり専用テーブルを持たず（migrations/0007_statuses.sql の設計どおり）、記録/取消は task 2.1 の `StatusRepository`（`reblog_of_id` 付き `statuses` 行の insert/delete）が担う。`InteractionRepository` はブースト重複判定用の読み取り専用 `find_reblog` のみを持つ。design.md の Service Interface 素案が省略していた `now`/`id`（`bookmarks.id` に DB 側デフォルトが無いため）・`remove_bookmark`・`exists_*` は 2.1 の「id/時刻は呼び出し側採番」規約と要件（1.2 のアクター状態反映、11.2）を満たすため追加した。行マッピングは `status_repository.rs` の非公開ヘルパーを流用せず（境界外のため）小さく複製している。
+- 2.3: `poll_votes` の実 PK は `(poll_id, actor_id, choice)` であり `(poll_id, actor_id)` ではないため、レビュー1周目で `record_vote` の重複投票チェック（SELECT EXISTS→INSERT、ロック無し）に TOCTOU レースが指摘された（同一アクターの同時リクエストが両方 `already_voted` チェックを通過し二重記録され得る）。修正として `polls` 行取得に `FOR UPDATE` を追加し、同一トランザクション内でチェックと INSERT を同じロックスコープに収めて解消（同一 poll の全投票者を直列化する粗粒度ロックだが、要件・design.md に投票スループットの非機能要件は無く正しさを優先）。並行 2 リクエストで実際にレースを再現する回帰テストで検証済み。`IdempotencyStore` は `check_or_reserve`/`bind` の 2 段階（`status_idempotency_keys.status_id` が `statuses(id)` への NOT NULL FK のためスキーマ上不可避）で、競合は `(actor_id, idempotency_key)` 一意制約 + `ON CONFLICT DO NOTHING` で原子化。`bind` の `now: OffsetDateTime` 引数は 2.2 の `InteractionRepository` と同じ「時刻は呼び出し側採番」規約に従う。
