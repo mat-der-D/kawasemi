@@ -55,10 +55,17 @@
 //!   [`addressing`]'s own doc comment for the `ActorRef` type it defines
 //!   and the `to`/`cc` placement convention it follows).
 //!
-//!   No Activity generation (`StatusActivityBuilder`), no serializers
-//!   (`StatusSerializer` / `PollSerializer`), no services (`StatusService` /
-//!   `InteractionService` / `PollService`), no inbound handlers, and no HTTP
-//!   surface exist yet — this module is not wired into
+//! - Task 3.3 (`Boundary: StatusSerializer, PollSerializer`): [`serializer`]
+//!   ([`serializer::status_to_json`]/[`serializer::poll_to_json`]: the
+//!   Mastodon-compatible Status/Poll JSON contract, Account/media rendering
+//!   delegated to `crate::accounts::serializer`/`crate::media::serializer`,
+//!   contract-harness goldens under `tests/golden/statuses/` — see
+//!   [`serializer`]'s own doc comment for the pre-resolved-input carrier
+//!   types it defines and why).
+//!
+//!   No Activity generation (`StatusActivityBuilder`), no services
+//!   (`StatusService` / `InteractionService` / `PollService`), no inbound
+//!   handlers, and no HTTP surface exist yet — this module is not wired into
 //!   `crate::state::AppState`/`crate::bootstrap`/`crate::server` yet. See
 //!   design.md's "File Structure Plan" for the full planned module set.
 
@@ -67,6 +74,7 @@ pub mod idempotency;
 pub mod interaction_repository;
 pub mod model;
 pub mod poll_repository;
+pub mod serializer;
 pub mod status_repository;
 pub mod tag_repository;
 pub mod visibility;

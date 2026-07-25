@@ -1,0 +1,56 @@
+{
+  "account": {
+    "acct": "alice",
+    "display_name": "Alice",
+    "id": "1",
+    "username": "alice"
+  },
+  "bookmarked": false,
+  "content": "<p>hello world</p>",
+  "created_at": "2026-07-01T12:00:00Z",
+  "edited_at": null,
+  "emojis": [],
+  "favourited": false,
+  "favourites_count": 0,
+  "id": "40",
+  "in_reply_to_account_id": null,
+  "in_reply_to_id": null,
+  "language": "en",
+  "media_attachments": [],
+  "mentions": [],
+  "muted": false,
+  "pinned": false,
+  "poll": {
+    "emojis": [],
+    "expired": false,
+    "expires_at": "2026-08-01T00:00:00Z",
+    "id": "4",
+    "multiple": false,
+    "options": [
+      {
+        "title": "Cats",
+        "votes_count": 3
+      },
+      {
+        "title": "Dogs",
+        "votes_count": 2
+      }
+    ],
+    "own_votes": [
+      0
+    ],
+    "voted": true,
+    "voters_count": 5,
+    "votes_count": 5
+  },
+  "reblog": null,
+  "reblogged": false,
+  "reblogs_count": 0,
+  "replies_count": 0,
+  "sensitive": false,
+  "spoiler_text": "",
+  "tags": [],
+  "uri": "https://kawasemi.example/statuses/40",
+  "url": "https://kawasemi.example/@alice/40",
+  "visibility": "public"
+}

@@ -1,0 +1,21 @@
+{
+  "emojis": [],
+  "expired": true,
+  "expires_at": "2026-08-01T00:00:00Z",
+  "id": "6",
+  "multiple": false,
+  "options": [
+    {
+      "title": "Yes",
+      "votes_count": 2
+    },
+    {
+      "title": "No",
+      "votes_count": 1
+    }
+  ],
+  "own_votes": [],
+  "voted": false,
+  "voters_count": 3,
+  "votes_count": 3
+}
