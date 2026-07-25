@@ -418,11 +418,37 @@ pub async fn find_visible(
     Ok(status.filter(|status| is_visible_to(status, viewer)))
 }
 
+/// Looks up the [`Status`] persisted under `id` with **no** visibility
+/// filtering at all (a thin `pub` wrapper over [`fetch_raw`]).
+///
+/// Added by task 5.1 (`StatusService`): per this repository's own module doc
+/// comment ("Visible-scope filtering without `VisibilityPolicy`"),
+/// [`is_visible_to`] is a deliberately narrow, temporary stand-in for the
+/// real policy (`visibility::is_visible`, task 3.1) — `StatusService`'s
+/// `show`/`context`/`history`/`source`/delete/edit operations are the
+/// "later task" that module doc comment names as the one meant to route
+/// visibility decisions through the real policy instead. Doing that requires
+/// the *unfiltered* row (so the real policy — which needs a resolved
+/// `ViewerRelation` this data-layer module has no way to obtain, per that
+/// same doc comment's reasoning — can decide, rather than having
+/// [`is_visible_to`]'s narrower rule silently pre-reject something the real
+/// policy would have admitted, e.g. a `private` post visible to the
+/// author's follower). [`find_visible`]/[`ancestors`]/[`descendants`] above
+/// are left entirely unmodified for any other/future caller that still
+/// wants this repository's own bundled fail-closed filtering.
+pub async fn find_by_id(pool: &PgPool, id: Id) -> Result<Option<Status>, AppError> {
+    fetch_raw(pool, id).await
+}
+
 /// Returns the ancestor chain of `id` (the posts it replies to, transitively),
-/// oldest (root) first, filtered to what `viewer` may see (Requirements 6.2,
-/// 6.3) — see this module's doc comment ("Ordering of `ancestors`/
-/// `descendants`") for the full ordering/traversal contract.
-pub async fn ancestors(pool: &PgPool, id: Id, viewer: Option<Id>) -> Result<Vec<Status>, AppError> {
+/// oldest (root) first, with **no** visibility filtering — the traversal
+/// half of [`ancestors`], factored out so a caller needing the real
+/// visibility policy (see [`find_by_id`]'s doc comment) can filter the raw
+/// chain itself instead of going through [`is_visible_to`]. Added by task
+/// 5.1; [`ancestors`] below is refactored to call this and then apply
+/// [`is_visible_to`], an internal-only change that does not alter
+/// [`ancestors`]'s own observable behavior or signature.
+pub async fn ancestors_unfiltered(pool: &PgPool, id: Id) -> Result<Vec<Status>, AppError> {
     let mut chain = Vec::new();
     let mut visited: HashSet<Id> = HashSet::from([id]);
 
@@ -435,25 +461,33 @@ pub async fn ancestors(pool: &PgPool, id: Id, viewer: Option<Id>) -> Result<Vec<
             break; // dangling logical reference: parent no longer exists
         };
         next = parent.in_reply_to_id;
-        if is_visible_to(&parent, viewer) {
-            chain.push(parent);
-        }
+        chain.push(parent);
     }
 
     chain.reverse(); // walked immediate-parent-first; root-first is wanted
     Ok(chain)
 }
 
+/// Returns the ancestor chain of `id` (the posts it replies to, transitively),
+/// oldest (root) first, filtered to what `viewer` may see (Requirements 6.2,
+/// 6.3) — see this module's doc comment ("Ordering of `ancestors`/
+/// `descendants`") for the full ordering/traversal contract. Implemented as
+/// [`ancestors_unfiltered`] plus this repository's own [`is_visible_to`]
+/// filter — same observable behavior as before task 5.1's refactor.
+pub async fn ancestors(pool: &PgPool, id: Id, viewer: Option<Id>) -> Result<Vec<Status>, AppError> {
+    let chain = ancestors_unfiltered(pool, id).await?;
+    Ok(chain
+        .into_iter()
+        .filter(|parent| is_visible_to(parent, viewer))
+        .collect())
+}
+
 /// Returns the full descendant tree of `id` (every reply, transitively),
-/// flattened and ordered `created_at`-then-`id` ascending, filtered to what
-/// `viewer` may see (Requirements 6.2, 6.3) — see this module's doc comment
-/// ("Ordering of `ancestors`/`descendants`") for the full traversal
-/// contract.
-pub async fn descendants(
-    pool: &PgPool,
-    id: Id,
-    viewer: Option<Id>,
-) -> Result<Vec<Status>, AppError> {
+/// flattened and ordered `created_at`-then-`id` ascending, with **no**
+/// visibility filtering — the traversal half of [`descendants`], factored
+/// out for the same reason as [`ancestors_unfiltered`] (see [`find_by_id`]'s
+/// doc comment). Added by task 5.1.
+pub async fn descendants_unfiltered(pool: &PgPool, id: Id) -> Result<Vec<Status>, AppError> {
     let mut result = Vec::new();
     let mut visited: HashSet<Id> = HashSet::from([id]);
     let mut queue: VecDeque<Id> = VecDeque::from([id]);
@@ -463,15 +497,32 @@ pub async fn descendants(
             if !visited.insert(child.id) {
                 continue; // cyclic in_reply_to_id chain guard
             }
-            if is_visible_to(&child, viewer) {
-                result.push(child.clone());
-            }
+            result.push(child.clone());
             queue.push_back(child.id);
         }
     }
 
     result.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
     Ok(result)
+}
+
+/// Returns the full descendant tree of `id` (every reply, transitively),
+/// flattened and ordered `created_at`-then-`id` ascending, filtered to what
+/// `viewer` may see (Requirements 6.2, 6.3) — see this module's doc comment
+/// ("Ordering of `ancestors`/`descendants`") for the full traversal
+/// contract. Implemented as [`descendants_unfiltered`] plus this
+/// repository's own [`is_visible_to`] filter — same observable behavior as
+/// before task 5.1's refactor.
+pub async fn descendants(
+    pool: &PgPool,
+    id: Id,
+    viewer: Option<Id>,
+) -> Result<Vec<Status>, AppError> {
+    let all = descendants_unfiltered(pool, id).await?;
+    Ok(all
+        .into_iter()
+        .filter(|child| is_visible_to(child, viewer))
+        .collect())
 }
 
 /// Deletes the `statuses` row `id`, handling the two self-referential
@@ -698,4 +749,77 @@ pub async fn adjust_counts(
         .map_err(map_server_error)?;
 
     Ok(())
+}
+
+// -- status_media (added by task 5.1, `StatusService`) ----------------------
+//
+// `migrations/0007_statuses.sql`'s own `status_media` table ("投稿への添付
+// (media-pipelineのmediaを論理参照)") has never had a writer anywhere in
+// this crate before task 5.1: task 2.1's own Service Interface (design.md
+// lines 391-399) enumerates exactly six functions, none of them touching
+// `status_media`, and no sibling repository claims it either. `StatusService
+// ::create_status`/`edit_status` (Requirements 3.4, 8.1) is the first real
+// need for persisting a post's attached media, so these three functions are
+// added here — the natural home, alongside `insert_status`/`apply_edit`,
+// since `status_media` rows share `statuses`' own lifecycle (its `ON DELETE
+// CASCADE` is already declared against `statuses(id)`, so `delete_status`
+// needs no further change).
+
+/// Persists `status_id`'s attached media as new `status_media` rows, in
+/// `media_ids`' given order (`position` 0-based) — Requirement 3.4. Callers
+/// are responsible for having already verified each `media_id`'s ownership
+/// (`media_repository::find_owned`, media-pipeline's own contract) before
+/// calling this; this function only persists the association.
+pub async fn attach_media(pool: &PgPool, status_id: Id, media_ids: &[Id]) -> Result<(), AppError> {
+    for (position, media_id) in media_ids.iter().enumerate() {
+        sqlx::query("INSERT INTO status_media (status_id, media_id, position) VALUES ($1, $2, $3)")
+            .bind(status_id.as_i64())
+            .bind(media_id.as_i64())
+            .bind(position as i32)
+            .execute(pool)
+            .await
+            .map_err(map_server_error)?;
+    }
+    Ok(())
+}
+
+/// Replaces `status_id`'s entire attached-media set with `media_ids`, in the
+/// given order (Requirement 8.1's "メディア...の変更" on edit): deletes every
+/// existing `status_media` row for `status_id`, then inserts `media_ids`
+/// fresh, both in one transaction. An empty `media_ids` clears all
+/// attachments.
+pub async fn replace_media(pool: &PgPool, status_id: Id, media_ids: &[Id]) -> Result<(), AppError> {
+    let mut tx = pool.begin().await.map_err(map_server_error)?;
+
+    sqlx::query("DELETE FROM status_media WHERE status_id = $1")
+        .bind(status_id.as_i64())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_server_error)?;
+
+    for (position, media_id) in media_ids.iter().enumerate() {
+        sqlx::query("INSERT INTO status_media (status_id, media_id, position) VALUES ($1, $2, $3)")
+            .bind(status_id.as_i64())
+            .bind(media_id.as_i64())
+            .bind(position as i32)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_server_error)?;
+    }
+
+    tx.commit().await.map_err(map_server_error)?;
+    Ok(())
+}
+
+/// Returns `status_id`'s attached media ids, in attachment order
+/// (Requirement 3.4/8.1's read side).
+pub async fn media_ids_for_status(pool: &PgPool, status_id: Id) -> Result<Vec<Id>, AppError> {
+    let rows: Vec<(i64,)> =
+        sqlx::query_as("SELECT media_id FROM status_media WHERE status_id = $1 ORDER BY position")
+            .bind(status_id.as_i64())
+            .fetch_all(pool)
+            .await
+            .map_err(map_server_error)?;
+
+    Ok(rows.into_iter().map(|(id,)| Id::from_i64(id)).collect())
 }

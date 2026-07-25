@@ -73,8 +73,20 @@
 //!   doc comment for the `UndoKind`/`ActorHandleLookup` gap-fills and its
 //!   deliberate deviations from design.md's literal Service Interface).
 //!
-//!   No services (`StatusService` / `InteractionService` / `PollService`),
-//!   no inbound handlers, and no HTTP surface exist yet — this module is not
+//! - Task 5.1 (`Boundary: StatusService`): [`status_service`]
+//!   ([`status_service::StatusService`]: create/show/context/delete/edit/
+//!   history/source orchestration — idempotency check, empty-post
+//!   rejection, media-ownership verification, poll/media exclusivity
+//!   validation, mention/tag/emoji extraction, visibility-filtered
+//!   retrieval/context routed through `visibility::is_visible` rather than
+//!   `status_repository`'s own provisional stand-in, and Create/Delete/
+//!   Update dispatch via `StatusActivityBuilder` — see [`status_service`]'s
+//!   own doc comment for its documented boundary decisions on poll
+//!   handling, remote-mention resolution, and the edit/history fields the
+//!   schema cannot fully retain).
+//!
+//!   No `InteractionService` (task 5.2) or `PollService` (task 5.3), no
+//!   inbound handlers, and no HTTP surface exist yet — this module is not
 //!   wired into `crate::state::AppState`/`crate::bootstrap`/`crate::server`
 //!   yet. See design.md's "File Structure Plan" for the full planned module
 //!   set.
@@ -87,6 +99,7 @@ pub mod model;
 pub mod poll_repository;
 pub mod serializer;
 pub mod status_repository;
+pub mod status_service;
 pub mod tag_repository;
 pub mod visibility;
 

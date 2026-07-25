@@ -318,6 +318,19 @@ where
             .object_url(ACTIVITY_OBJECT_KIND, self.ids.next_id())
     }
 
+    /// Resolves `actor_id`'s local actor URL (`ActorUrls::actor_url`) via
+    /// this builder's own `ActorHandleLookup`. Added by task 5.1
+    /// (`StatusService`, this builder's first real caller): a narrow escape
+    /// hatch so a caller that needs to build its own `Addressing`
+    /// (`derive_addressing`'s `followers_uri` parameter, e.g. `{actor_url}/
+    /// followers`) does not have to duplicate this builder's own
+    /// `ActorHandleLookup`/`ActorUrls` wiring just to resolve one actor's
+    /// URL. Every other method on this type stays unmodified.
+    pub async fn resolve_actor_url(&self, actor_id: Id) -> Result<String, AppError> {
+        let handle = self.actor_lookup.resolve_handle(actor_id).await?;
+        Ok(self.urls.actor_url(&handle))
+    }
+
     /// Hands `activity` to `DeliveryService::deliver` as a single delivery
     /// request — the one call site every `deliver_*` method above funnels
     /// through, so "one canonical Activity, one `deliver()` call" is
