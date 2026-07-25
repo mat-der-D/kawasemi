@@ -48,14 +48,21 @@
 //!   that remains `status_repository`'s own documented temporary stand-in
 //!   until a later task replaces it.
 //!
-//!   No addressing derivation (`Addressing`, task 3.2), no Activity
-//!   generation (`StatusActivityBuilder`), no serializers
+//! - Task 3.2 (`Boundary: Addressing`): [`addressing`] (the single
+//!   `Visibility` -> `to`/`cc`/recipient derivation,
+//!   [`addressing::derive_addressing`] / [`addressing::derive_recipients`],
+//!   that local origination and remote delivery both funnel through — see
+//!   [`addressing`]'s own doc comment for the `ActorRef` type it defines
+//!   and the `to`/`cc` placement convention it follows).
+//!
+//!   No Activity generation (`StatusActivityBuilder`), no serializers
 //!   (`StatusSerializer` / `PollSerializer`), no services (`StatusService` /
 //!   `InteractionService` / `PollService`), no inbound handlers, and no HTTP
 //!   surface exist yet — this module is not wired into
 //!   `crate::state::AppState`/`crate::bootstrap`/`crate::server` yet. See
 //!   design.md's "File Structure Plan" for the full planned module set.
 
+pub mod addressing;
 pub mod idempotency;
 pub mod interaction_repository;
 pub mod model;
