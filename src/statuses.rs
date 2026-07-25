@@ -63,12 +63,23 @@
 //!   [`serializer`]'s own doc comment for the pre-resolved-input carrier
 //!   types it defines and why).
 //!
-//!   No Activity generation (`StatusActivityBuilder`), no services
-//!   (`StatusService` / `InteractionService` / `PollService`), no inbound
-//!   handlers, and no HTTP surface exist yet — this module is not wired into
-//!   `crate::state::AppState`/`crate::bootstrap`/`crate::server` yet. See
-//!   design.md's "File Structure Plan" for the full planned module set.
+//! - Task 4.1 (`Boundary: StatusActivityBuilder`): [`activity_builder`]
+//!   ([`activity_builder::StatusActivityBuilder`]: generates the six
+//!   canonical post-related Activities — `Create(Note)` / `Announce` /
+//!   `Like` / `Delete` / `Update` / `Undo(Announce|Like)` — plus the
+//!   Mastodon-compatible vote wire form `Create{Note, name=...}`, and hands
+//!   each one, with its `Addressing`-derived recipients, to
+//!   `DeliveryService::deliver` unmodified — see [`activity_builder`]'s own
+//!   doc comment for the `UndoKind`/`ActorHandleLookup` gap-fills and its
+//!   deliberate deviations from design.md's literal Service Interface).
+//!
+//!   No services (`StatusService` / `InteractionService` / `PollService`),
+//!   no inbound handlers, and no HTTP surface exist yet — this module is not
+//!   wired into `crate::state::AppState`/`crate::bootstrap`/`crate::server`
+//!   yet. See design.md's "File Structure Plan" for the full planned module
+//!   set.
 
+pub mod activity_builder;
 pub mod addressing;
 pub mod idempotency;
 pub mod interaction_repository;
