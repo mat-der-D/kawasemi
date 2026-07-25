@@ -489,6 +489,71 @@ async fn delete_status_is_a_noop_for_an_unknown_id() {
     app.cleanup().await;
 }
 
+/// Regression test for the double-delete TOCTOU race a run-scope reviewer
+/// flagged in already-committed, already-task-reviewed code: two concurrent
+/// `delete_status` calls for the *same* id (e.g. a client retry, or a
+/// duplicate federation Delete-Activity delivery for the same status) must
+/// decrement the reply-parent's `replies_count` exactly once, not twice —
+/// mirroring `poll_repository/tests.rs`'s own
+/// `record_vote_serializes_concurrent_votes_by_the_same_actor`
+/// `tokio::spawn` + cloned-`PgPool` + `tokio::join!` pattern for provoking a
+/// genuine concurrent race against real Postgres (see `status_repository.rs`'s
+/// doc comment, "Closing the double-delete race", for the fix this test
+/// exercises).
+#[tokio::test]
+async fn delete_status_serializes_concurrent_deletes_of_the_same_reply() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+
+    let parent = sample_status(&app, author, Visibility::Public, None, None);
+    insert(&app, &parent).await;
+    let reply = sample_status(&app, author, Visibility::Public, Some(parent.id), None);
+    insert(&app, &reply).await;
+    // Pre-set the parent's replies_count to 2, as if it had two real replies
+    // — only one of which (`reply`) is about to be raced on concurrent
+    // deletion. A correct fix must land on 1 (2 - 1), never 0 (2 - 2).
+    adjust_counts(&app.pool, parent.id, CountKind::Replies, 2)
+        .await
+        .expect("adjust_counts must succeed");
+
+    let pool_a = app.pool.clone();
+    let pool_b = app.pool.clone();
+    let reply_id = reply.id;
+
+    let (result_a, result_b) = tokio::join!(
+        tokio::spawn(async move { delete_status(&pool_a, reply_id).await }),
+        tokio::spawn(async move { delete_status(&pool_b, reply_id).await }),
+    );
+    result_a
+        .expect("task a must not panic")
+        .expect("delete_status must succeed even for the losing racer (no-op, not an error)");
+    result_b
+        .expect("task b must not panic")
+        .expect("delete_status must succeed even for the losing racer (no-op, not an error)");
+
+    // The reply itself is gone regardless of which racer actually removed
+    // it.
+    assert!(
+        find_visible(&app.pool, reply.id, Some(author))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // The parent's replies_count must be decremented exactly once (2 -> 1),
+    // never twice (2 -> 0) — the bug this test guards against.
+    let parent_after = find_visible(&app.pool, parent.id, None)
+        .await
+        .unwrap()
+        .expect("the parent status must still exist");
+    assert_eq!(
+        parent_after.replies_count, 1,
+        "two concurrent deletes of the same reply must decrement replies_count exactly once, \
+         not once per racing call"
+    );
+
+    app.cleanup().await;
+}
+
 // -- apply_edit / list_edits ----------------------------------------------
 
 /// Requirements 8.1, 8.2: editing a status updates its live content and

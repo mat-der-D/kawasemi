@@ -118,6 +118,39 @@
 //! that belong to `InteractionService`'s own reblog/unreblog path (task
 //! 2.2/5.x), not this repository's `delete_status`.
 //!
+//! ## Closing the double-delete race (run-scope review finding, fixed)
+//! [`delete_status`] first `SELECT`s the target row's `in_reply_to_id` with
+//! no lock, then later `DELETE`s the target row itself. Two concurrent
+//! `delete_status(id)` calls for the *same* `id` (a realistic scenario: a
+//! client retry, or duplicate federation `Delete` activity delivery for the
+//! same status) can both complete that initial `SELECT` and observe the same
+//! `in_reply_to_id` before either commits. Under Postgres READ COMMITTED,
+//! their respective `DELETE FROM statuses WHERE id = $1` statements then
+//! serialize on the row lock the first `DELETE` takes: the first to commit
+//! actually removes the row; the second blocks, wakes once the first
+//! commits, and — because READ COMMITTED re-evaluates the `WHERE` clause
+//! against the now-current snapshot — finds zero matching rows (already
+//! gone), so *its own* `DELETE` affects zero rows. Without checking that,
+//! step (b)'s `replies_count` decrement would run unconditionally for both
+//! calls, double-decrementing the parent for what was really only one actual
+//! deletion.
+//!
+//! [`delete_status`] closes this using only the row lock Postgres already
+//! takes for the `DELETE` itself — no additional explicit locking (e.g. a
+//! `SELECT ... FOR UPDATE` on the target row) is needed, unlike
+//! `poll_repository.rs::record_vote`'s analogous fix (see that module's own
+//! "Closing the duplicate-vote race" doc comment), whose race could not be
+//! closed by a plain `INSERT`'s own locking because a vote is a fresh row,
+//! not a state transition on an existing one. Here the `DELETE FROM statuses
+//! WHERE id = $1` result's `rows_affected()` is captured, and step (b) only
+//! runs `if deleted.rows_affected() > 0` — i.e. only the call that actually
+//! removed the row performs the parent decrement; a racer that lost the
+//! `DELETE` (0 rows affected) skips it entirely. Verified with a genuine
+//! concurrent-DB regression test (`tests.rs`,
+//! `delete_status_serializes_concurrent_deletes_of_the_same_reply`) that
+//! reproduces the double-decrement reliably without the fix and passes
+//! reliably with it.
+//!
 //! ## Ordering of `ancestors`/`descendants`
 //! `ancestors` returns oldest (root) first, immediate parent last — the
 //! conventional "read top to bottom" thread order. `descendants` returns a
@@ -490,15 +523,28 @@ pub async fn delete_status(pool: &PgPool, id: Id) -> Result<(), AppError> {
     // removes this row's own `status_edits`/`status_media`/`favourites`/
     // `bookmarks`/`pins`/`polls`/`status_idempotency_keys`/`status_tags`
     // rows.
-    sqlx::query("DELETE FROM statuses WHERE id = $1")
+    //
+    // The affected-row count is load-bearing, not incidental — see this
+    // module's doc comment ("Closing the double-delete race") for why: it
+    // distinguishes "this call actually removed the row" from "some
+    // concurrent racer already removed it", which step (b) below needs to
+    // avoid double-decrementing the parent's `replies_count`.
+    let deleted = sqlx::query("DELETE FROM statuses WHERE id = $1")
         .bind(id.as_i64())
         .execute(&mut *tx)
         .await
         .map_err(map_server_error)?;
 
     // (b) explicit self-referential fixup: decrement the parent's
-    // `replies_count` if the deleted post was itself a reply.
-    if let Some(parent_id) = in_reply_to_id {
+    // `replies_count` if the deleted post was itself a reply — but only if
+    // this call actually removed the row (`deleted.rows_affected() > 0`).
+    // Under READ COMMITTED, a concurrent racer that lost the DELETE above
+    // (its `WHERE id = $1` matched zero rows once the winner's DELETE had
+    // already committed and released the row lock) must not also decrement
+    // the parent, or the same single deletion would be double-counted.
+    if deleted.rows_affected() > 0
+        && let Some(parent_id) = in_reply_to_id
+    {
         sqlx::query(
             "UPDATE statuses SET replies_count = GREATEST(replies_count - 1, 0) WHERE id = $1",
         )
