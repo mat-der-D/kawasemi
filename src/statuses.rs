@@ -95,6 +95,7 @@ pub mod activity_builder;
 pub mod addressing;
 pub mod idempotency;
 pub mod interaction_repository;
+pub mod interaction_service;
 pub mod model;
 pub mod poll_repository;
 pub mod serializer;
