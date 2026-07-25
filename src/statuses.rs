@@ -38,9 +38,18 @@
 //!   `(actor_id, key)` -> `status_id` lookup and resend resolution against
 //!   `status_idempotency_keys`).
 //!
-//!   No delegation ports (`RelationshipQuery`, task 1.3), no
-//!   visibility/addressing logic (`VisibilityPolicy` / `Addressing`), no
-//!   Activity generation (`StatusActivityBuilder`), no serializers
+//! - Task 3.1 (`Boundary: VisibilityPolicy, RelationshipQuery(port)`):
+//!   [`visibility`] (the single visibility judgment
+//!   [`visibility::is_visible`] that retrieval/context/interaction
+//!   visibility checks are meant to funnel through, plus the
+//!   [`visibility::RelationshipQuery`] delegation-port contract and its
+//!   safe default [`visibility::NoRelationshipQuery`]). Does not yet wire
+//!   `status_repository`'s queries to call [`visibility::is_visible`] —
+//!   that remains `status_repository`'s own documented temporary stand-in
+//!   until a later task replaces it.
+//!
+//!   No addressing derivation (`Addressing`, task 3.2), no Activity
+//!   generation (`StatusActivityBuilder`), no serializers
 //!   (`StatusSerializer` / `PollSerializer`), no services (`StatusService` /
 //!   `InteractionService` / `PollService`), no inbound handlers, and no HTTP
 //!   surface exist yet — this module is not wired into
@@ -53,5 +62,6 @@ pub mod model;
 pub mod poll_repository;
 pub mod status_repository;
 pub mod tag_repository;
+pub mod visibility;
 
 pub use model::{IdempotencyRecord, Poll, PollOption, PollVote, Status, StatusEdit, Tag};
