@@ -127,11 +127,25 @@
 //!   7.2's boundary) — this module remains a standalone, independently
 //!   unit-testable set of handlers with no live caller yet. See design.md's
 //!   "File Structure Plan" for the full planned module set.
+//!
+//! - Task 6.2 (`Boundary: StatusIngestService`, `_Depends: 6.1_`):
+//!   [`ingest_service`] ([`ingest_service::StatusIngestService`]: a remote
+//!   Note "URL/document → Status" ingestion entry point callable from
+//!   outside federation-core's inbound Activity dispatch, e.g. a future
+//!   search spec's `RemoteResolver`). Reuses
+//!   [`inbound_handlers::ingest_note_object`] (a `pub(crate)` function
+//!   extracted from `CreateNoteHandler`'s own inbound `Create(Note)` path by
+//!   this task) verbatim, so this entry point produces identical results to
+//!   the inbound-dispatch path for the same input (Requirement 14.5). Not
+//!   wired into `AppState`/bootstrap/any live HTTP path or the `search` spec
+//!   itself (which does not exist yet in this codebase) — see
+//!   [`ingest_service`]'s own doc comment for the full contract.
 
 pub mod activity_builder;
 pub mod addressing;
 pub mod idempotency;
 pub mod inbound_handlers;
+pub mod ingest_service;
 pub mod interaction_repository;
 pub mod interaction_service;
 pub mod model;

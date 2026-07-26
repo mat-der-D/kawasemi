@@ -21,6 +21,22 @@
 //! `activity_builder.rs`'s/`status_service.rs`'s own identical "no live
 //! caller yet" precedent).
 //!
+//! ## Task 6.2 additive widening: `ingest_note_object`/`object_reference_uri`
+//! made `pub(crate)`
+//! Task 6.2 (`Boundary: StatusIngestService`, `src/statuses/ingest_service.rs`)
+//! needs the exact same Note-normalization/persistence logic
+//! [`CreateNoteHandler::handle`] uses, for its own out-of-dispatch
+//! "document/URL → Status" entry point (Requirement 14.5's shared-code-path
+//! discipline extended one level up). Rather than duplicating that logic in
+//! the new module, this task extracts it into [`ingest_note_object`] (a free
+//! `pub(crate)` function both [`CreateNoteHandler`] and
+//! `crate::statuses::ingest_service::StatusIngestService` call) and widens
+//! [`object_reference_uri`] to `pub(crate)` (the new module reuses it
+//! verbatim to read a `Note`'s `attributedTo` property). Neither change
+//! alters this module's own observable behavior — `CreateNoteHandler` calls
+//! [`ingest_note_object`] with the identical inputs/order of operations its
+//! inlined code previously used.
+//!
 //! ## Every handler calls the exact same repository functions the
 //! corresponding local-origin service already calls (Requirement 14.5)
 //! No handler here reimplements a parallel state-transition:
@@ -326,7 +342,14 @@ fn activity_map(activity: &ParsedActivity) -> Option<&Map<String, Value>> {
 /// shaped `Delete` object, or any other embedded-object shape a foreign
 /// dialect might send) — returns `None` (not an error) for any other shape,
 /// letting the caller decide whether that is a safe [`HandleOutcome::Ignored`].
-fn object_reference_uri(value: Option<&Value>) -> Option<&str> {
+///
+/// `pub(crate)` (widened from this module's original private visibility by
+/// task 6.2, `Boundary: StatusIngestService`): reused as-is by
+/// [`crate::statuses::ingest_service::StatusIngestService::ingest_document`]
+/// to read a `Note`'s `attributedTo` property, which carries the identical
+/// bare-string-or-embedded-object shape ambiguity as `Announce`/`Like`/
+/// `Delete`'s `object` property.
+pub(crate) fn object_reference_uri(value: Option<&Value>) -> Option<&str> {
     match value {
         Some(Value::String(uri)) => Some(uri.as_str()),
         Some(Value::Object(map)) => map.get("id").and_then(Value::as_str),
@@ -449,6 +472,97 @@ impl<R: RemoteActorResolver> Clone for StatusInboundDeps<R> {
 // CreateNoteHandler
 // ---------------------------------------------------------------------------
 
+/// Normalizes an already-identified ActivityPub `Note` `object` map into a
+/// local [`Status`] row and persists it (Requirement 14.2), given the
+/// already-resolved acting `actor_id`. This is the single "Note ingestion"
+/// code path both [`CreateNoteHandler`] (the inbound `Create(Note)` dispatch
+/// handler, below) and
+/// [`crate::statuses::ingest_service::StatusIngestService`] (task 6.2, an
+/// out-of-dispatch entry point reusing this exact function per its own
+/// `_Depends: 6.1_`) call — neither reimplements a second, parallel
+/// normalization, satisfying Requirement 14.5's "共通コードパス" discipline
+/// across both entry points (task 6.2's own observable-completion criterion,
+/// "受信ハンドラ経路と同一結果になる").
+///
+/// Idempotent: if `object`'s `id` already names an ingested [`Status`], that
+/// existing row is returned unchanged (no re-insert, no re-`persist_tags`) —
+/// see this module's doc comment ("Idempotent re-delivery"). Fails with a
+/// `422 Unprocessable Entity` [`AppError`] if `object` carries no `id`
+/// property at all.
+pub(crate) async fn ingest_note_object(
+    pool: &PgPool,
+    runtime: &RuntimeContext,
+    object: &Map<String, Value>,
+    actor_id: Id,
+) -> Result<Status, AppError> {
+    let Some(object_uri) = object.get("id").and_then(Value::as_str) else {
+        return Err(malformed("Note object is missing a required 'id' property"));
+    };
+
+    if let Some(existing) = status_repository::find_by_uri(pool, object_uri).await? {
+        // Already ingested (a harmless re-delivery) — see this module's doc
+        // comment, "Idempotent re-delivery".
+        return Ok(existing);
+    }
+
+    let content = optional_string(object, "content").unwrap_or_default();
+    let sensitive = object
+        .get("sensitive")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let spoiler_text = optional_string(object, "summary").unwrap_or_default();
+    let url = optional_string(object, "url").unwrap_or_else(|| object_uri.to_string());
+    let published = optional_string(object, "published")
+        .as_deref()
+        .and_then(parse_rfc3339);
+
+    let (in_reply_to_id, in_reply_to_account_id) = match optional_string(object, "inReplyTo") {
+        Some(parent_uri) => match status_repository::find_by_uri(pool, &parent_uri).await? {
+            Some(parent) => (Some(parent.id), Some(parent.actor_id)),
+            None => (None, None),
+        },
+        None => (None, None),
+    };
+
+    let visibility = derive_inbound_visibility(object);
+
+    let id = runtime.ids.next_id();
+    let now = runtime.clock.now();
+    let created_at = published.unwrap_or(now);
+
+    let status = Status {
+        id,
+        actor_id,
+        uri: object_uri.to_string(),
+        url: Some(url),
+        content,
+        visibility,
+        sensitive,
+        spoiler_text,
+        in_reply_to_id,
+        in_reply_to_account_id,
+        reblog_of_id: None,
+        poll_id: None,
+        language: None,
+        reblogs_count: 0,
+        favourites_count: 0,
+        replies_count: 0,
+        local: false,
+        created_at,
+        edited_at: None,
+    };
+
+    status_repository::insert_status(pool, &status).await?;
+
+    if let Some(parent_id) = in_reply_to_id {
+        status_repository::adjust_counts(pool, parent_id, CountKind::Replies, 1).await?;
+    }
+
+    persist_tags(pool, runtime, status.id, &status.content, now).await?;
+
+    Ok(status)
+}
+
 /// Ingests an inbound `Create(Note)` as a remote [`Status`] (Requirements
 /// 14.1, 14.2), or — when the wire shape matches a poll vote (Requirement
 /// 13.6) — branches into [`poll_repository::record_vote`] instead. See this
@@ -536,79 +650,11 @@ impl<R: RemoteActorResolver> InboundActivityHandler for CreateNoteHandler<R> {
                 return Ok(outcome);
             }
 
-            let Some(object_uri) = object.get("id").and_then(Value::as_str) else {
-                return Err(malformed(
-                    "Create(Note) object is missing a required 'id' property",
-                ));
-            };
-
-            if status_repository::find_by_uri(&self.pool, object_uri)
-                .await?
-                .is_some()
-            {
-                // Already ingested (a harmless re-delivery) — see this
-                // module's doc comment, "Idempotent re-delivery".
-                return Ok(HandleOutcome::Handled);
-            }
-
-            let content = optional_string(object, "content").unwrap_or_default();
-            let sensitive = object
-                .get("sensitive")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let spoiler_text = optional_string(object, "summary").unwrap_or_default();
-            let url = optional_string(object, "url").unwrap_or_else(|| object_uri.to_string());
-            let published = optional_string(object, "published")
-                .as_deref()
-                .and_then(parse_rfc3339);
-
-            let (in_reply_to_id, in_reply_to_account_id) =
-                match optional_string(object, "inReplyTo") {
-                    Some(parent_uri) => {
-                        match status_repository::find_by_uri(&self.pool, &parent_uri).await? {
-                            Some(parent) => (Some(parent.id), Some(parent.actor_id)),
-                            None => (None, None),
-                        }
-                    }
-                    None => (None, None),
-                };
-
-            let visibility = derive_inbound_visibility(object);
-
-            let id = self.runtime.ids.next_id();
-            let now = self.runtime.clock.now();
-            let created_at = published.unwrap_or(now);
-
-            let status = Status {
-                id,
-                actor_id,
-                uri: object_uri.to_string(),
-                url: Some(url),
-                content,
-                visibility,
-                sensitive,
-                spoiler_text,
-                in_reply_to_id,
-                in_reply_to_account_id,
-                reblog_of_id: None,
-                poll_id: None,
-                language: None,
-                reblogs_count: 0,
-                favourites_count: 0,
-                replies_count: 0,
-                local: false,
-                created_at,
-                edited_at: None,
-            };
-
-            status_repository::insert_status(&self.pool, &status).await?;
-
-            if let Some(parent_id) = in_reply_to_id {
-                status_repository::adjust_counts(&self.pool, parent_id, CountKind::Replies, 1)
-                    .await?;
-            }
-
-            persist_tags(&self.pool, &self.runtime, status.id, &status.content, now).await?;
+            // Delegates to the shared Note-ingestion code path also called
+            // by `StatusIngestService` — see [`ingest_note_object`]'s own
+            // doc comment for why (Requirement 14.5's "共通コードパス",
+            // task 6.2's "受信ハンドラ経路と同一結果になる").
+            ingest_note_object(&self.pool, &self.runtime, object, actor_id).await?;
 
             Ok(HandleOutcome::Handled)
         })
