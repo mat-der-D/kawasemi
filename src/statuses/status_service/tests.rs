@@ -732,6 +732,109 @@ async fn delete_removes_status_and_dispatches_delete_activity() {
     app.cleanup().await;
 }
 
+/// Cross-task boundary fix (Group 5 remediation, see this module's doc
+/// comment "`delete_status` rejects reblog rows"): a boost row (`Status`
+/// with `reblog_of_id` set, the same shape `InteractionService::reblog`
+/// persists) must not be deletable through the generic
+/// `delete_status` — only `InteractionService::unreblog` may retire it,
+/// since only that path knows to decrement the *target's* `reblogs_count`
+/// and dispatch `Undo(Announce)` rather than `Delete`. Builds the boost row
+/// directly via `status_repository::insert_status`/`adjust_counts` (the same
+/// two calls `InteractionService::reblog` itself makes) rather than via
+/// `InteractionService` (out of this task's file boundary), then asserts
+/// `delete_status` rejects it with a `422`, leaves the row and the original
+/// post's `reblogs_count` untouched, and dispatches no Activity at all.
+#[tokio::test]
+async fn delete_status_rejects_a_reblog_row() {
+    let app = spawn_test_app().await;
+    let original_author = app.runtime.ids.next_id();
+    let booster = app.runtime.ids.next_id();
+    let (author_service, _author_local, _author_http) =
+        service(&app, original_author, "alice", false);
+    let (booster_service, local_sink, http_sink) = service(&app, booster, "bob", false);
+
+    let original = author_service
+        .create_status(
+            original_author,
+            create_input("original", Visibility::Public),
+            None,
+        )
+        .await
+        .expect("create original status");
+
+    // Build the boost row exactly the way `InteractionService::reblog` does
+    // (see `interaction_service.rs::reblog`), without going through
+    // `InteractionService` itself.
+    let reblog_id = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+    let uri = format!("https://kawasemi.example/statuses/{}", reblog_id.as_i64());
+    let reblog = Status {
+        id: reblog_id,
+        actor_id: booster,
+        uri: uri.clone(),
+        url: Some(uri),
+        content: String::new(),
+        visibility: original.visibility,
+        sensitive: false,
+        spoiler_text: String::new(),
+        in_reply_to_id: None,
+        in_reply_to_account_id: None,
+        reblog_of_id: Some(original.id),
+        poll_id: None,
+        language: None,
+        reblogs_count: 0,
+        favourites_count: 0,
+        replies_count: 0,
+        local: true,
+        created_at: now,
+        edited_at: None,
+    };
+    status_repository::insert_status(&app.pool, &reblog)
+        .await
+        .expect("insert reblog row");
+    status_repository::adjust_counts(&app.pool, original.id, CountKind::Reblogs, 1)
+        .await
+        .expect("bump the original's reblogs_count, mirroring InteractionService::reblog");
+
+    // Reset delivery recording so only this call's own (non-)dispatch counts.
+    local_sink.calls.lock().unwrap().clear();
+    http_sink.calls.lock().unwrap().clear();
+
+    let err = booster_service
+        .delete_status(booster, reblog.id)
+        .await
+        .expect_err("delete_status must reject a reblog row, not silently delete it");
+    assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // The boost row itself must still be there.
+    assert!(
+        status_repository::find_by_id(&app.pool, reblog.id)
+            .await
+            .expect("find_by_id must succeed")
+            .is_some(),
+        "a rejected delete must not remove the reblog row"
+    );
+
+    // The original post's reblogs_count must be untouched.
+    let refetched_original = status_repository::find_by_id(&app.pool, original.id)
+        .await
+        .expect("find_by_id must succeed")
+        .expect("original status must still exist");
+    assert_eq!(
+        refetched_original.reblogs_count, 1,
+        "a rejected delete must not touch the original's reblogs_count"
+    );
+
+    // No Delete/Undo (or any) Activity must have been dispatched.
+    assert_eq!(
+        deliveries(&local_sink, &http_sink),
+        0,
+        "a rejected delete must not dispatch any Activity"
+    );
+
+    app.cleanup().await;
+}
+
 // -- edit_status / history / source ------------------------------------------
 
 /// Requirements 8.1, 8.2, 8.4: an edit updates `edited_at`, records history,

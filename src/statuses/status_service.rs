@@ -119,6 +119,39 @@
 //! structurally-sound interpretation when full poll wiring is out of a
 //! task's dependency set.
 //!
+//! ## `delete_status` rejects reblog rows (Requirement 7.x — documented
+//! boundary decision, Group 5 cross-task remediation)
+//! [`delete_status`](StatusService::delete_status) is owner-scoped: it does
+//! not otherwise distinguish an original post from a boost/reblog row (a
+//! `Status` with `reblog_of_id` set — task 5.2's `InteractionService::reblog`
+//! own persistence shape, see that module's doc comment, "Reblog is a
+//! `StatusRepository` row, not an `InteractionRepository` one"). A caller
+//! could therefore point `delete_status` directly at their own boost's id
+//! instead of calling `InteractionService::unreblog`. This matters because
+//! the two operations are *not* interchangeable:
+//! `status_repository::delete_status`'s own two explicit self-referential
+//! cleanup steps (Requirement 7.4) only ever (a) cascade-delete boosts *of*
+//! the row being deleted and (b) decrement the *reply-parent's*
+//! `replies_count` when the deleted row is itself a reply — it has no third
+//! case for decrementing the *reblog target's* `reblogs_count` when the
+//! deleted row is itself a boost, and this service's own `delete_status`
+//! always dispatches a canonical `Delete` (Requirement 7.3), never the
+//! `Undo(Announce)` a boost's removal actually means in ActivityPub terms
+//! (`InteractionService::unreblog`'s own contract). Reimplementing
+//! `unreblog`'s counter-decrement-plus-`Undo(Announce)` semantics inside
+//! `delete_status` was considered and rejected: design.md's Requirements
+//! Traceability table attributes Requirement 7.x's delete path to
+//! `StatusService`/`StatusActivityBuilder`/`InteractionRepository` and
+//! Requirement 9.x's reblog/unreblog path to a *disjoint* set —
+//! `InteractionService`/`InteractionRepository`/`StatusActivityBuilder` —
+//! never both to `StatusService`, so folding reblog-removal semantics into
+//! this service would blur a boundary design.md itself keeps separate.
+//! `delete_status` therefore rejects a reblog-row target outright (a `422`
+//! directing the caller to `InteractionService::unreblog`) rather than
+//! silently leaving the target's `reblogs_count` permanently stale or
+//! guessing at `unreblog`'s own already-reviewed (task 5.2) counter/dispatch
+//! sequencing from outside that task's file.
+//!
 //! ## Mention resolution: local only (CONCERN — documented boundary gap)
 //! Extracted `@handle`/`@handle@domain` mentions are resolved to an
 //! `Addressing`-ready [`crate::statuses::addressing::ActorRef`] only when
@@ -687,17 +720,26 @@ where
 
     /// Deletes `id`, owned by `actor_id` (Requirements 7.1-7.4): a
     /// 404-equivalent `AppError` if `id` is unknown or not owned by
-    /// `actor_id`; otherwise removes the row (and its two self-referential
-    /// cleanup steps, `status_repository::delete_status`'s own contract)
-    /// and delivers a canonical `Delete` to `id`'s own addressing. Returns
-    /// the pre-deletion [`Status`] (Requirement 7.1's "削除された投稿の表現
-    /// を返す").
+    /// `actor_id`; a `422` if `id` is itself a reblog/boost row (see this
+    /// module's doc comment, "`delete_status` rejects reblog rows" —
+    /// `InteractionService::unreblog` is the only correct way to retire one);
+    /// otherwise removes the row (and its two self-referential cleanup
+    /// steps, `status_repository::delete_status`'s own contract) and
+    /// delivers a canonical `Delete` to `id`'s own addressing. Returns the
+    /// pre-deletion [`Status`] (Requirement 7.1's "削除された投稿の表現を
+    /// 返す").
     pub async fn delete_status(&self, actor_id: Id, id: Id) -> Result<Status, AppError> {
         let status = status_repository::find_by_id(&self.pool, id)
             .await?
             .ok_or_else(not_found)?;
         if status.actor_id != actor_id {
             return Err(not_found());
+        }
+        if status.reblog_of_id.is_some() {
+            return Err(rejected(
+                "cannot delete a reblog through delete_status; use \
+                 InteractionService::unreblog instead",
+            ));
         }
 
         status_repository::delete_status(&self.pool, id).await?;
