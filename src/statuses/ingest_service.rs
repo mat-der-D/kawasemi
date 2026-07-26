@@ -63,12 +63,31 @@
 //! origin server may vouch for who authored it. A host mismatch is rejected
 //! as a malformed document (this module's own `422` convention, see
 //! "Non-`Note` / malformed documents" below) *before* `attributedTo` is ever
-//! resolved to an [`Id`]. Only once that check passes does this service read
-//! `attributedTo` as the authoritative author, then resolve it to a stable
-//! [`Id`] via the same
+//! resolved to an [`Id`].
+//!
+//! That `id`-vs-`attributedTo` check alone is not sufficient for
+//! [`Self::ingest_url`], though: both fields are supplied by whichever server
+//! answered the fetch, so a server at `evil.example` can simply serve a
+//! document whose `id` and `attributedTo` already agree with each other on
+//! `remote.example` -- internally self-consistent, but naming a host
+//! `evil.example` never actually controls. [`Self::ingest_url`] therefore
+//! additionally anchors the check to the one thing the caller itself chose
+//! and dereferenced -- `url` -- via [`check_fetched_host`]: the fetched
+//! `url`'s own host must match the document's claimed `id` host, so the full
+//! chain `fetched-url-host == id-host == attributedTo-host` is anchored to
+//! something outside the answering server's control.
+//! [`Self::ingest_document`] has no fetched URL to anchor to (it is handed a
+//! document directly) and so performs only the `id`-vs-`attributedTo` half of
+//! the check; a caller that accepts a document from an untrusted source
+//! without having dereferenced it itself gets no stronger guarantee than
+//! that. Only once both checks pass does this service read `attributedTo` as
+//! the authoritative author, then resolve it to a stable [`Id`] via the same
 //! [`crate::statuses::inbound_handlers::RemoteActorResolver`] port
-//! `CreateNoteHandler` uses (task 6.1's own delegation port, reused as-is —
-//! not a second, narrower actor-resolution seam).
+//! `CreateNoteHandler` uses (task 6.1's own delegation port, reused as-is --
+//! not a second, narrower actor-resolution seam). All host comparisons in
+//! this module are ASCII-case-insensitive (`eq_ignore_ascii_case`): hostnames
+//! are case-insensitive, so two hosts differing only in letter case are the
+//! same origin and must not be falsely rejected.
 //!
 //! ## `ingest_url` vs. `ingest_document`: task 6.2's own literal
 //! "ドキュメント/URL" wording, as two entry points
@@ -83,9 +102,10 @@
 //! ## Non-`Note` / malformed documents: a `422`, mirroring this crate's own
 //! established fetch-and-normalize error-shape convention
 //! A document whose top-level `type` is not the literal string `"Note"`,
-//! whose `attributedTo` is absent/uninterpretable, or whose own `id` host
-//! does not match its `attributedTo` host (the "Actor resolution"
-//! origin/authority check above), is rejected with a
+//! whose `attributedTo` is absent/uninterpretable, whose own `id` host does
+//! not match its `attributedTo` host, or (for [`Self::ingest_url`] only)
+//! whose own `id` host does not match the fetched `url`'s host (the "Actor
+//! resolution" origin/authority checks above), is rejected with a
 //! `422 Unprocessable Entity` [`AppError`] — the same status
 //! [`crate::federation::jsonld::parse_activity`] and
 //! `RemoteAccountFetcher`'s own required-property checks already use for
@@ -148,6 +168,43 @@ fn host_from_url(url: &str) -> &str {
     &after_scheme[..end]
 }
 
+/// [`StatusIngestService::ingest_url`]'s own additional origin/authority
+/// check (this module's own doc comment, "Actor resolution"): verifies that
+/// `url` -- the address this service itself actually dereferenced, the one
+/// thing an attacker-controlled answering server cannot forge -- shares a
+/// host with `document`'s own claimed `id` field, in addition to (not
+/// instead of) the `id`-vs-`attributedTo` check `ingest_document` already
+/// performs. Without this, a server at `evil.example` could serve a document
+/// whose `id` and `attributedTo` already agree with each other on some other
+/// host (so the `id`-vs-`attributedTo` check alone passes), while
+/// `evil.example` never actually controls that host. Mirrors that same
+/// check's "a missing `id` is not checked here" precedent: `id`
+/// presence/shape is validated by `ingest_note_object` downstream, so a
+/// document with no `id` at all is simply left to that downstream rejection
+/// rather than duplicating it here. Host comparison is ASCII-case-insensitive
+/// (`eq_ignore_ascii_case`), matching every other host comparison in this
+/// module.
+fn check_fetched_host(url: &str, document: &Value) -> Result<(), AppError> {
+    let Some(object_uri) = document
+        .as_object()
+        .and_then(|object| object.get("id"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    let fetched_host = host_from_url(url);
+    let document_host = host_from_url(object_uri);
+    if !fetched_host.eq_ignore_ascii_case(document_host) {
+        return Err(malformed(format!(
+            "Note object 'id' host '{document_host}' does not match the \
+             fetched url's host '{fetched_host}' (origin/authority check \
+             failed: '{url}' has no authority to vouch for a document whose \
+             own id claims a different host)"
+        )));
+    }
+    Ok(())
+}
+
 /// Ingests a single remote `Note` (design.md's exact `StatusIngestService`;
 /// Requirements 14.1, 14.2, 14.3) from either a URL this service fetches
 /// itself ([`Self::ingest_url`]) or an already-fetched JSON-LD document
@@ -195,7 +252,13 @@ impl<H: FederationHttpClient, R: RemoteActorResolver> StatusIngestService<H, R> 
     /// [`AppError`] if the upstream fetch does not return a success status,
     /// mirroring `RemoteAccountFetcher::fetch_and_upsert`'s identical
     /// mapping; propagates whatever [`AppError`] a transport-level fetch
-    /// failure itself already produced otherwise.
+    /// failure itself already produced otherwise. Before delegating to
+    /// [`Self::ingest_document`], also runs [`check_fetched_host`]: the
+    /// fetched document's own `id` must share a host with `url` itself, not
+    /// just with its own `attributedTo` (see this module's doc comment,
+    /// "Actor resolution") -- otherwise a server could serve a document
+    /// whose `id`/`attributedTo` merely agree with *each other* on a host it
+    /// does not control.
     pub async fn ingest_url(&self, url: &str) -> Result<Status, AppError> {
         let response = self.http_client.fetch(url, None).await?;
         if !response.status.is_success() {
@@ -209,6 +272,7 @@ impl<H: FederationHttpClient, R: RemoteActorResolver> StatusIngestService<H, R> 
         }
 
         let parsed = parse_activity(&response.body)?;
+        check_fetched_host(url, &parsed.raw)?;
         self.ingest_document(&parsed.raw).await
     }
 
@@ -236,11 +300,13 @@ impl<H: FederationHttpClient, R: RemoteActorResolver> StatusIngestService<H, R> 
         // vouch for who authored it. `object`'s `id` presence/shape is itself
         // validated by `ingest_note_object` below (its own `422` on a
         // missing `id`), so a missing `id` here is simply not checked —
-        // that downstream rejection covers it without duplicating it.
+        // that downstream rejection covers it without duplicating it. Host
+        // comparison is ASCII-case-insensitive: hostnames differing only in
+        // letter case are the same origin and must not be falsely rejected.
         if let Some(object_uri) = object.get("id").and_then(Value::as_str) {
             let document_host = host_from_url(object_uri);
             let attributed_to_host = host_from_url(attributed_to);
-            if document_host != attributed_to_host {
+            if !document_host.eq_ignore_ascii_case(attributed_to_host) {
                 return Err(malformed(format!(
                     "Note object 'id' host '{document_host}' does not match \
                      its 'attributedTo' host '{attributed_to_host}' \

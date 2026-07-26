@@ -314,6 +314,111 @@ async fn ingest_url_rejects_a_note_whose_id_host_differs_from_attributed_to_host
     );
 }
 
+/// Run-level review remediation regression test (Finding 1): the
+/// `id`-vs-`attributedTo` check alone is not sufficient for `ingest_url`,
+/// because both fields are supplied by whichever server answers the fetch.
+/// Here `evil.example` serves a document, fetched from a URL on
+/// `evil.example`, whose `id` and `attributedTo` are mutually
+/// self-consistent with each other (both `remote.example`) -- so the
+/// `id`-vs-`attributedTo` check alone would pass -- but `evil.example` never
+/// actually controls `remote.example`. `ingest_url` must additionally anchor
+/// the check to the host it actually dereferenced and reject this, without
+/// ever resolving `REMOTE_ALICE` to an actor or persisting the laundered
+/// content as a `Status`.
+#[tokio::test]
+async fn ingest_url_rejects_a_note_whose_id_and_attributed_to_agree_on_a_host_different_from_the_fetched_url()
+ {
+    let app = spawn_test_app().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let evil_fetch_url = "https://evil.example/anything";
+    let mock = Arc::new(MockFederationHttpClient::new());
+    mock.queue_fetch_response(ok_response(json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": NOTE_URI,
+        "type": "Note",
+        "attributedTo": REMOTE_ALICE,
+        "content": "evil.example launders this through remote.example/alice's identity",
+        "to": ["https://www.w3.org/ns/activitystreams#Public"],
+    })));
+    let service = service_for(&app, mock, Arc::clone(&remote_actors));
+
+    let error = service.ingest_url(evil_fetch_url).await.expect_err(
+        "a fetched Note whose self-consistent id/attributedTo host differs from the \
+         actually-fetched url's host must be rejected",
+    );
+    assert_eq!(error.kind, ErrorKind::Client);
+    assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let persisted = status_repository::find_by_uri(&app.pool, NOTE_URI)
+        .await
+        .expect("find_by_uri must succeed");
+    assert!(
+        persisted.is_none(),
+        "evil.example's laundered content must not be persisted as a Status"
+    );
+    assert!(
+        remote_actors.by_uri.lock().unwrap().is_empty(),
+        "attributedTo must not be resolved to an actor when the fetched-host check fails"
+    );
+}
+
+/// Remediation regression test (Finding 2, `host_from_url` comparisons must
+/// be ASCII-case-insensitive): a document whose `id` and `attributedTo`
+/// hosts differ only in letter case (`Remote.Example` vs `remote.example`)
+/// names the same origin and must be accepted, not falsely rejected as an
+/// origin/authority mismatch.
+#[tokio::test]
+async fn ingest_document_accepts_an_id_and_attributed_to_host_differing_only_in_case() {
+    let app = spawn_test_app().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let service = service_for(
+        &app,
+        Arc::new(MockFederationHttpClient::new()),
+        remote_actors,
+    );
+
+    let mixed_case_uri = "https://Remote.Example/notes/1";
+    let document = json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": mixed_case_uri,
+        "type": "Note",
+        "attributedTo": "https://remote.example/actors/alice",
+        "content": "same origin, different letter case",
+        "to": ["https://www.w3.org/ns/activitystreams#Public"],
+    });
+
+    service.ingest_document(&document).await.expect(
+        "an id/attributedTo host differing only in letter case must not be rejected \
+         as an origin/authority mismatch",
+    );
+}
+
+/// The case-insensitivity fix (Finding 2) also applies to `ingest_url`'s
+/// additional fetched-url-vs-id check: fetching from a mixed-case host must
+/// not be falsely rejected when the document's own `id` names the same host
+/// in a different case.
+#[tokio::test]
+async fn ingest_url_accepts_a_fetched_url_and_id_host_differing_only_in_case() {
+    let app = spawn_test_app().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let fetch_url = "https://Remote.Example/notes/1";
+    let mock = Arc::new(MockFederationHttpClient::new());
+    mock.queue_fetch_response(ok_response(json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": NOTE_URI,
+        "type": "Note",
+        "attributedTo": REMOTE_ALICE,
+        "content": "same origin, different letter case",
+        "to": ["https://www.w3.org/ns/activitystreams#Public"],
+    })));
+    let service = service_for(&app, mock, remote_actors);
+
+    service.ingest_url(fetch_url).await.expect(
+        "a fetched url and document id differing only in letter case must not be \
+         rejected as an origin/authority mismatch",
+    );
+}
+
 /// Requirement 14.2: `ingest_url` fetches the document over the network
 /// (via `FederationHttpClient::fetch`) and ingests it identically to
 /// `ingest_document`.
