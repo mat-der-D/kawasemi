@@ -34,6 +34,8 @@ Every `Agent` tool call you make while executing this procedure — implementer,
 
 If dispatching several independent subagents concurrently (e.g. `kiro-validate-impl`'s parallel validation dimensions), issue all of their `Agent` calls together in a single response (multiple tool-use blocks in one turn), each with `run_in_background: false`. They still execute concurrently; the difference is that you directly receive every one of their results before continuing, instead of depending on background completion notifications that (per above) may not reach you reliably at deeper nesting.
 
+**If an `Agent` dispatch fails outright on an infrastructure/API error** (e.g. a session/rate-limit message) instead of returning a normal status/verdict, that is not a task outcome — do not classify it as `BLOCKED`/`REJECTED`/`EXTERNAL_BLOCKER` or stash-and-defer the task to a future run on that basis alone. See `session-limit-recovery.md` in this skill's directory before deciding how to respond; the short version is: simply retry the same dispatch.
+
 ## Step 1: Preflight & branch setup
 
 - `git status --porcelain` in the current worktree. If dirty with changes you didn't just make, STOP and report — never discard pre-existing work.
