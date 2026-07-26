@@ -141,8 +141,20 @@
 //!   itself (which does not exist yet in this codebase) — see
 //!   [`ingest_service`]'s own doc comment for the full contract.
 
+//! - Task 7.1 (`Boundary: StatusEndpoints`, `_Depends: 5.1, 5.2, 5.3_`):
+//!   [`endpoints`] (the 19 HTTP handlers design.md's API Contract table
+//!   names for statuses/reblog/favourite/bookmark/pin/context/history/
+//!   source and polls, plus [`endpoints::StatusesEndpointsState`], the
+//!   still-generic router-local state bundle these handlers close over —
+//!   see [`endpoints`]'s own doc comment for why it stays generic, unlike
+//!   `AccountsEndpointsState`/`MediaEndpointsState`, and for the
+//!   `Status -> StatusRenderInput` assembly glue this task had to write from
+//!   scratch). Not mounted on `crate::server`/`crate::state::AppState` yet —
+//!   task 7.2's boundary.
+
 pub mod activity_builder;
 pub mod addressing;
+pub mod endpoints;
 pub mod idempotency;
 pub mod inbound_handlers;
 pub mod ingest_service;
