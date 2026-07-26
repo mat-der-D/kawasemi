@@ -11,7 +11,9 @@
 //!
 //! Scope: this module owns exactly [`insert_poll`], [`record_vote`], and
 //! [`tally`] — design.md's `PollRepository` Service Interface (design.md
-//! lines 443-445). No `StatusRepository`/`InteractionRepository`/
+//! lines 443-445) — plus [`find_poll_by_id`], a thin additive read function
+//! task 5.3 (`PollService`) added on top (see that function's own doc
+//! comment for why). No `StatusRepository`/`InteractionRepository`/
 //! `TagRepository` functionality, no `IdempotencyStore` (sibling module, not
 //! this file), no `PollService`/`StatusActivityBuilder`/`PollSerializer`
 //! orchestration, and no HTTP surface lives here.
@@ -165,6 +167,38 @@ pub async fn insert_poll(
 
     tx.commit().await.map_err(map_server_error)?;
     Ok(())
+}
+
+/// Fetches poll `poll_id`'s own row (`status_id`/`expires_at`/`multiple`),
+/// independent of any option/tally data (Requirement 13.2's "締切前の可視な
+/// 投票に対し" — a caller needs the poll's owning `status_id` *before* it can
+/// even ask whether that status is visible, which [`tally`] alone cannot
+/// supply since it assumes the poll is already known to exist/be visible).
+/// Added by task 5.3 (`PollService`, this repository's first caller that
+/// needs a poll's owning status resolved *before* running any visibility
+/// check) — an additive, read-only function alongside this module's
+/// existing three; mirrors task 5.1's identical precedent of adding thin
+/// `pub` read wrappers (`status_repository::find_by_id`,
+/// `ancestors_unfiltered`, `descendants_unfiltered`) to an earlier task's
+/// repository module without altering any existing function's signature or
+/// behavior. Returns `Ok(None)` (not an error) when `poll_id` matches no
+/// row, mirroring `status_repository::find_by_id`'s identical
+/// existence-vs-error convention — the caller, not this function, decides
+/// whether a missing poll is a `404`.
+pub async fn find_poll_by_id(pool: &PgPool, poll_id: Id) -> Result<Option<Poll>, AppError> {
+    let row: Option<(i64, Option<OffsetDateTime>, bool)> =
+        sqlx::query_as("SELECT status_id, expires_at, multiple FROM polls WHERE id = $1")
+            .bind(poll_id.as_i64())
+            .fetch_optional(pool)
+            .await
+            .map_err(map_server_error)?;
+
+    Ok(row.map(|(status_id, expires_at, multiple)| Poll {
+        id: poll_id,
+        status_id: Id::from_i64(status_id),
+        expires_at,
+        multiple,
+    }))
 }
 
 /// The (currently single-variant) success report for [`record_vote`] — see

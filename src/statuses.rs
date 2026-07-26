@@ -85,8 +85,24 @@
 //!   handling, remote-mention resolution, and the edit/history fields the
 //!   schema cannot fully retain).
 //!
-//!   No `InteractionService` (task 5.2) or `PollService` (task 5.3), no
-//!   inbound handlers, and no HTTP surface exist yet — this module is not
+//! - Task 5.2 (`Boundary: InteractionService`): [`interaction_service`]
+//!   ([`interaction_service::InteractionService`]: reblog/favourite/
+//!   bookmark/pin orchestration — visibility gate, duplicate prevention,
+//!   counter update, and Announce/Like/Undo dispatch for reblog/favourite,
+//!   local-only state for bookmark/pin — see [`interaction_service`]'s own
+//!   doc comment for its documented boundary decisions).
+//!
+//! - Task 5.3 (`Boundary: PollService`): [`poll_service`]
+//!   ([`poll_service::PollService`]: poll get/vote orchestration — a poll's
+//!   owning status visibility gate, delegating deadline/range/single-vs-
+//!   multiple/duplicate validation to `poll_repository::record_vote`,
+//!   tally reflection, and vote-Activity dispatch via
+//!   `StatusActivityBuilder::deliver_vote` (Requirements 13.2-13.6) — see
+//!   [`poll_service`]'s own doc comment for why poll *creation*
+//!   (Requirement 13.1) stays out of this task's scope and
+//!   `status_service.rs` is left untouched).
+//!
+//!   No inbound handlers and no HTTP surface exist yet — this module is not
 //!   wired into `crate::state::AppState`/`crate::bootstrap`/`crate::server`
 //!   yet. See design.md's "File Structure Plan" for the full planned module
 //!   set.
@@ -98,6 +114,7 @@ pub mod interaction_repository;
 pub mod interaction_service;
 pub mod model;
 pub mod poll_repository;
+pub mod poll_service;
 pub mod serializer;
 pub mod status_repository;
 pub mod status_service;
