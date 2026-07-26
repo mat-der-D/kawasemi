@@ -292,10 +292,22 @@ struct Mention {
 
 /// The result of scanning a post's `content` for mentions/hashtags/emoji
 /// shortcodes (Requirement 3.6). See [`extract_content_tokens`].
+///
+/// `hashtags` is `pub(crate)` (widened by task 6.1, `InboundHandlers`):
+/// inbound `Create(Note)` ingestion reuses this exact same extraction
+/// function for hashtag persistence (Requirement 14.5's "共通コードパス" —
+/// the same extraction logic local-origin `create_status` already uses,
+/// rather than a second, duplicated hashtag scanner) — see
+/// `inbound_handlers.rs`'s own doc comment. `mentions`/`emoji_shortcodes`
+/// stay private: `InboundHandlers` does not consume them (see that module's
+/// own doc comment for why standalone-mention/emoji reflection is a
+/// documented structural gap, the same class this module's own "Mention
+/// resolution: local only"/"Emoji shortcode extraction" sections already
+/// flag).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct ExtractedTokens {
+pub(crate) struct ExtractedTokens {
     mentions: Vec<Mention>,
-    hashtags: Vec<String>,
+    pub(crate) hashtags: Vec<String>,
     emoji_shortcodes: Vec<String>,
 }
 
@@ -316,7 +328,7 @@ fn is_token_boundary(chars: &[char], i: usize) -> bool {
 /// suppression, ASCII alphanumeric-or-underscore token bodies only. See
 /// this module's doc comment ("Mention resolution: local only", "Emoji
 /// shortcode extraction") for what consumes each extracted kind.
-fn extract_content_tokens(content: &str) -> ExtractedTokens {
+pub(crate) fn extract_content_tokens(content: &str) -> ExtractedTokens {
     let chars: Vec<char> = content.chars().collect();
     let mut result = ExtractedTokens::default();
     let mut seen_mentions: HashSet<String> = HashSet::new();

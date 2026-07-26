@@ -440,6 +440,31 @@ pub async fn find_by_id(pool: &PgPool, id: Id) -> Result<Option<Status>, AppErro
     fetch_raw(pool, id).await
 }
 
+/// Looks up the [`Status`] persisted under ActivityPub object `uri`, with
+/// **no** visibility filtering at all (a thin `pub` wrapper, mirroring
+/// [`find_by_id`]'s identical "additive read-only helper" precedent).
+///
+/// Added by task 6.1 (`InboundHandlers`): inbound `Announce`/`Like`/`Delete`/
+/// `Update`/`Undo` Activities, and a `Create(Note)`'s `inReplyTo`, all
+/// reference their target by ActivityPub `uri` string, not by this crate's
+/// internal [`Id`] — `statuses.uri`'s own `UNIQUE` constraint
+/// (`migrations/0007_statuses.sql`) makes this lookup unambiguous. `Ok(None)`
+/// (not an error) when no row matches `uri` — the caller (an inbound
+/// handler) decides whether an unknown target is a safe no-op or a rejection.
+pub async fn find_by_uri(pool: &PgPool, uri: &str) -> Result<Option<Status>, AppError> {
+    let row: Option<StatusRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        status_columns!(),
+        " FROM statuses WHERE uri = $1"
+    ))
+    .bind(uri)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    Ok(row.map(row_to_status))
+}
+
 /// Returns the ancestor chain of `id` (the posts it replies to, transitively),
 /// oldest (root) first, with **no** visibility filtering — the traversal
 /// half of [`ancestors`], factored out so a caller needing the real

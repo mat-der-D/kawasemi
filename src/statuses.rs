@@ -102,14 +102,36 @@
 //!   (Requirement 13.1) stays out of this task's scope and
 //!   `status_service.rs` is left untouched).
 //!
-//!   No inbound handlers and no HTTP surface exist yet — this module is not
-//!   wired into `crate::state::AppState`/`crate::bootstrap`/`crate::server`
-//!   yet. See design.md's "File Structure Plan" for the full planned module
-//!   set.
+//! - Task 6.1 (`Boundary: InboundHandlers`): [`inbound_handlers`]
+//!   ([`inbound_handlers::CreateNoteHandler`]/[`inbound_handlers::AnnounceHandler`]/
+//!   [`inbound_handlers::LikeHandler`]/[`inbound_handlers::DeleteHandler`]/
+//!   [`inbound_handlers::UpdateHandler`]/[`inbound_handlers::UndoHandler`] —
+//!   federation-core's `InboundActivityHandler` implemented for the six
+//!   post-related inbound Activity kinds, each calling the exact same
+//!   repository functions the corresponding local-origin service already
+//!   calls (Requirement 14.5) — plus
+//!   [`inbound_handlers::register_status_handlers`], which registers all six
+//!   against an `InboundActivityDispatcher`. Adds two small additive
+//!   widenings this task's own boundary permits: `status_repository::find_by_uri`
+//!   (a thin `pub` uri-keyed lookup, mirroring `find_by_id`'s existing
+//!   precedent) and `status_service::extract_content_tokens`/`ExtractedTokens::hashtags`
+//!   widened to `pub(crate)` (so inbound `Create(Note)` hashtag persistence
+//!   reuses the exact same extraction function local-origin `create_status`
+//!   already uses) — see [`inbound_handlers`]'s own doc comment for the full
+//!   rationale, including its documented cross-spec dependency on
+//!   accounts-and-instance's already-implemented `RemoteAccountFetcher` for
+//!   resolving a remote actor's `actor_uri` to a stable `Id`.
+//!
+//!   Still no HTTP surface, and `register_status_handlers` is not yet wired
+//!   into `crate::state::AppState`/`crate::bootstrap`/`crate::server` (task
+//!   7.2's boundary) — this module remains a standalone, independently
+//!   unit-testable set of handlers with no live caller yet. See design.md's
+//!   "File Structure Plan" for the full planned module set.
 
 pub mod activity_builder;
 pub mod addressing;
 pub mod idempotency;
+pub mod inbound_handlers;
 pub mod interaction_repository;
 pub mod interaction_service;
 pub mod model;
