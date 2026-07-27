@@ -93,7 +93,7 @@ use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::actor::{self, ActorModule};
 use crate::config::{
     ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, MediaConfig,
-    OauthConfig, OwnerConfig, Secret, ServerConfig,
+    OauthConfig, OwnerConfig, Secret, ServerConfig, StatusesConfig,
 };
 use crate::db;
 use crate::federation::signatures::ReqwestFederationHttpClient;
@@ -104,6 +104,7 @@ use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::server;
 use crate::state::AppState;
+use crate::statuses;
 use crate::test_harness::{TestApp, TestAppParts};
 
 /// Same shared-test-database override convention as
@@ -332,6 +333,15 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
             max_retry_attempts: 5,
             lease_duration: Duration::from_secs(5 * 60),
         },
+        // statuses-core task 7.2: fixed, non-production values mirroring
+        // `load_config_from`'s own defaults, the same convention every other
+        // startup-config group above already follows in this harness.
+        statuses: StatusesConfig {
+            max_content_chars: 500,
+            poll_max_options: 4,
+            poll_min_expiration: Duration::from_secs(5 * 60),
+            idempotency_key_retention_days: 7,
+        },
     };
 
     let oauth_module = OauthModule::new(
@@ -365,6 +375,15 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
             pruning_interval: PAIR_PRUNING_INTERVAL,
         },
         Arc::clone(&http_client),
+        |_dispatcher| {
+            // No downstream `InboundActivityHandler` registration needed —
+            // this harness exercises federation-core's own send/receive
+            // pipeline in isolation (statuses-core's task 7.2 added this
+            // parameter; see `build_federation_module`'s own doc comment).
+            // A later statuses-core task (8.3, `_Depends: 7.2_`) is expected
+            // to extend this closure once it needs a genuine 2-instance
+            // statuses round trip.
+        },
     );
     federation_background.spawn();
 
@@ -398,6 +417,19 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         config.media.clone(),
     );
 
+    // Mirrors the accounts-module construction immediately above: builds the
+    // statuses-core module bundle (task 7.2) the same way
+    // `crate::test_harness::spawn_test_app` does
+    // (`crate::statuses::build_statuses_module`), sharing this paired
+    // instance's own `pool`/`runtime`/`config.server.domain`/
+    // `federation_module`'s own `Arc<ConcreteDeliveryService>` handle.
+    let statuses_module = statuses::build_statuses_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(federation_module.delivery_service()),
+    );
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
@@ -407,6 +439,7 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         federation_module,
         media_module,
         accounts_module,
+        statuses_module,
     );
     let router = server::build_router(state.clone());
 

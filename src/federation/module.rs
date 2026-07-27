@@ -100,18 +100,29 @@
 //!   The resolution actually adopted: dispatcher registration happens
 //!   **only** at composition-root wiring time, before `InboxService::new`
 //!   ever runs — see the explicit `// DOWNSTREAM DISPATCHER REGISTRATION
-//!   POINT` comment inside [`build_federation_module`]'s body. A future
-//!   federation-dependent spec's own bootstrap-wiring task (statuses-core,
-//!   social-graph, etc. — each will have its own `_Boundary: ..., Bootstrap,
-//!   ...` task per this spec's established convention, exactly as this
-//!   task's own boundary includes `Bootstrap`) is expected to extend *this*
-//!   function directly, inserting its own `dispatcher.register(Arc::new(..))`
-//!   calls at that marked point, mirroring how `src/bootstrap.rs`'s
-//!   `build_actor_wiring`/`OauthModule::new` composition steps are
-//!   themselves already extended by each spec that needs to. This is a
-//!   real, narrower guarantee than "downstream can register at any time
-//!   after startup" — it is "downstream can register by extending the
-//!   composition root, before this instance starts serving" — and is
+//!   POINT` comment inside [`build_federation_module`]'s body. As of
+//!   statuses-core's task 7.2 (`_Boundary: StatusesModule, server,
+//!   bootstrap, config_`, the first federation-dependent spec's own
+//!   bootstrap-wiring task to reach this point), that registration is
+//!   performed via [`build_federation_module`]'s own `register_downstream:
+//!   impl FnOnce(&mut InboundActivityDispatcher)` parameter — a caller
+//!   (`src/bootstrap.rs`, `src/test_harness.rs`) builds a closure that calls
+//!   its own `register_*_handlers`-shaped function and passes it in, rather
+//!   than this file importing a statuses-core-specific type directly (this
+//!   file still "does not implement any of the ports it wires", per this
+//!   module's own scope note above — it only calls a caller-supplied
+//!   closure). A future federation-dependent spec (social-graph, etc. — each
+//!   will have its own `_Boundary: ..., Bootstrap, ...` task per this spec's
+//!   established convention) that also needs to register handlers composes
+//!   its own registration into the *same* closure `src/bootstrap.rs`/
+//!   `src/test_harness.rs` already build (e.g. by calling both specs'
+//!   `register_*_handlers` functions in sequence inside one closure body),
+//!   mirroring how `src/bootstrap.rs`'s `build_actor_wiring`/`OauthModule::new`
+//!   composition steps are themselves already extended by each spec that
+//!   needs to. This is a real, narrower guarantee than "downstream can
+//!   register at any time after startup" — it is "downstream can register by
+//!   extending the composition root, before this instance starts serving" —
+//!   and is
 //!   flagged as a CONCERN in this task's own status report, not silently
 //!   presented as equivalent to the other two ports' live-mutability.
 
@@ -400,12 +411,27 @@ impl FederationModule {
 /// its two paired, plain-HTTP-served instances can actually reach each
 /// other's `https://{domain}/...` URLs (see `insecure_loopback`'s own doc
 /// comment).
+/// `register_downstream` (statuses-core's task 7.2, `Boundary: StatusesModule,
+/// server, bootstrap, config`, plus this file's own explicitly-justified
+/// exception at exactly the marked registration point below — see that
+/// task's own status report): the hook a caller (`src/bootstrap.rs`'s
+/// production path, `src/test_harness.rs`'s `spawn_test_app`) uses to
+/// register its own `InboundActivityHandler` implementation(s) against the
+/// freshly-constructed, not-yet-consumed `InboundActivityDispatcher`, right
+/// before it is moved into `InboxService::new` — the one and only point in
+/// this instance's lifetime such registration is possible at all (see this
+/// module's doc comment, "Downstream registration surface" -> "`InboundActivityDispatcher`").
+/// A caller with nothing to register passes a no-op closure (`|_| {}`),
+/// exactly matching every pre-existing call site's own unchanged behavior —
+/// this parameter is additive, not a behavior change for callers that do not
+/// need it.
 pub fn build_federation_module(
     pool: PgPool,
     runtime: RuntimeContext,
     directory: Arc<ActorDirectory>,
     cfg: FederationWiringConfig,
     http_client: Arc<ReqwestFederationHttpClient>,
+    register_downstream: impl FnOnce(&mut InboundActivityDispatcher),
 ) -> (FederationModule, FederationBackgroundTasks) {
     let urls = ActorUrls::new(cfg.domain.clone());
 
@@ -457,17 +483,23 @@ pub fn build_federation_module(
         cfg.received_activity_retention,
     );
 
-    // DOWNSTREAM DISPATCHER REGISTRATION POINT: a future federation-
-    // dependent spec's own bootstrap-wiring task registers its
-    // `InboundActivityHandler` implementation(s) here, on this exact
-    // `dispatcher` value, before it is moved into `InboxService::new`
-    // below. See this module's doc comment ("Downstream registration
-    // surface") for why this must happen here (composition-root wiring
-    // time) rather than through a live post-construction API — unlike
-    // `object_documents`/`outbox_sources` below, `InboundActivityDispatcher`
-    // cannot be made live-mutable without editing `inbound/dispatcher.rs`/
-    // `inbound/service.rs`, both outside this task's boundary.
-    let dispatcher = InboundActivityDispatcher::new();
+    // DOWNSTREAM DISPATCHER REGISTRATION POINT: a downstream spec's own
+    // bootstrap-wiring task registers its `InboundActivityHandler`
+    // implementation(s) here, on this exact `dispatcher` value, before it is
+    // moved into `InboxService::new` below. See this module's doc comment
+    // ("Downstream registration surface") for why this must happen here
+    // (composition-root wiring time) rather than through a live
+    // post-construction API — unlike `object_documents`/`outbox_sources`
+    // below, `InboundActivityDispatcher` cannot be made live-mutable without
+    // editing `inbound/dispatcher.rs`/`inbound/service.rs`, both outside this
+    // task's boundary. As of statuses-core's task 7.2, this registration is
+    // performed by the caller-supplied `register_downstream` closure (this
+    // function's own parameter) rather than a hardcoded call to any one
+    // spec's `register_*_handlers` — this file stays free of any
+    // statuses-core-specific import, matching this module's own "does not
+    // implement any of the ports it wires" scope.
+    let mut dispatcher = InboundActivityDispatcher::new();
+    register_downstream(&mut dispatcher);
 
     let inbox = Arc::new(InboxService::new(
         inbox_verifier,

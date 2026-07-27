@@ -290,11 +290,11 @@ fn build_state(
             urls.clone(),
             Arc::clone(&ids),
             actor_lookup.clone(),
-            DeliveryService::new(
+            Arc::new(DeliveryService::new(
                 RecipientTargetResolver::new(MockLocalActorLookup::with_handles(&handles)),
                 Arc::clone(&local_sink),
                 Arc::clone(&http_sink),
-            ),
+            )),
         ),
         relationship.clone(),
         actor_lookup.clone(),
@@ -308,11 +308,11 @@ fn build_state(
             urls.clone(),
             Arc::clone(&ids),
             actor_lookup.clone(),
-            DeliveryService::new(
+            Arc::new(DeliveryService::new(
                 RecipientTargetResolver::new(MockLocalActorLookup::with_handles(&handles)),
                 Arc::clone(&local_sink),
                 Arc::clone(&http_sink),
-            ),
+            )),
         ),
         actor_lookup.clone(),
         relationship.clone(),
@@ -326,11 +326,11 @@ fn build_state(
             urls,
             ids,
             actor_lookup.clone(),
-            DeliveryService::new(
+            Arc::new(DeliveryService::new(
                 RecipientTargetResolver::new(MockLocalActorLookup::with_handles(&handles)),
                 Arc::clone(&local_sink),
                 Arc::clone(&http_sink),
-            ),
+            )),
         ),
         actor_lookup,
         relationship,

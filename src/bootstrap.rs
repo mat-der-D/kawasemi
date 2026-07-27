@@ -87,7 +87,9 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use crate::accounts;
+use crate::accounts::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::actor;
+use crate::actor::ActorDirectory;
 use crate::actor::ActorModule;
 use crate::actor::keys::cache::KeyCache;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
@@ -103,6 +105,7 @@ use crate::oauth::OauthModule;
 use crate::runtime::{RuntimeContext, SnowflakeIdGenerator, SystemClock, SystemRng};
 use crate::server::{self, ServeError};
 use crate::state::AppState;
+use crate::statuses::{self, ProdRemoteActorResolver};
 use crate::telemetry::{self, TelemetryError};
 
 #[cfg(test)]
@@ -374,6 +377,28 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         false,
     );
 
+    // Assembles statuses-core's own `RemoteActorResolver` (task 7.2,
+    // `_Boundary: StatusesModule, server, bootstrap, config_`) *before*
+    // `federation::build_federation_module` runs: `register_status_handlers`
+    // must be called from inside that function's own registration point,
+    // before its `InboxService::new` call — see that function's own doc
+    // comment. `RemoteAccountFetcher` needs only `pool`/`runtime` (already
+    // available here) plus its own, separately-constructed
+    // `ReqwestFederationHttpClient` (mirroring `accounts_module`'s own
+    // instance further below, never the same `Arc` `federation_module`'s own
+    // client uses).
+    let statuses_remote_actor_fetcher = Arc::new(RemoteAccountFetcher::new(
+        pool.clone(),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    ));
+    let statuses_remote_actor_resolver = Arc::new(ProdRemoteActorResolver::new(
+        cfg.server.domain.clone(),
+        Arc::new(ActorDirectory::new(pool.clone())),
+        statuses_remote_actor_fetcher,
+    ));
+
     // Assembles the federation-core port bundle (task 5.4, Requirements 7.3,
     // 10.1, 11.1, 11.2): every federation-core port constructed with one
     // concrete production type (`crate::federation::build_federation_module`),
@@ -385,7 +410,11 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     // `time::Duration` federation-core's own components take throughout, and
     // supplies this module's own choice of background-task poll/prune
     // cadence (design.md names no numeric value for either — see
-    // `FederationWiringConfig::production`'s own doc comment).
+    // `FederationWiringConfig::production`'s own doc comment). The final
+    // argument (task 7.2's own addition) registers statuses-core's six
+    // post-related inbound handlers against the live dispatcher (Requirement
+    // 14.1) — see `statuses::register_downstream_handlers`'s own doc
+    // comment.
     let (federation_module, federation_background) = federation::build_federation_module(
         pool.clone(),
         runtime.clone(),
@@ -397,6 +426,11 @@ async fn build_state() -> Result<AppState, BootstrapError> {
             time::Duration::days(cfg.federation.received_activity_retention_days as i64),
         ),
         Arc::new(ReqwestFederationHttpClient::new()),
+        statuses::register_downstream_handlers(
+            pool.clone(),
+            runtime.clone(),
+            statuses_remote_actor_resolver,
+        ),
     );
     // Starts the delivery-worker poll loop and received-Activity pruning
     // loop as detached background tasks (never awaited here) — this call
@@ -449,6 +483,22 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         cfg.media.clone(),
     );
 
+    // Assembles the statuses-core module bundle (task 7.2, Requirements 4.3,
+    // 14.1): builds `StatusService`/`InteractionService`/`PollService`
+    // (`crate::statuses::build_statuses_module`) sharing this same
+    // `pool`/`runtime`/`cfg.server.domain` every other composition-root
+    // component above already shares, and `federation_module`'s own
+    // `Arc<ConcreteDeliveryService>` handle (`StatusActivityBuilder`'s only
+    // delivery path — see `activity_builder.rs`'s own doc comment on why
+    // this field is now an `Arc`). No background task to spawn here —
+    // mirrors `accounts_module`'s own "no resident worker" precedent.
+    let statuses_module = statuses::build_statuses_module(
+        pool.clone(),
+        runtime.clone(),
+        cfg.server.domain.clone(),
+        Arc::clone(federation_module.delivery_service()),
+    );
+
     Ok(AppState::new(
         pool,
         runtime,
@@ -458,6 +508,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         federation_module,
         media_module,
         accounts_module,
+        statuses_module,
     ))
 }
 

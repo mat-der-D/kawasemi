@@ -151,6 +151,32 @@
 //!   `Status -> StatusRenderInput` assembly glue this task had to write from
 //!   scratch). Not mounted on `crate::server`/`crate::state::AppState` yet —
 //!   task 7.2's boundary.
+//!
+//! - Task 7.2 (`Boundary: StatusesModule, server, bootstrap, config`,
+//!   `_Depends: 6.1, 7.1_`): this module's own [`StatusesModule`] (built by
+//!   [`build_statuses_module`]) picks this crate's one concrete production
+//!   type per generic port (`crate::actor::ActorDirectory` for
+//!   `ActorHandleLookup`/`LocalActorLookup`/`MentionLookup`,
+//!   `crate::statuses::visibility::NoRelationshipQuery` for
+//!   `RelationshipQuery` — social-graph has not landed — and federation-core's
+//!   concrete `DeliveryService` instantiation for `StatusActivityBuilder`'s
+//!   delivery port), constructs one [`activity_builder::StatusActivityBuilder`]
+//!   per service (each sharing the same `Arc<ConcreteDeliveryService>` —
+//!   see this file's own doc comment on [`ConcreteDeliveryService`] for why
+//!   `activity_builder.rs`'s `delivery` field was widened to `Arc` for
+//!   this), and bundles the three resulting services. [`ProdRemoteActorResolver`]
+//!   supplies `inbound_handlers::RemoteActorResolver`'s first real
+//!   production implementation (see its own doc comment for the local-actor
+//!   shortcut and `tokio::spawn`-based `Send` adapter this requires).
+//!   `src/bootstrap.rs`/`src/test_harness.rs` call [`build_statuses_module`]
+//!   after federation-core's own module is built (needing its
+//!   `delivery_service()`), pass a registration closure that calls
+//!   [`inbound_handlers::register_status_handlers`] into
+//!   `crate::federation::build_federation_module`'s own new
+//!   `register_downstream` parameter, and store the result on
+//!   `crate::state::AppState`; `src/server.rs` mounts every route
+//!   `endpoints.rs` (task 7.1) defined, monomorphized over this module's
+//!   concrete type aliases.
 
 pub mod activity_builder;
 pub mod addressing;
@@ -169,4 +195,361 @@ pub mod status_service;
 pub mod tag_repository;
 pub mod visibility;
 
+use std::future::Future;
+use std::sync::Arc;
+
+use axum::http::StatusCode;
+use sqlx::PgPool;
+
+use crate::accounts::RemoteAccountFetcher;
+use crate::actor::{ActorDirectory, Handle};
+use crate::domain::Id;
+use crate::error::AppError;
+use crate::federation::signatures::ReqwestFederationHttpClient;
+use crate::federation::urls::ActorUrls;
+use crate::federation::{
+    ConcreteBlockPolicy, ConcreteDeliveryService, ConcreteReceivedActivityStore, ConcreteVerifier,
+    DbDeliveryQueue, HttpDeliverySink, InboundActivityDispatcher, LocalDeliverySink,
+};
+use crate::runtime::RuntimeContext;
+use crate::statuses::activity_builder::StatusActivityBuilder;
+use crate::statuses::endpoints::StatusesEndpointsState;
+use crate::statuses::inbound_handlers::{RemoteActorResolver, StatusInboundDeps};
+use crate::statuses::interaction_service::InteractionService;
+use crate::statuses::poll_service::PollService;
+use crate::statuses::status_service::StatusService;
+use crate::statuses::visibility::NoRelationshipQuery;
+
 pub use model::{IdempotencyRecord, Poll, PollOption, PollVote, Status, StatusEdit, Tag};
+
+/// This crate's one concrete `DeliverySink` (in-process) instantiation for
+/// `StatusActivityBuilder`'s `L` parameter — matches
+/// `crate::federation::ConcreteDeliveryService`'s own `L` argument exactly
+/// (see that type's own doc comment, `src/federation/module.rs`), so the
+/// `Arc<ConcreteDeliveryService>` `FederationModule::delivery_service`
+/// exposes can be passed to [`build_statuses_module`] unmodified.
+pub type ConcreteLocalSink =
+    LocalDeliverySink<ConcreteVerifier, ConcreteBlockPolicy, ConcreteReceivedActivityStore>;
+
+/// This crate's one concrete `DeliverySink` (HTTP/queue-backed) instantiation
+/// for `StatusActivityBuilder`'s `H` parameter — matches
+/// `crate::federation::ConcreteDeliveryService`'s own `H` argument exactly.
+pub type ConcreteHttpSink = HttpDeliverySink<DbDeliveryQueue, ActorDirectory>;
+
+/// The one concrete `StatusActivityBuilder` instantiation this instance
+/// mounts every service with: `ActorDirectory` for both `ActorHandleLookup`
+/// (`A`) and (matching `ConcreteDeliveryService`'s own `D`) `LocalActorLookup`,
+/// [`ConcreteLocalSink`]/[`ConcreteHttpSink`] for `L`/`H`.
+pub type ConcreteStatusActivityBuilder =
+    StatusActivityBuilder<ActorDirectory, ActorDirectory, ConcreteLocalSink, ConcreteHttpSink>;
+
+/// The one concrete `StatusService` instantiation this instance mounts (see
+/// this file's doc comment, task 7.2): `ActorDirectory` for `A`/`D`/`M`
+/// (`ActorHandleLookup`/`LocalActorLookup`/`MentionLookup` are all
+/// implemented on `ActorDirectory` — see `activity_builder.rs`/
+/// `status_service.rs`'s own `impl` blocks), [`ConcreteLocalSink`]/
+/// [`ConcreteHttpSink`] for `L`/`H`, and
+/// [`visibility::NoRelationshipQuery`] for `R` (social-graph has not landed
+/// — task 3.1's own safe default).
+pub type ConcreteStatusService = StatusService<
+    ActorDirectory,
+    ActorDirectory,
+    ConcreteLocalSink,
+    ConcreteHttpSink,
+    NoRelationshipQuery,
+    ActorDirectory,
+>;
+
+/// The one concrete `InteractionService` instantiation this instance mounts
+/// — see [`ConcreteStatusService`]'s own doc comment for the identical
+/// per-parameter rationale (this service has no `M`/`MentionLookup`
+/// parameter of its own).
+pub type ConcreteInteractionService = InteractionService<
+    ActorDirectory,
+    ActorDirectory,
+    ConcreteLocalSink,
+    ConcreteHttpSink,
+    NoRelationshipQuery,
+>;
+
+/// The one concrete `PollService` instantiation this instance mounts — see
+/// [`ConcreteStatusService`]'s own doc comment for the identical
+/// per-parameter rationale.
+pub type ConcretePollService = PollService<
+    ActorDirectory,
+    ActorDirectory,
+    ConcreteLocalSink,
+    ConcreteHttpSink,
+    NoRelationshipQuery,
+>;
+
+/// The one concrete `StatusesEndpointsState` instantiation this instance
+/// mounts every statuses/polls/bookmarks route with (task 7.1's own
+/// `StatusesEndpointsState<A, D, L, H, R, M>`, still generic — this task
+/// picks the concrete type arguments `endpoints.rs`'s own doc comment says
+/// no earlier task had picked yet). `src/server.rs`'s `FromRef<AppState>`
+/// bridge derives this from `AppState` directly.
+pub type ConcreteStatusesEndpointsState = StatusesEndpointsState<
+    ActorDirectory,
+    ActorDirectory,
+    ConcreteLocalSink,
+    ConcreteHttpSink,
+    NoRelationshipQuery,
+    ActorDirectory,
+>;
+
+/// Adapts accounts-and-instance's already-implemented
+/// `RemoteAccountFetcher<ReqwestFederationHttpClient>` to this spec's own
+/// [`inbound_handlers::RemoteActorResolver`] port for real production use —
+/// `inbound_handlers.rs`'s own doc comment ("Resolving `actor_uri -> Id`")
+/// explicitly assigns supplying this implementation to this task
+/// (`_Boundary: StatusesModule, server, bootstrap, config_`).
+///
+/// Two responsibilities, in this order:
+///
+/// 1. **Local-actor shortcut** (this crate's "ローカル最適化パス" convention,
+///    steering's own phrase, applied here to actor-identity resolution the
+///    same way `DeliveryService` already applies it to physical delivery).
+///    Every inbound handler resolves the acting actor from
+///    `ctx.signer.actor_uri` (`inbound_handlers.rs`'s own doc comment,
+///    security rationale) — including for a purely local, in-process
+///    delivery loop-back, where `LocalDeliverySink` builds a *synthetic*
+///    `VerifiedSigner` from the **sending** local actor's own identity, never
+///    a real HTTP-signed claim (`src/federation/outbound/sink.rs`'s own doc
+///    comment: "`sender: &Handle`... builds a synthetic `VerifiedSigner`").
+///    Without this shortcut, *every* local-to-local interaction (a status
+///    mentioning another local actor, a local reblog/favourite of another
+///    local actor's post) would force a real outbound HTTP fetch of this
+///    instance's own actor document merely to re-derive an [`Id`] this
+///    instance already knows synchronously — at best wasteful, at worst
+///    outright broken in an environment where `ActorUrls` builds a
+///    `https://{domain}/...` URI this process cannot itself reach over real
+///    DNS/TLS (e.g. `crate::test_harness::spawn_test_app`'s fixed internal
+///    test domain). Since [`ActorUrls::actor_url`] always builds exactly
+///    `https://{domain}/users/{handle}`, this resolver recognizes that exact
+///    shape against its own configured `domain` and resolves it directly via
+///    [`ActorDirectory::resolve_actor_by_handle`] — no network call at all.
+/// 2. **Genuinely remote fallback**: any other `actor_uri` shape (or a
+///    same-shape URI that does not resolve to a currently-registered local
+///    actor) falls through to [`RemoteAccountFetcher::fetch_and_normalize`],
+///    wrapped in [`tokio::spawn`]. `RemoteAccountFetcher<H>::fetch_and_normalize`
+///    cannot, as written, satisfy [`RemoteActorResolver`]'s own `Send`-future
+///    requirement for a *generic* `H: FederationHttpClient` — `H::fetch`'s
+///    `async fn` carries no `Send` bound in the trait itself
+///    (`inbound_handlers.rs`'s own doc comment explains this in detail) — so
+///    this resolver spawns the fetch onto its own `tokio` task (a
+///    fully-concrete `RemoteAccountFetcher<ReqwestFederationHttpClient>`
+///    instantiation, not a further-generic one) and awaits the `JoinHandle`
+///    instead of `.await`-ing the fetcher's future directly in place.
+pub struct ProdRemoteActorResolver {
+    domain: String,
+    directory: Arc<ActorDirectory>,
+    fetcher: Arc<RemoteAccountFetcher<ReqwestFederationHttpClient>>,
+}
+
+impl ProdRemoteActorResolver {
+    /// Builds a resolver bound to `domain` (this instance's own configured
+    /// server domain, for the local-actor shortcut — must match
+    /// `crate::config::ServerConfig::domain`/`ActorUrls`'s own domain
+    /// exactly), `directory` (the local-actor lookup the shortcut resolves
+    /// through), and `fetcher` (the genuinely-remote fallback).
+    pub fn new(
+        domain: impl Into<String>,
+        directory: Arc<ActorDirectory>,
+        fetcher: Arc<RemoteAccountFetcher<ReqwestFederationHttpClient>>,
+    ) -> Self {
+        Self {
+            domain: domain.into(),
+            directory,
+            fetcher,
+        }
+    }
+
+    /// Extracts `{handle}` from `actor_uri` when it matches this instance's
+    /// own `https://{domain}/users/{handle}` shape ([`ActorUrls::actor_url`]'s
+    /// exact construction) — see this type's own doc comment ("Local-actor
+    /// shortcut"). Rejects a shape match whose extracted remainder itself
+    /// contains a `/` (e.g. `.../users/alice/inbox`) so this shortcut only
+    /// ever matches a bare actor URL, never one of its own sub-resources.
+    fn local_handle(&self, actor_uri: &str) -> Option<Handle> {
+        let prefix = format!("https://{}/users/", self.domain);
+        actor_uri
+            .strip_prefix(prefix.as_str())
+            .filter(|rest| !rest.is_empty() && !rest.contains('/'))
+            .and_then(|rest| Handle::new(rest).ok())
+    }
+}
+
+impl RemoteActorResolver for ProdRemoteActorResolver {
+    fn resolve_remote_actor(
+        &self,
+        actor_uri: &str,
+    ) -> impl Future<Output = Result<Id, AppError>> + Send {
+        let local_handle = self.local_handle(actor_uri);
+        let directory = Arc::clone(&self.directory);
+        let fetcher = Arc::clone(&self.fetcher);
+        let actor_uri = actor_uri.to_string();
+        async move {
+            if let Some(handle) = local_handle
+                && let Some(resolved) = directory.resolve_actor_by_handle(&handle).await?
+            {
+                return Ok(resolved.id);
+                // Otherwise: shaped like one of our own actor URLs, but no
+                // currently registered local actor matches — fall through to
+                // the genuinely-remote path below rather than failing
+                // outright here (a stale/foreign lookalike URI is not this
+                // shortcut's problem to diagnose).
+            }
+
+            let joined = tokio::spawn(async move { fetcher.fetch_and_normalize(&actor_uri).await });
+            match joined.await {
+                Ok(result) => result.map(|account| account.id),
+                Err(join_err) => Err(AppError::server(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    join_err,
+                )),
+            }
+        }
+    }
+}
+
+/// The statuses-core module bundle (design.md's exact `StatusesModule`
+/// component; task 7.2, Requirements 4.3, 14.1): the three business
+/// services [`build_statuses_module`] assembles, shared behind cheap-clone
+/// `Arc`s the same way every other `*Module` bundle in this crate is (see
+/// `crate::media::MediaModule`/`crate::accounts::AccountsModule`'s own
+/// identical "bundle, don't build; accessors return `Arc::clone`"
+/// precedent). `src/server.rs`'s `FromRef<AppState> for
+/// StatusesEndpointsState<...>` bridge derives every mounted statuses
+/// endpoint's own router-local state from these three handles.
+pub struct StatusesModule {
+    status_service: Arc<ConcreteStatusService>,
+    interaction_service: Arc<ConcreteInteractionService>,
+    poll_service: Arc<ConcretePollService>,
+}
+
+impl StatusesModule {
+    /// The shared `StatusService` handle.
+    pub fn status_service(&self) -> Arc<ConcreteStatusService> {
+        Arc::clone(&self.status_service)
+    }
+
+    /// The shared `InteractionService` handle.
+    pub fn interaction_service(&self) -> Arc<ConcreteInteractionService> {
+        Arc::clone(&self.interaction_service)
+    }
+
+    /// The shared `PollService` handle.
+    pub fn poll_service(&self) -> Arc<ConcretePollService> {
+        Arc::clone(&self.poll_service)
+    }
+}
+
+/// Assembles the statuses-core module bundle (task 7.2, Requirements 4.3,
+/// 14.1): builds one [`ActorDirectory`] per generic-port slot this module's
+/// services need (a thin, stateless `PgPool` wrapper — see
+/// `crate::actor::directory`'s own doc comment — so constructing several
+/// independent instances from the same `pool` is cheap and correct, not a
+/// second, divergent directory), one [`ConcreteStatusActivityBuilder`] per
+/// service (each cloning the same `delivery` `Arc` — see
+/// `activity_builder.rs`'s own doc comment on why that field is now an
+/// `Arc`), and the three services themselves, each defaulted to
+/// [`NoRelationshipQuery`] (social-graph has not landed).
+///
+/// `delivery` is `Arc<ConcreteDeliveryService>` — the exact type
+/// `crate::federation::FederationModule::delivery_service` returns a
+/// reference to — so callers (`src/bootstrap.rs`, `src/test_harness.rs`)
+/// pass `Arc::clone(federation_module.delivery_service())` directly, after
+/// `federation::build_federation_module` has already run.
+pub fn build_statuses_module(
+    pool: PgPool,
+    runtime: RuntimeContext,
+    domain: impl Into<String>,
+    delivery: Arc<ConcreteDeliveryService>,
+) -> StatusesModule {
+    let domain = domain.into();
+    let urls = ActorUrls::new(domain.clone());
+
+    let status_builder = ConcreteStatusActivityBuilder::new(
+        urls.clone(),
+        runtime.ids.clone(),
+        ActorDirectory::new(pool.clone()),
+        Arc::clone(&delivery),
+    );
+    let interaction_builder = ConcreteStatusActivityBuilder::new(
+        urls.clone(),
+        runtime.ids.clone(),
+        ActorDirectory::new(pool.clone()),
+        Arc::clone(&delivery),
+    );
+    let poll_builder = ConcreteStatusActivityBuilder::new(
+        urls.clone(),
+        runtime.ids.clone(),
+        ActorDirectory::new(pool.clone()),
+        delivery,
+    );
+
+    let status_service = Arc::new(StatusService::new(
+        pool.clone(),
+        runtime.clone(),
+        domain.clone(),
+        urls.clone(),
+        status_builder,
+        NoRelationshipQuery,
+        ActorDirectory::new(pool.clone()),
+    ));
+
+    let interaction_service = Arc::new(InteractionService::new(
+        pool.clone(),
+        runtime.clone(),
+        urls.clone(),
+        interaction_builder,
+        ActorDirectory::new(pool.clone()),
+        NoRelationshipQuery,
+    ));
+
+    let poll_service = Arc::new(PollService::new(
+        pool.clone(),
+        runtime,
+        urls,
+        poll_builder,
+        ActorDirectory::new(pool),
+        NoRelationshipQuery,
+    ));
+
+    StatusesModule {
+        status_service,
+        interaction_service,
+        poll_service,
+    }
+}
+
+/// Builds the registration closure `crate::federation::build_federation_module`'s
+/// own `register_downstream` parameter expects (task 7.2, Requirement 14.1):
+/// registers all six post-related inbound handlers
+/// ([`inbound_handlers::register_status_handlers`]) against the live
+/// dispatcher, using [`ProdRemoteActorResolver`] as the production
+/// `RemoteActorResolver`. Callers (`src/bootstrap.rs`, `src/test_harness.rs`)
+/// build this closure's captured `resolver` from a `RemoteAccountFetcher`
+/// constructed the same way `crate::accounts::build_accounts_module`'s own
+/// call site does (its own, separately-constructed `ReqwestFederationHttpClient`
+/// — never the same `Arc` `FederationModule`'s own client uses), *before*
+/// calling `build_federation_module` (registration must happen inside that
+/// function, before its own `InboxService::new` call — see
+/// `src/federation/module.rs`'s own doc comment).
+pub fn register_downstream_handlers(
+    pool: PgPool,
+    runtime: RuntimeContext,
+    resolver: Arc<ProdRemoteActorResolver>,
+) -> impl FnOnce(&mut InboundActivityDispatcher) {
+    move |dispatcher: &mut InboundActivityDispatcher| {
+        inbound_handlers::register_status_handlers(
+            dispatcher,
+            StatusInboundDeps {
+                pool,
+                runtime,
+                remote_actors: resolver,
+            },
+        );
+    }
+}

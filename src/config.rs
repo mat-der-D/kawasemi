@@ -103,6 +103,13 @@ pub struct AppConfig {
     /// one. See [`MediaConfig`]'s own doc comment for why no field here is
     /// wrapped in `Secret<T>`.
     pub media: MediaConfig,
+    /// statuses-core's operational startup settings (task 7.2, `_Boundary:
+    /// StatusesModule, server, bootstrap, config_`, design.md's Modified
+    /// Files: "投稿最大文字数・投票選択肢上限/最小締切・冪等キー保持方針等の
+    /// 運用関連設定項目を追加"). core-runtime only hosts this field; see
+    /// [`StatusesConfig`]'s own doc comment for why none of these three
+    /// values are yet consumed by `crate::statuses`'s own business logic.
+    pub statuses: StatusesConfig,
 }
 
 /// Server-facing startup settings.
@@ -344,6 +351,64 @@ pub struct MediaConfig {
     /// (処理ジョブのリース期間の既定は想定処理時間を十分に上回る値、例: 5
     /// 分).
     pub lease_duration: Duration,
+}
+
+/// statuses-core's operational startup settings (task 7.2, design.md's
+/// Modified Files entry for this file: "投稿最大文字数・投票選択肢上限/最小
+/// 締切・冪等キー保持方針等の運用関連設定項目を追加"). core-runtime only
+/// hosts these fields; it does not itself know how a max content length or a
+/// poll option bound is enforced.
+///
+/// ## CONCERN (documented judgment call): not yet consumed by any business
+/// logic
+/// Unlike [`MediaConfig`]/[`FederationConfig`] (whose fields every one feed a
+/// real, already-implemented consumer), no task in this spec's dependency
+/// chain (`status_service.rs`/`poll_repository.rs`/`idempotency.rs`, tasks
+/// 2.3/5.1/5.3, all already implemented and reviewed before this task) has
+/// ever enforced a maximum content length, a poll-option-count bound, a
+/// minimum poll deadline, or an idempotency-key retention/pruning policy —
+/// `grep -rn "max.*len\|MAX_.*LEN\|retention" src/statuses/` outside this
+/// struct finds no such existing constant to reuse, and no pruning job for
+/// `status_idempotency_keys` exists anywhere (unlike federation-core's
+/// `received_activities`, which does have one). Wiring these three values
+/// into actual enforcement would mean editing `status_service.rs::create_status`
+/// (content-length rejection), `poll_repository.rs::record_vote`/a new
+/// `PollService` validation path (option-count/min-deadline rejection), and
+/// adding a new idempotency-key pruning job — every one of those is business
+/// logic inside an already-reviewed task (5.1/2.3/5.3) squarely outside this
+/// task's own boundary (`_Boundary: StatusesModule, server, bootstrap,
+/// config_`, which does not include `StatusService`/`PollRepository`/
+/// `IdempotencyStore`), and this task's own Critical Constraints explicitly
+/// forbid reworking those tasks' decisions. This struct therefore exists
+/// (satisfying design.md's literal Modified Files entry for this file, and
+/// making these three operational knobs startup-validated and reachable via
+/// `AppState::config().statuses` today) without yet being consumed anywhere
+/// — a documented, boundary-driven placeholder for a later task to wire into
+/// real enforcement, not silently presented as already having runtime
+/// effect. See this task's own status report for the same CONCERN.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatusesConfig {
+    /// Maximum accepted post content length, in Unicode scalar values
+    /// (`str::chars().count()`, not bytes — consistent with this being a
+    /// user-facing character-count limit, not a storage-size limit).
+    /// Defaults to 500, Mastodon's own long-standing default post length.
+    pub max_content_chars: u32,
+    /// Maximum number of options a poll may offer. Defaults to 4, Mastodon's
+    /// own long-standing default.
+    pub poll_max_options: u32,
+    /// Minimum allowed poll expiration window. Defaults to 5 minutes,
+    /// Mastodon's own long-standing minimum (short enough for a real poll to
+    /// still be useful, long enough to reject an effectively-already-expired
+    /// poll at creation time).
+    pub poll_min_expiration: Duration,
+    /// How many days a `status_idempotency_keys` row is kept before a future
+    /// pruning job would delete it (mirroring
+    /// `FederationConfig::received_activity_retention_days`'s identical
+    /// shape). Defaults to 7 days — long enough to cover any plausible
+    /// client retry window for a single `Idempotency-Key`, short enough that
+    /// the ledger does not grow unbounded on a long-running instance once a
+    /// pruning job is wired.
+    pub idempotency_key_retention_days: u32,
 }
 
 /// Logging/diagnostics startup settings.
@@ -639,6 +704,35 @@ fn load_config_from(
         &mut issues,
     );
 
+    let statuses_max_content_chars = optional(
+        &source,
+        "statuses.max_content_chars",
+        DEFAULT_STATUSES_MAX_CONTENT_CHARS,
+        |raw| raw.parse::<u32>().map_err(|e| e.to_string()),
+        &mut issues,
+    );
+    let statuses_poll_max_options = optional(
+        &source,
+        "statuses.poll_max_options",
+        DEFAULT_STATUSES_POLL_MAX_OPTIONS,
+        |raw| raw.parse::<u32>().map_err(|e| e.to_string()),
+        &mut issues,
+    );
+    let statuses_poll_min_expiration = optional(
+        &source,
+        "statuses.poll_min_expiration_secs",
+        Duration::from_secs(DEFAULT_STATUSES_POLL_MIN_EXPIRATION_SECS),
+        parse_secs,
+        &mut issues,
+    );
+    let statuses_idempotency_key_retention_days = optional(
+        &source,
+        "statuses.idempotency_key_retention_days",
+        DEFAULT_STATUSES_IDEMPOTENCY_KEY_RETENTION_DAYS,
+        |raw| raw.parse::<u32>().map_err(|e| e.to_string()),
+        &mut issues,
+    );
+
     let level = optional(
         &source,
         "log.level",
@@ -710,6 +804,13 @@ fn load_config_from(
             max_retry_attempts: media_max_retry_attempts.expect("validated above"),
             lease_duration: media_lease_duration.expect("validated above"),
         },
+        statuses: StatusesConfig {
+            max_content_chars: statuses_max_content_chars.expect("validated above"),
+            poll_max_options: statuses_poll_max_options.expect("validated above"),
+            poll_min_expiration: statuses_poll_min_expiration.expect("validated above"),
+            idempotency_key_retention_days: statuses_idempotency_key_retention_days
+                .expect("validated above"),
+        },
     })
 }
 
@@ -751,6 +852,23 @@ const DEFAULT_MEDIA_MAX_RETRY_ATTEMPTS: u32 = 5;
 /// value (task 1.2's own example of "well above the expected processing
 /// time").
 const DEFAULT_MEDIA_LEASE_DURATION_SECS: u64 = 5 * 60;
+
+/// Default for `statuses.max_content_chars` (500 Unicode scalar values). See
+/// [`StatusesConfig::max_content_chars`]'s doc comment for rationale.
+const DEFAULT_STATUSES_MAX_CONTENT_CHARS: u32 = 500;
+
+/// Default for `statuses.poll_max_options` (4 options). See
+/// [`StatusesConfig::poll_max_options`]'s doc comment for rationale.
+const DEFAULT_STATUSES_POLL_MAX_OPTIONS: u32 = 4;
+
+/// Default for `statuses.poll_min_expiration_secs`, in seconds (5 minutes).
+/// See [`StatusesConfig::poll_min_expiration`]'s doc comment for rationale.
+const DEFAULT_STATUSES_POLL_MIN_EXPIRATION_SECS: u64 = 5 * 60;
+
+/// Default for `statuses.idempotency_key_retention_days` (7 days). See
+/// [`StatusesConfig::idempotency_key_retention_days`]'s doc comment for
+/// rationale.
+const DEFAULT_STATUSES_IDEMPOTENCY_KEY_RETENTION_DAYS: u32 = 7;
 
 /// Default for `media.storage_root`: `media_storage`, resolved relative to
 /// the process's current working directory. See

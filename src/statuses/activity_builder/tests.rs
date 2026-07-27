@@ -205,7 +205,7 @@ fn builder(
     );
     let urls = ActorUrls::new("kawasemi.example");
     let ids = Arc::new(SeqIdGenerator::new(1000)) as Arc<dyn IdGenerator>;
-    let builder = StatusActivityBuilder::new(urls, ids, actor_lookup, delivery);
+    let builder = StatusActivityBuilder::new(urls, ids, actor_lookup, Arc::new(delivery));
     (builder, local_sink, http_sink)
 }
 

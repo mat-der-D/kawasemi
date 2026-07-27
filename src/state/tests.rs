@@ -26,13 +26,14 @@ use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::{ActorModule, build_actor_module};
 use crate::config::{
     ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, MediaConfig,
-    OauthConfig, OwnerConfig, Secret, ServerConfig,
+    OauthConfig, OwnerConfig, Secret, ServerConfig, StatusesConfig,
 };
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{FederationModule, FederationWiringConfig, build_federation_module};
 use crate::media::{self, MediaModule};
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
+use crate::statuses::{StatusesModule, build_statuses_module};
 
 const LAZY_TEST_DB_URL: &str = "postgres://lazy-user:lazy-pw@127.0.0.1:5432/lazy-test-db";
 
@@ -102,6 +103,15 @@ fn sample_config(domain: &str, max_connections: u32) -> AppConfig {
             max_retry_attempts: 5,
             lease_duration: Duration::from_secs(5 * 60),
         },
+        // statuses-core task 7.2: fixed, non-production values mirroring
+        // `load_config_from`'s own defaults, the same convention every other
+        // startup-config group above already follows in this fixture.
+        statuses: StatusesConfig {
+            max_content_chars: 500,
+            poll_max_options: 4,
+            poll_min_expiration: Duration::from_secs(5 * 60),
+            idempotency_key_retention_days: 7,
+        },
     }
 }
 
@@ -170,6 +180,12 @@ fn sample_federation_module(
             time::Duration::days(14),
         ),
         Arc::new(ReqwestFederationHttpClient::new()),
+        |_dispatcher| {
+            // No downstream `InboundActivityHandler` registration needed for
+            // this `AppState`-bundling test (statuses-core's task 7.2 added
+            // this parameter; see `build_federation_module`'s own doc
+            // comment).
+        },
     );
     federation
 }
@@ -221,6 +237,29 @@ fn sample_accounts_module(
     )
 }
 
+/// Builds a `StatusesModule` (task 7.2), mirroring
+/// `sample_accounts_module`'s own "no real I/O beyond what construction
+/// itself needs" property: `build_statuses_module` only ever stores
+/// `pool`/`runtime`/config values and clones the caller-supplied
+/// `delivery` `Arc` (never dials the database or the network itself), so
+/// this is safe against the same `connect_lazy` pool this suite's other
+/// fixtures use. `delivery` is `federation`'s own already-built
+/// `Arc<ConcreteDeliveryService>` (`FederationModule::delivery_service`),
+/// cloned *before* `federation` is moved into `AppState::new` at each call
+/// site below.
+fn sample_statuses_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    federation: &FederationModule,
+) -> StatusesModule {
+    build_statuses_module(
+        pool,
+        runtime,
+        "state-test.statuses.internal".to_string(),
+        Arc::clone(federation.delivery_service()),
+    )
+}
+
 /// Requirements 1.1, 3.3, 5.5, 5.6: downstream code must be able to retrieve
 /// the pool, the injection boundaries (via `RuntimeContext`), and the
 /// validated config values from `AppState`, unchanged from what was passed
@@ -244,6 +283,7 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         media.service(),
         config.media.clone(),
     );
+    let statuses = sample_statuses_module(pool.clone(), runtime.clone(), &federation);
 
     let state = AppState::new(
         pool,
@@ -254,6 +294,7 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         federation,
         media,
         accounts,
+        statuses,
     );
 
     // Config values are retrievable and match what was supplied.
@@ -314,9 +355,10 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
         media.service(),
         config.media.clone(),
     );
+    let statuses = sample_statuses_module(pool.clone(), runtime.clone(), &federation);
 
     let state = AppState::new(
-        pool, runtime, config, actor, oauth, federation, media, accounts,
+        pool, runtime, config, actor, oauth, federation, media, accounts, statuses,
     );
     assert_eq!(Arc::strong_count(&state.inner), 1);
 

@@ -282,7 +282,7 @@ where
     urls: ActorUrls,
     ids: Arc<dyn IdGenerator>,
     actor_lookup: A,
-    delivery: DeliveryService<D, L, H>,
+    delivery: Arc<DeliveryService<D, L, H>>,
 }
 
 impl<A, D, L, H> StatusActivityBuilder<A, D, L, H>
@@ -297,11 +297,27 @@ where
     /// (sending-actor `Id -> Handle` resolution), and `delivery` (the
     /// federation-core common delivery path this builder's only job is to
     /// feed).
+    ///
+    /// `delivery` is `Arc<DeliveryService<D, L, H>>`, not an owned
+    /// `DeliveryService<D, L, H>` (task 7.2, `Boundary: StatusesModule,
+    /// server, bootstrap, config`, plus this file's own explicitly-justified
+    /// exception — see that task's own status report): the real
+    /// `FederationModule` (`src/federation/module.rs`) only ever exposes its
+    /// one live `ConcreteDeliveryService` behind `&Arc<ConcreteDeliveryService>`
+    /// (`FederationModule::delivery_service`), never by value, and
+    /// `StatusesModule` must build three independent `StatusActivityBuilder`
+    /// instances (one embedded in each of `StatusService`/`InteractionService`/
+    /// `PollService`) that all feed the identical shared `DeliveryService`
+    /// rather than each cloning/reconstructing their own. Widening this field
+    /// from an owned value to an `Arc` is a pure signature change: every
+    /// existing call site in this module (`deliver_one`, the sole consumer of
+    /// `self.delivery`) is unaffected, since `Arc<T>` transparently derefs to
+    /// `&T` and `DeliveryService::deliver` only ever needs `&self`.
     pub fn new(
         urls: ActorUrls,
         ids: Arc<dyn IdGenerator>,
         actor_lookup: A,
-        delivery: DeliveryService<D, L, H>,
+        delivery: Arc<DeliveryService<D, L, H>>,
     ) -> Self {
         Self {
             urls,

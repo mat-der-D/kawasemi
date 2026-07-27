@@ -38,6 +38,7 @@ use crate::federation::FederationModule;
 use crate::media::MediaModule;
 use crate::oauth::OauthModule;
 use crate::runtime::RuntimeContext;
+use crate::statuses::StatusesModule;
 
 /// The data `AppState` bundles, held behind a single `Arc` so cloning the
 /// outer handle is one atomic increment rather than a deep copy of any of
@@ -65,6 +66,12 @@ struct AppStateInner {
     /// after this instance is already live — see
     /// `crate::accounts::AccountsModule`'s own doc comment.
     accounts: AccountsModule,
+    /// statuses-core's module bundle (task 7.2, Requirements 4.3, 14.1): the
+    /// shared `StatusService`/`InteractionService`/`PollService` handles
+    /// `src/server.rs`'s `FromRef<AppState> for StatusesEndpointsState<...>`
+    /// bridge derives every mounted statuses/polls/bookmarks endpoint's own
+    /// state from — see `crate::statuses::StatusesModule`'s own doc comment.
+    statuses: StatusesModule,
 }
 
 /// Immutable, cheaply-cloneable shared handle bundling the database
@@ -118,6 +125,7 @@ impl AppState {
         federation: FederationModule,
         media: MediaModule,
         accounts: AccountsModule,
+        statuses: StatusesModule,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -129,6 +137,7 @@ impl AppState {
                 federation,
                 media,
                 accounts,
+                statuses,
             }),
         }
     }
@@ -204,5 +213,13 @@ impl AppState {
     /// `crate::accounts::AccountsModule`'s own doc comment.
     pub fn accounts(&self) -> &AccountsModule {
         &self.inner.accounts
+    }
+
+    /// The shared statuses-core module bundle (task 7.2, Requirements 4.3,
+    /// 14.1): `src/server.rs`'s `FromRef<AppState> for
+    /// StatusesEndpointsState<...>` bridge derives every mounted statuses/
+    /// polls/bookmarks endpoint's own state from this handle.
+    pub fn statuses(&self) -> &StatusesModule {
+        &self.inner.statuses
     }
 }

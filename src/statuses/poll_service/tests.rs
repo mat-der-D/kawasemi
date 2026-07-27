@@ -199,7 +199,7 @@ fn service(
     let urls = ActorUrls::new("kawasemi.example");
     let ids = Arc::new(SeqIdGenerator::new(90_000)) as Arc<dyn crate::runtime::IdGenerator>;
     let activity_builder =
-        StatusActivityBuilder::new(urls.clone(), ids, actor_lookup.clone(), delivery);
+        StatusActivityBuilder::new(urls.clone(), ids, actor_lookup.clone(), Arc::new(delivery));
 
     let service = PollService::new(
         app.pool.clone(),

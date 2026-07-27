@@ -57,6 +57,7 @@ use tower_http::trace::TraceLayer;
 use tracing::Span;
 
 use crate::accounts::{self, AccountsEndpointsState};
+use crate::actor::ActorDirectory;
 use crate::api::ratelimit::{RateLimitPolicy, rate_limit_layer};
 use crate::config::ServerConfig;
 use crate::federation::{
@@ -70,6 +71,14 @@ use crate::oauth::authorize_endpoint::{self, AuthorizeEndpointState};
 use crate::oauth::middleware::AuthState;
 use crate::oauth::token_endpoint::{self, TokenEndpointState};
 use crate::state::AppState;
+use crate::statuses::endpoints::{
+    self, BOOKMARKS_PATH, POLL_PATH, POLL_VOTES_PATH, STATUS_BOOKMARK_PATH, STATUS_CONTEXT_PATH,
+    STATUS_FAVOURITE_PATH, STATUS_HISTORY_PATH, STATUS_PATH, STATUS_PIN_PATH, STATUS_REBLOG_PATH,
+    STATUS_SOURCE_PATH, STATUS_UNBOOKMARK_PATH, STATUS_UNFAVOURITE_PATH, STATUS_UNPIN_PATH,
+    STATUS_UNREBLOG_PATH, STATUSES_PATH,
+};
+use crate::statuses::visibility::NoRelationshipQuery;
+use crate::statuses::{ConcreteHttpSink, ConcreteLocalSink, ConcreteStatusesEndpointsState};
 use crate::telemetry;
 
 /// `POST /api/v1/apps` / `GET /api/v1/apps/verify_credentials` path
@@ -278,6 +287,31 @@ impl FromRef<AppState> for AccountsEndpointsState {
     }
 }
 
+/// Bridges `AppState` to [`ConcreteStatusesEndpointsState`] (task 7.2,
+/// `_Boundary: StatusesModule, server, bootstrap, config_`), mirroring
+/// [`AccountsEndpointsState`]'s own `FromRef` bridge immediately above:
+/// `AppState::statuses()`'s already-built `StatusService`/
+/// `InteractionService`/`PollService` handles (task 7.2's own
+/// `StatusesModule`) are `Arc` clones, never freshly constructed here.
+/// `pool`/`runtime` are cloned the same way `MediaEndpointsState`'s own
+/// bridge clones `store` — this endpoint-state bundle needs direct pool
+/// access for its own `Status -> StatusRenderInput` assembly glue
+/// (`endpoints.rs`'s own doc comment).
+impl FromRef<AppState> for ConcreteStatusesEndpointsState {
+    fn from_ref(state: &AppState) -> Self {
+        ConcreteStatusesEndpointsState {
+            status_service: state.statuses().status_service(),
+            interaction_service: state.statuses().interaction_service(),
+            poll_service: state.statuses().poll_service(),
+            accounts: state.accounts().service(),
+            media_store: state.media().store().clone(),
+            pool: state.pool().clone(),
+            runtime: state.runtime().clone(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
 /// Path of the minimal liveness route this task adds (Requirement 1.1).
 pub const HEALTH_PATH: &str = "/health";
 
@@ -354,6 +388,106 @@ fn accounts_router() -> Router<AppState> {
         .route(ACCOUNTS_STATUSES_PATH, get(accounts::list_statuses))
         .route(INSTANCE_V2_PATH, get(accounts::instance_v2))
         .route(CUSTOM_EMOJIS_PATH, get(accounts::custom_emojis))
+}
+
+/// Names a statuses-core endpoint handler's own six generic type parameters
+/// (`A, D, L, H, R, M`) with this instance's one concrete instantiation
+/// (mirroring [`ConcreteStatusesEndpointsState`]'s identical type argument
+/// list), one short alias per slot, so [`statuses_router`]'s own explicit
+/// turbofish per handler (mirroring federation-core's own
+/// `actor_inbox::<ConcreteVerifier, ConcreteBlockPolicy,
+/// ConcreteReceivedActivityStore>` precedent, see [`router`]) stays readable
+/// rather than repeating the fully-qualified six-argument list 18 times.
+///
+/// (A `macro_rules!` shorthand gluing `::<...>` directly onto a captured
+/// `$f:path` fragment was tried first and rejected: rustc's macro fragment
+/// sealing rejects appending a turbofish to a substituted `path`/`ident`
+/// fragment inside another macro-like call position such as `post(...)`
+/// — "macro expansion ignores `::` and any tokens following". Plain type
+/// aliases sidestep that entirely.)
+type SA = ActorDirectory;
+type SD = ActorDirectory;
+type SL = ConcreteLocalSink;
+type SH = ConcreteHttpSink;
+type SR = NoRelationshipQuery;
+type SM = ActorDirectory;
+
+/// statuses-core's route group (task 7.2, `_Boundary: StatusesModule,
+/// server, bootstrap, config_`, design.md's API Contract table for
+/// `StatusEndpoints`, task 7.1): every statuses/reblog/favourite/bookmark/
+/// pin/poll path task 7.1's `endpoints.rs` implements, mounted onto its 18
+/// real handlers monomorphized over this instance's one concrete type
+/// argument list (`SA`/`SD`/`SL`/`SH`/`SR`/`SM` above). Kept as a separate
+/// `.merge()`-able group mirroring [`accounts_router`]'s own precedent — no
+/// real per-instance config is needed to build it either.
+fn statuses_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            STATUSES_PATH,
+            post(endpoints::create_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_PATH,
+            get(endpoints::show_status::<SA, SD, SL, SH, SR, SM>)
+                .delete(endpoints::delete_status::<SA, SD, SL, SH, SR, SM>)
+                .put(endpoints::edit_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_HISTORY_PATH,
+            get(endpoints::status_history::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_SOURCE_PATH,
+            get(endpoints::status_source::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_CONTEXT_PATH,
+            get(endpoints::status_context::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_REBLOG_PATH,
+            post(endpoints::reblog_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_UNREBLOG_PATH,
+            post(endpoints::unreblog_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_FAVOURITE_PATH,
+            post(endpoints::favourite_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_UNFAVOURITE_PATH,
+            post(endpoints::unfavourite_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_BOOKMARK_PATH,
+            post(endpoints::bookmark_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_UNBOOKMARK_PATH,
+            post(endpoints::unbookmark_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_PIN_PATH,
+            post(endpoints::pin_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_UNPIN_PATH,
+            post(endpoints::unpin_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            BOOKMARKS_PATH,
+            get(endpoints::list_bookmarks::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            POLL_PATH,
+            get(endpoints::show_poll::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            POLL_VOTES_PATH,
+            post(endpoints::vote_poll::<SA, SD, SL, SH, SR, SM>),
+        )
 }
 
 /// Builds the foundation `Router<AppState>` (Requirement 1.1, and — as of
@@ -450,6 +584,10 @@ pub fn build_router(state: AppState) -> Router {
         // `state`-derived sizing (unlike `media_router`'s `DefaultBodyLimit`)
         // is needed here.
         .merge(accounts_router())
+        // task 7.2: merged the same way `accounts_router`/`media_router` are,
+        // immediately above — no `state`-derived sizing is needed here
+        // either.
+        .merge(statuses_router())
         .layer(rate_limit_layer(
             rate_limit_clock,
             RateLimitPolicy::new(RATE_LIMIT_PER_WINDOW, RATE_LIMIT_WINDOW),

@@ -119,6 +119,15 @@ fn test_state(seed: u64) -> AppState {
             max_retry_attempts: 5,
             lease_duration: Duration::from_secs(5 * 60),
         },
+        // statuses-core task 7.2: fixed, non-production values mirroring
+        // `load_config_from`'s own defaults, the same convention every other
+        // startup-config group above already follows in this fixture.
+        statuses: crate::config::StatusesConfig {
+            max_content_chars: 500,
+            poll_max_options: 4,
+            poll_min_expiration: Duration::from_secs(5 * 60),
+            idempotency_key_retention_days: 7,
+        },
     };
     let pool = PgPoolOptions::new()
         .max_connections(config.database.max_connections)
@@ -151,6 +160,12 @@ fn test_state(seed: u64) -> AppState {
             time::Duration::days(14),
         ),
         Arc::new(ReqwestFederationHttpClient::new()),
+        |_dispatcher| {
+            // No downstream `InboundActivityHandler` registration needed —
+            // this suite asserts on router/`TraceLayer` behavior, not
+            // inbound dispatch (statuses-core's task 7.2 added this
+            // parameter; see `build_federation_module`'s own doc comment).
+        },
     );
     // Mirrors the federation-module construction immediately above: builds a
     // real `MediaModule` against the same `connect_lazy` pool (never dials
@@ -175,6 +190,18 @@ fn test_state(seed: u64) -> AppState {
         media_module.service(),
         config.media.clone(),
     );
+    // Mirrors the accounts-module construction immediately above: builds the
+    // statuses-core module bundle (task 7.2) the same way `bootstrap()`'s
+    // production path does (`crate::statuses::build_statuses_module`),
+    // sharing this instance's own `pool`/`runtime`/`config.server.domain`/
+    // `federation_module`'s own `Arc<ConcreteDeliveryService>` — this bundle
+    // performs no I/O at construction time either.
+    let statuses_module = crate::statuses::build_statuses_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(federation_module.delivery_service()),
+    );
     AppState::new(
         pool,
         runtime,
@@ -184,6 +211,7 @@ fn test_state(seed: u64) -> AppState {
         federation_module,
         media_module,
         accounts_module,
+        statuses_module,
     )
 }
 
