@@ -848,3 +848,78 @@ pub async fn media_ids_for_status(pool: &PgPool, status_id: Id) -> Result<Vec<Id
 
     Ok(rows.into_iter().map(|(id,)| Id::from_i64(id)).collect())
 }
+
+// -- account-scoped listing (added by task 9.1, `AccountStatusesProviderImpl`) --
+//
+// accounts-and-instance's `AccountStatusesProvider`/`AccountCountsProvider`
+// ports (`crate::accounts::ports`, task 1.3) need, respectively, "every post
+// authored by one actor, newest first" and "how many posts has this actor
+// authored, and when was the latest one" — neither existed anywhere in this
+// module before this task (task 2.1's own six-function Service Interface
+// list has no per-actor listing query; `statuses_actor_idx`,
+// `migrations/0007_statuses.sql`, was created for exactly this future need
+// per that migration's own column comment: "投稿者...一意インデックス...
+// 支援 actor-scoped listing"). `list_by_actor` fetches the *unfiltered*
+// candidate set (no `pinned`/`only_media`/`exclude_replies`/`exclude_reblogs`/
+// visibility filtering at the SQL layer) — mirrors this module's/
+// `interaction_repository.rs::list_bookmarks`'s own established "fetch the
+// full matching set, filter/paginate in Rust" convention, since per-viewer
+// visibility filtering (`crate::statuses::visibility::is_visible`) cannot be
+// expressed as a `WHERE` clause at all (it needs a resolved
+// `ViewerRelation`), so pushing the other four filters into SQL as well
+// would only leave that one, most-important filter still applied
+// application-side — `crate::statuses::account_provider` is the one caller,
+// applying every filter (visibility included) uniformly, in Rust, over this
+// function's result.
+
+/// Every `statuses` row authored by `actor_id`, newest-id-first, entirely
+/// unfiltered (no visibility/`pinned`/`only_media`/`exclude_replies`/
+/// `exclude_reblogs` filtering — see this section's own doc comment for why
+/// that is `crate::statuses::account_provider`'s job, not this repository's).
+pub async fn list_by_actor(pool: &PgPool, actor_id: Id) -> Result<Vec<Status>, AppError> {
+    let rows: Vec<StatusRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        status_columns!(),
+        " FROM statuses WHERE actor_id = $1 ORDER BY id DESC"
+    ))
+    .bind(actor_id.as_i64())
+    .fetch_all(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    Ok(rows.into_iter().map(row_to_status).collect())
+}
+
+/// The total number of `statuses` rows authored by `actor_id` — the
+/// `AccountCountsProvider` port's `statuses_count` (design.md's Boundary
+/// Commitments: "`AccountCountsProvider` へ `statuses_count`...を供給する"),
+/// a raw, unfiltered total (not scoped to any particular viewer) — matching
+/// `followers`/`following`'s own already-established "instance-wide raw
+/// count" convention (`crate::accounts::ports::AccountCountsProvider`'s own
+/// doc comment).
+pub async fn count_for_actor(pool: &PgPool, actor_id: Id) -> Result<i64, AppError> {
+    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM statuses WHERE actor_id = $1")
+        .bind(actor_id.as_i64())
+        .fetch_one(pool)
+        .await
+        .map_err(map_server_error)?;
+
+    Ok(count)
+}
+
+/// The most recent `created_at` among `actor_id`'s `statuses` rows, or
+/// `None` when `actor_id` has authored none — the `AccountCountsProvider`
+/// port's `last_status_at`.
+pub async fn last_created_at_for_actor(
+    pool: &PgPool,
+    actor_id: Id,
+) -> Result<Option<OffsetDateTime>, AppError> {
+    let (last,): (Option<OffsetDateTime>,) =
+        sqlx::query_as("SELECT MAX(created_at) FROM statuses WHERE actor_id = $1")
+            .bind(actor_id.as_i64())
+            .fetch_one(pool)
+            .await
+            .map_err(map_server_error)?;
+
+    Ok(last)
+}

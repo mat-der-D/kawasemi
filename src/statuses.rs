@@ -178,6 +178,7 @@
 //!   `endpoints.rs` (task 7.1) defined, monomorphized over this module's
 //!   concrete type aliases.
 
+pub mod account_provider;
 pub mod activity_builder;
 pub mod addressing;
 pub mod endpoints;
@@ -202,6 +203,8 @@ use axum::http::StatusCode;
 use sqlx::PgPool;
 
 use crate::accounts::RemoteAccountFetcher;
+use crate::accounts::account_service::AccountService;
+use crate::accounts::ports::AccountPortsRegistry;
 use crate::actor::{ActorDirectory, Handle};
 use crate::domain::Id;
 use crate::error::AppError;
@@ -211,6 +214,7 @@ use crate::federation::{
     ConcreteBlockPolicy, ConcreteDeliveryService, ConcreteReceivedActivityStore, ConcreteVerifier,
     DbDeliveryQueue, HttpDeliverySink, InboundActivityDispatcher, LocalDeliverySink,
 };
+use crate::media::local_fs::LocalFsStore;
 use crate::runtime::RuntimeContext;
 use crate::statuses::activity_builder::StatusActivityBuilder;
 use crate::statuses::endpoints::StatusesEndpointsState;
@@ -522,6 +526,48 @@ pub fn build_statuses_module(
         interaction_service,
         poll_service,
     }
+}
+
+/// Supplies this spec's own real implementations of the two
+/// accounts-and-instance-owned delegation ports (task 9.1, `_Boundary:
+/// AccountStatusesProviderImpl, AccountCountsContribution_`, Requirements
+/// 6.1, 7.1) into `ports` — a live `crate::accounts::ports::AccountPortsRegistry`
+/// handle (`crate::accounts::AccountsModule::ports()`, cheap to clone: see
+/// that registry's own doc comment) — replacing its built-in
+/// `EmptyStatusesProvider`/`ZeroCountsProvider` defaults (design.md's own
+/// wording: "既定実装（空ページ / 0）を...本 spec の実装へ差し替える").
+///
+/// Callers (`src/bootstrap.rs`, `src/test_harness.rs`) call this once,
+/// after both `crate::accounts::build_accounts_module` (for `ports`/
+/// `accounts`) and `crate::media::build_media_module` (for `media_store`)
+/// have already run — mirrors [`register_downstream_handlers`]'s own
+/// "assemble this spec's own real implementation of a downstream-owned
+/// port, then hand it to that port's own registration point" shape, just
+/// registering directly (`set_statuses_provider`/`set_counts_provider`
+/// take `&self`, see `AccountPortsRegistry`'s own doc comment) rather than
+/// via a deferred closure — no equivalent single, later "the dispatcher is
+/// under construction right now" choke point exists on the accounts-and-
+/// instance side the way `InboundActivityDispatcher::register` created for
+/// `register_downstream_handlers`.
+pub fn register_account_ports(
+    pool: PgPool,
+    runtime: RuntimeContext,
+    domain: impl Into<String>,
+    ports: AccountPortsRegistry,
+    accounts: Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>>,
+    media_store: LocalFsStore,
+) {
+    let statuses_provider = account_provider::AccountStatusesProviderImpl::new(
+        pool.clone(),
+        runtime,
+        domain,
+        accounts,
+        media_store,
+    );
+    ports.set_statuses_provider(Arc::new(statuses_provider));
+    ports.set_counts_provider(Arc::new(account_provider::AccountCountsContribution::new(
+        pool,
+    )));
 }
 
 /// Builds the registration closure `crate::federation::build_federation_module`'s

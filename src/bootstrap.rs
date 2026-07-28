@@ -499,6 +499,22 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         Arc::clone(federation_module.delivery_service()),
     );
 
+    // Supplies statuses-core's own real implementations of the two
+    // accounts-and-instance-owned delegation ports (task 9.1, Requirements
+    // 6.1, 7.1), replacing `accounts_module`'s built-in
+    // `EmptyStatusesProvider`/`ZeroCountsProvider` defaults — see
+    // `statuses::register_account_ports`'s own doc comment. Must run after
+    // both `accounts_module` (for `ports()`/`service()`) and `media_module`
+    // (for `store()`) above.
+    statuses::register_account_ports(
+        pool.clone(),
+        runtime.clone(),
+        cfg.server.domain.clone(),
+        accounts_module.ports(),
+        accounts_module.service(),
+        media_module.store().clone(),
+    );
+
     Ok(AppState::new(
         pool,
         runtime,

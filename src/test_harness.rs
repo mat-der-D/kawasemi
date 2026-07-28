@@ -725,6 +725,22 @@ pub async fn spawn_test_app() -> TestApp {
         Arc::clone(federation_module.delivery_service()),
     );
 
+    // Supplies statuses-core's own real implementations of the two
+    // accounts-and-instance-owned delegation ports (task 9.1) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::statuses::register_account_ports`), so this harness's own
+    // `GET /accounts/:id/statuses`/`statuses_count` integration tests
+    // observe the real provider, not `accounts_module`'s built-in
+    // `EmptyStatusesProvider`/`ZeroCountsProvider` defaults.
+    statuses::register_account_ports(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        accounts_module.ports(),
+        accounts_module.service(),
+        media_module.store().clone(),
+    );
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),

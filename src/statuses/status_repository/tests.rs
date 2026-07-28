@@ -21,8 +21,8 @@
 use time::Duration;
 
 use super::{
-    CountKind, adjust_counts, ancestors, apply_edit, delete_status, descendants, find_visible,
-    insert_status, list_edits,
+    CountKind, adjust_counts, ancestors, apply_edit, count_for_actor, delete_status, descendants,
+    find_visible, insert_status, last_created_at_for_actor, list_by_actor, list_edits,
 };
 use crate::domain::{Id, Visibility};
 use crate::statuses::model::{Status, StatusEdit};
@@ -742,6 +742,127 @@ async fn adjust_counts_floors_at_zero() {
         .unwrap()
         .unwrap();
     assert_eq!(updated.favourites_count, 0);
+
+    app.cleanup().await;
+}
+
+// -- list_by_actor / count_for_actor / last_created_at_for_actor
+// (task 9.1, `AccountStatusesProviderImpl`/`AccountCountsContribution`) ------
+
+/// `list_by_actor` returns only the given actor's own statuses, newest
+/// (highest id) first, entirely unfiltered by visibility/reply/reblog.
+#[tokio::test]
+async fn list_by_actor_returns_only_that_actors_statuses_newest_first() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+    let other_actor_id = app.runtime.ids.next_id();
+
+    let first = sample_status(&app, actor_id, Visibility::Public, None, None);
+    insert(&app, &first).await;
+    let second = sample_status(&app, actor_id, Visibility::Private, None, None);
+    insert(&app, &second).await;
+    let other = sample_status(&app, other_actor_id, Visibility::Public, None, None);
+    insert(&app, &other).await;
+
+    let listed = list_by_actor(&app.pool, actor_id)
+        .await
+        .expect("list_by_actor must succeed");
+
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].id, second.id, "newest (highest id) first");
+    assert_eq!(listed[1].id, first.id);
+    assert!(listed.iter().all(|status| status.actor_id == actor_id));
+
+    app.cleanup().await;
+}
+
+/// `list_by_actor` applies no visibility/reply/reblog filtering at all —
+/// that is the caller's own job (`crate::statuses::account_provider`).
+#[tokio::test]
+async fn list_by_actor_applies_no_filtering_of_its_own() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+    let parent = sample_status(&app, actor_id, Visibility::Public, None, None);
+    insert(&app, &parent).await;
+    let reply = sample_status(&app, actor_id, Visibility::Public, Some(parent.id), None);
+    insert(&app, &reply).await;
+    let reblog = sample_status(&app, actor_id, Visibility::Public, None, Some(parent.id));
+    insert(&app, &reblog).await;
+    let direct = sample_status(&app, actor_id, Visibility::Direct, None, None);
+    insert(&app, &direct).await;
+
+    let listed = list_by_actor(&app.pool, actor_id)
+        .await
+        .expect("list_by_actor must succeed");
+
+    assert_eq!(listed.len(), 4, "replies/reblogs/direct all included");
+
+    app.cleanup().await;
+}
+
+/// `count_for_actor` counts exactly this actor's own statuses, unaffected
+/// by another actor's posts.
+#[tokio::test]
+async fn count_for_actor_counts_only_that_actors_own_statuses() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+    let other_actor_id = app.runtime.ids.next_id();
+
+    assert_eq!(
+        count_for_actor(&app.pool, actor_id).await.unwrap(),
+        0,
+        "an actor with no posts counts zero"
+    );
+
+    insert(
+        &app,
+        &sample_status(&app, actor_id, Visibility::Public, None, None),
+    )
+    .await;
+    insert(
+        &app,
+        &sample_status(&app, actor_id, Visibility::Private, None, None),
+    )
+    .await;
+    insert(
+        &app,
+        &sample_status(&app, other_actor_id, Visibility::Public, None, None),
+    )
+    .await;
+
+    assert_eq!(count_for_actor(&app.pool, actor_id).await.unwrap(), 2);
+    assert_eq!(count_for_actor(&app.pool, other_actor_id).await.unwrap(), 1);
+
+    app.cleanup().await;
+}
+
+/// `last_created_at_for_actor` is `None` for an actor with no posts, and the
+/// most recent post's own `created_at` once posts exist.
+#[tokio::test]
+async fn last_created_at_for_actor_reflects_the_most_recent_post() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+
+    assert_eq!(
+        last_created_at_for_actor(&app.pool, actor_id)
+            .await
+            .unwrap(),
+        None,
+        "an actor with no posts has no last_status_at"
+    );
+
+    let mut first = sample_status(&app, actor_id, Visibility::Public, None, None);
+    first.created_at -= Duration::seconds(60);
+    insert(&app, &first).await;
+
+    let second = sample_status(&app, actor_id, Visibility::Public, None, None);
+    insert(&app, &second).await;
+
+    let last = last_created_at_for_actor(&app.pool, actor_id)
+        .await
+        .unwrap()
+        .expect("an actor with posts has a last_status_at");
+    assert_eq!(last, second.created_at);
 
     app.cleanup().await;
 }
