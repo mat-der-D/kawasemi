@@ -1,0 +1,21 @@
+{
+  "emojis": [],
+  "expired": true,
+  "expires_at": "1970-01-05T21:50:41Z",
+  "id": "424246",
+  "multiple": false,
+  "options": [
+    {
+      "title": "Yes",
+      "votes_count": 0
+    },
+    {
+      "title": "No",
+      "votes_count": 0
+    }
+  ],
+  "own_votes": [],
+  "voted": false,
+  "voters_count": 0,
+  "votes_count": 0
+}

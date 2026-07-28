@@ -1,0 +1,74 @@
+{
+  "account": {
+    "acct": "alice_contract_poll",
+    "avatar": "https://test-harness.kawasemi.internal/avatars/original/missing.png",
+    "avatar_static": "https://test-harness.kawasemi.internal/avatars/original/missing.png",
+    "bot": false,
+    "created_at": "1970-01-05T21:50:42Z",
+    "discoverable": false,
+    "display_name": "",
+    "emojis": [],
+    "fields": [],
+    "followers_count": 0,
+    "following_count": 0,
+    "group": false,
+    "header": "https://test-harness.kawasemi.internal/headers/original/missing.png",
+    "header_static": "https://test-harness.kawasemi.internal/headers/original/missing.png",
+    "id": "424243",
+    "last_status_at": null,
+    "locked": false,
+    "note": "",
+    "statuses_count": 0,
+    "uri": "https://test-harness.kawasemi.internal/users/alice_contract_poll",
+    "url": "https://test-harness.kawasemi.internal/users/alice_contract_poll",
+    "username": "alice_contract_poll"
+  },
+  "bookmarked": false,
+  "content": "a poll-bearing post inserted directly by the status_contract_it fixture",
+  "created_at": "1970-01-05T21:50:42Z",
+  "edited_at": null,
+  "emojis": [],
+  "favourited": false,
+  "favourites_count": 0,
+  "id": "424250",
+  "in_reply_to_account_id": null,
+  "in_reply_to_id": null,
+  "language": null,
+  "media_attachments": [],
+  "mentions": [],
+  "muted": false,
+  "pinned": false,
+  "poll": {
+    "emojis": [],
+    "expired": false,
+    "expires_at": "1970-01-05T22:50:42Z",
+    "id": "424251",
+    "multiple": false,
+    "options": [
+      {
+        "title": "Cats",
+        "votes_count": 1
+      },
+      {
+        "title": "Dogs",
+        "votes_count": 0
+      }
+    ],
+    "own_votes": [
+      0
+    ],
+    "voted": true,
+    "voters_count": 1,
+    "votes_count": 1
+  },
+  "reblog": null,
+  "reblogged": false,
+  "reblogs_count": 0,
+  "replies_count": 0,
+  "sensitive": false,
+  "spoiler_text": "",
+  "tags": [],
+  "uri": "https://test-harness.kawasemi.internal/statuses/424250",
+  "url": "https://test-harness.kawasemi.internal/statuses/424250",
+  "visibility": "public"
+}
