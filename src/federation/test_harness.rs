@@ -88,6 +88,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::accounts;
+use crate::accounts::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::actor::{self, ActorModule};
@@ -104,7 +105,7 @@ use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::server;
 use crate::state::AppState;
-use crate::statuses;
+use crate::statuses::{self, ProdRemoteActorResolver};
 use crate::test_harness::{TestApp, TestAppParts};
 
 /// Same shared-test-database override convention as
@@ -352,6 +353,34 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         false,
     );
 
+    // statuses-core task 8.3 (`Boundary: StatusActivityBuilder,
+    // InboundHandlers`): assembles statuses-core's own `RemoteActorResolver`
+    // (task 7.2's `ProdRemoteActorResolver`) the same way
+    // `crate::test_harness::spawn_test_app` does — *before*
+    // `federation::build_federation_module` runs, since registration must
+    // happen inside that function's own registration point (see that
+    // function's own doc comment) — except the `RemoteAccountFetcher` this
+    // resolver's genuinely-remote fallback uses is built from *this paired
+    // instance's own* caller-supplied `http_client`
+    // (`ReqwestFederationHttpClient::insecure_loopback()`), not a fresh
+    // `ReqwestFederationHttpClient::new()`: this resolver's own remote-actor
+    // document fetches must reach the OTHER paired instance's plain-HTTP
+    // listener exactly the same way `accounts_module`'s own
+    // `RemoteAccountFetcher` (above) already does, for the identical
+    // reachability reason this module's own doc comment ("Why not
+    // `spawn_test_app`") explains.
+    let statuses_remote_actor_fetcher = Arc::new(RemoteAccountFetcher::new(
+        pool.clone(),
+        Arc::clone(&http_client),
+        runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    ));
+    let statuses_remote_actor_resolver = Arc::new(ProdRemoteActorResolver::new(
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        statuses_remote_actor_fetcher,
+    ));
+
     // Requirement 13.1: `http_client` is the caller-supplied
     // `ReqwestFederationHttpClient::insecure_loopback()` instance (see
     // `spawn_federation_pair`), so this instance's own outbound public-key
@@ -375,15 +404,21 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
             pruning_interval: PAIR_PRUNING_INTERVAL,
         },
         Arc::clone(&http_client),
-        |_dispatcher| {
-            // No downstream `InboundActivityHandler` registration needed —
-            // this harness exercises federation-core's own send/receive
-            // pipeline in isolation (statuses-core's task 7.2 added this
-            // parameter; see `build_federation_module`'s own doc comment).
-            // A later statuses-core task (8.3, `_Depends: 7.2_`) is expected
-            // to extend this closure once it needs a genuine 2-instance
-            // statuses round trip.
-        },
+        // statuses-core task 8.3: registers statuses-core's six post-related
+        // inbound handlers against this paired instance's own live
+        // dispatcher, exactly as `crate::test_harness::spawn_test_app`'s
+        // production-mirroring composition already does — this module's own
+        // doc comment ("Why not `spawn_test_app`") is the reason this
+        // harness cannot simply call `spawn_test_app` twice instead of
+        // reimplementing this same wiring, and this call site is the one
+        // this module's previous revision's own doc comment (superseded by
+        // this edit) explicitly earmarked for a later statuses-core task to
+        // extend once a genuine 2-instance statuses round trip was needed.
+        statuses::register_downstream_handlers(
+            pool.clone(),
+            runtime.clone(),
+            statuses_remote_actor_resolver,
+        ),
     );
     federation_background.spawn();
 
