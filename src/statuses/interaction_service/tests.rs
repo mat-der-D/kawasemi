@@ -27,6 +27,7 @@ use crate::federation::outbound::target::{DeliveryTarget, RecipientTargetResolve
 use crate::federation::{CanonicalActivity, DeliveryService};
 use crate::runtime::SeqIdGenerator;
 use crate::statuses::model::Status;
+use crate::statuses::notification_sink::NotificationEventSink;
 use crate::statuses::status_repository;
 use crate::statuses::visibility::ViewerRelation;
 use crate::test_harness::{TestApp, spawn_test_app};
@@ -172,17 +173,56 @@ type TestService = InteractionService<
     MockRelationshipQuery,
 >;
 
+/// Records every [`NotificationEventSink::emit`] call — mirrors
+/// `status_service/tests.rs::RecordingNotificationSink`, for task 9.2's own
+/// emit-site tests.
+struct RecordingNotificationSink {
+    events: Mutex<Vec<NotificationEvent>>,
+}
+
+impl RecordingNotificationSink {
+    fn new() -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn events(&self) -> Vec<NotificationEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl NotificationEventSink for RecordingNotificationSink {
+    fn emit<'a>(
+        &'a self,
+        event: NotificationEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        })
+    }
+}
+
 /// Builds a ready-to-use `InteractionService` against `app`'s own
 /// pool/runtime. `known_actors` pre-registers every `(Id, handle)` this
 /// test needs `ActorHandleLookup`/`LocalActorLookup` to resolve (both the
 /// acting actor and any target-post author whose `ActorRef` this service
 /// must resolve for `Like`/`Undo` delivery). `is_follower` controls
-/// `MockRelationshipQuery`'s `private` visibility answer.
-fn service(
+/// `MockRelationshipQuery`'s `private` visibility answer. The returned
+/// [`RecordingNotificationSink`] handle lets a test assert on emitted
+/// [`NotificationEvent`]s (task 9.2); most tests ignore it (`_notifications`).
+fn build_service(
     app: &TestApp,
     known_actors: &[(Id, &str)],
     is_follower: bool,
-) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
+) -> (
+    TestService,
+    Arc<RecordingSink>,
+    Arc<RecordingSink>,
+    Arc<RecordingNotificationSink>,
+) {
     let actor_lookup = MockActorLookup::with_actors(known_actors);
     let handles: Vec<&str> = known_actors.iter().map(|(_, h)| *h).collect();
     let local_lookup = MockLocalActorLookup::with_handles(&handles);
@@ -211,6 +251,10 @@ fn service(
         })
         .unwrap_or_default();
 
+    let notifications = Arc::new(RecordingNotificationSink::new());
+    let notification_registry = NotificationSinkRegistry::new();
+    notification_registry.set_sink(Arc::clone(&notifications) as Arc<dyn NotificationEventSink>);
+
     let service = InteractionService::new(
         app.pool.clone(),
         app.runtime.clone(),
@@ -218,8 +262,36 @@ fn service(
         activity_builder,
         actor_lookup,
         MockRelationshipQuery::new(is_follower, followers),
+        notification_registry,
     );
+    (service, local_sink, http_sink, notifications)
+}
+
+/// Existing-tests-facing wrapper: identical to `build_service`, minus the
+/// notification handle most tests do not need.
+fn service(
+    app: &TestApp,
+    known_actors: &[(Id, &str)],
+    is_follower: bool,
+) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
+    let (service, local_sink, http_sink, _notifications) =
+        build_service(app, known_actors, is_follower);
     (service, local_sink, http_sink)
+}
+
+/// Task-9.2-facing wrapper: identical to `build_service`, returning the
+/// notification handle for tests that assert on emitted events.
+fn service_with_notifications(
+    app: &TestApp,
+    known_actors: &[(Id, &str)],
+    is_follower: bool,
+) -> (
+    TestService,
+    Arc<RecordingSink>,
+    Arc<RecordingSink>,
+    Arc<RecordingNotificationSink>,
+) {
+    build_service(app, known_actors, is_follower)
 }
 
 fn deliveries(local: &RecordingSink, http: &RecordingSink) -> usize {
@@ -694,6 +766,242 @@ async fn pinning_a_direct_status_is_rejected() {
         !interaction_repository::exists_pin(&app.pool, author, status.id)
             .await
             .expect("exists_pin must succeed")
+    );
+
+    app.cleanup().await;
+}
+
+// -- NotificationEvent emit (task 9.2) ---------------------------------------
+
+/// Requirements 10.1, 10.2: a new favourite emits exactly one `Favourite`
+/// `NotificationEvent`, tagged with the target author as `recipient`, the
+/// favouriting actor as `origin`, and the target status as
+/// `target_status_id`.
+#[tokio::test]
+async fn favourite_emits_a_favourite_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let fan = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_notifications(&app, &[(author, "alice"), (fan, "carol")], false);
+
+    let target = insert_test_status(&app, author, Visibility::Public).await;
+
+    service
+        .favourite(fan, target.id)
+        .await
+        .expect("favourite of a visible public status must succeed");
+
+    let events = notifications.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, NotificationType::Favourite);
+    assert_eq!(events[0].recipient, AccountRef::Local(author));
+    assert_eq!(events[0].origin, AccountRef::Local(fan));
+    assert_eq!(events[0].target_status_id, Some(target.id));
+
+    app.cleanup().await;
+}
+
+/// Requirement 10.4 / task 9.2's own idempotency requirement: favouriting
+/// the same status twice by the same actor emits exactly one
+/// `NotificationEvent`, not two — the emit call sits only on
+/// `add_favourite`'s `is_new` branch, never the already-favourited no-op
+/// branch.
+#[tokio::test]
+async fn favouriting_twice_emits_only_one_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let fan = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_notifications(&app, &[(author, "alice"), (fan, "carol")], false);
+
+    let target = insert_test_status(&app, author, Visibility::Public).await;
+
+    service
+        .favourite(fan, target.id)
+        .await
+        .expect("first favourite must succeed");
+    service
+        .favourite(fan, target.id)
+        .await
+        .expect("second (duplicate) favourite request must succeed idempotently");
+
+    assert_eq!(
+        notifications.events().len(),
+        1,
+        "a duplicate favourite must not re-emit a NotificationEvent"
+    );
+
+    app.cleanup().await;
+}
+
+/// Unfavouriting never emits a `NotificationEvent` (task 9.2's own emit
+/// list names favourite/reblog/mention/edit — not their inverses).
+#[tokio::test]
+async fn unfavourite_does_not_emit_a_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let fan = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_notifications(&app, &[(author, "alice"), (fan, "carol")], false);
+
+    let target = insert_test_status(&app, author, Visibility::Public).await;
+    service
+        .favourite(fan, target.id)
+        .await
+        .expect("favourite must succeed");
+    assert_eq!(notifications.events().len(), 1);
+
+    service
+        .unfavourite(fan, target.id)
+        .await
+        .expect("unfavourite must succeed");
+
+    assert_eq!(
+        notifications.events().len(),
+        1,
+        "unfavourite must not emit a NotificationEvent"
+    );
+
+    app.cleanup().await;
+}
+
+/// A self-favourite (favouriting your own post) does not emit a
+/// `NotificationEvent` — documented judgment call (this module's own doc
+/// comment, "Notification emit (task 9.2)").
+#[tokio::test]
+async fn self_favourite_does_not_emit_a_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_notifications(&app, &[(author, "alice")], false);
+
+    let own_status = insert_test_status(&app, author, Visibility::Public).await;
+
+    service
+        .favourite(author, own_status.id)
+        .await
+        .expect("favouriting your own status must succeed");
+
+    assert_eq!(
+        notifications.events().len(),
+        0,
+        "a self-favourite must not emit a NotificationEvent"
+    );
+
+    app.cleanup().await;
+}
+
+/// Requirements 9.1, 9.2: a new reblog emits exactly one `Reblog`
+/// `NotificationEvent`, tagged with the target author as `recipient`, the
+/// booster as `origin`, and the target status as `target_status_id`.
+#[tokio::test]
+async fn reblog_emits_a_reblog_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let booster = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_notifications(&app, &[(author, "alice"), (booster, "bob")], false);
+
+    let target = insert_test_status(&app, author, Visibility::Public).await;
+
+    service
+        .reblog(booster, target.id)
+        .await
+        .expect("reblog of a visible public status must succeed");
+
+    let events = notifications.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, NotificationType::Reblog);
+    assert_eq!(events[0].recipient, AccountRef::Local(author));
+    assert_eq!(events[0].origin, AccountRef::Local(booster));
+    assert_eq!(events[0].target_status_id, Some(target.id));
+
+    app.cleanup().await;
+}
+
+/// Requirement 9.3 / task 9.2's own idempotency requirement: reblogging the
+/// same status twice by the same actor emits exactly one `NotificationEvent`.
+#[tokio::test]
+async fn reblogging_twice_emits_only_one_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let booster = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_notifications(&app, &[(author, "alice"), (booster, "bob")], false);
+
+    let target = insert_test_status(&app, author, Visibility::Public).await;
+
+    service
+        .reblog(booster, target.id)
+        .await
+        .expect("first reblog must succeed");
+    service
+        .reblog(booster, target.id)
+        .await
+        .expect("second (duplicate) reblog request must succeed idempotently");
+
+    assert_eq!(
+        notifications.events().len(),
+        1,
+        "a duplicate reblog must not re-emit a NotificationEvent"
+    );
+
+    app.cleanup().await;
+}
+
+/// Un-reblogging never emits a `NotificationEvent` (same rationale as
+/// `unfavourite_does_not_emit_a_notification_event`).
+#[tokio::test]
+async fn unreblog_does_not_emit_a_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let booster = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_notifications(&app, &[(author, "alice"), (booster, "bob")], false);
+
+    let target = insert_test_status(&app, author, Visibility::Public).await;
+    service
+        .reblog(booster, target.id)
+        .await
+        .expect("reblog must succeed");
+    assert_eq!(notifications.events().len(), 1);
+
+    service
+        .unreblog(booster, target.id)
+        .await
+        .expect("unreblog must succeed");
+
+    assert_eq!(
+        notifications.events().len(),
+        1,
+        "unreblog must not emit a NotificationEvent"
+    );
+
+    app.cleanup().await;
+}
+
+/// A self-reblog (boosting your own post) does not emit a
+/// `NotificationEvent` — same documented judgment call as
+/// `self_favourite_does_not_emit_a_notification_event`.
+#[tokio::test]
+async fn self_reblog_does_not_emit_a_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_notifications(&app, &[(author, "alice")], false);
+
+    let own_status = insert_test_status(&app, author, Visibility::Public).await;
+
+    service
+        .reblog(author, own_status.id)
+        .await
+        .expect("reblogging your own status must succeed");
+
+    assert_eq!(
+        notifications.events().len(),
+        0,
+        "a self-reblog must not emit a NotificationEvent"
     );
 
     app.cleanup().await;

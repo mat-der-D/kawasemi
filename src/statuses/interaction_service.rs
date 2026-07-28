@@ -131,6 +131,31 @@
 //! `migrations/0007_statuses.sql` has a bookmark/pin counter column at all)
 //! and no `activity_builder` method of any kind, not even a best-effort one.
 //!
+//! ## Notification emit (task 9.2, Requirements 9.1, 9.2, 10.1, 13.2)
+//! [`reblog`](InteractionService::reblog)/[`favourite`](InteractionService::favourite)
+//! each emit exactly one [`crate::statuses::notification_sink::NotificationEvent`]
+//! to this service's own [`crate::statuses::notification_sink::NotificationSinkRegistry`]
+//! (default [`crate::statuses::notification_sink::NoopSink`] — see that
+//! module's own doc comment for why the type/trait live in this spec's
+//! boundary rather than notifications', which owns the contract but has no
+//! implemented tasks yet), placed only on the branch that records a
+//! genuinely *new* state transition (`reblog`'s `find_reblog`-miss branch,
+//! `favourite`'s `add_favourite`-`is_new` branch) — never on
+//! `unreblog`/`unfavourite`'s revoke path, and never on the already-
+//! favourited/already-reblogged idempotent no-op branch, so a duplicate
+//! call never re-emits. Both skip a self-interaction (favouriting/
+//! reblogging your own post) — a documented judgment call, see `reblog`'s
+//! own inline comment. **Known asymmetry (out of this task's `_Boundary:
+//! InteractionService, StatusService, PollService_`)**: `inbound_handlers.rs`'s
+//! `AnnounceHandler`/`LikeHandler` (task 6.1) record a remote actor's
+//! reblog/favourite of a local post via the *same* repository functions
+//! this service calls, but bypass this service entirely (see that module's
+//! own doc comment) — so a remotely-received reblog/favourite does not
+//! currently emit a `NotificationEvent`, even though notifications/
+//! design.md's own invariant calls for symmetric local/remote emission
+//! (5.1, 5.2). Wiring that path is `inbound_handlers.rs`'s task, not this
+//! one's.
+//!
 //! ## `unreblog`/`unfavourite` return the (fresh) target/original status
 //! (documented choice)
 //! Neither method's caller-visible return type distinguishes "a boost/
@@ -151,14 +176,17 @@ mod tests;
 use sqlx::postgres::PgPool;
 
 use crate::api::pagination::{Page, PageParams};
-use crate::domain::{Id, Visibility};
-use crate::error::AppError;
+use crate::domain::{AccountRef, Id, Visibility};
+use crate::error::{AppError, ErrorKind};
 use crate::federation::{ActorUrls, DeliverySink, LocalActorLookup, ObjectKind, Recipient};
 use crate::runtime::RuntimeContext;
 use crate::statuses::activity_builder::{ActorHandleLookup, StatusActivityBuilder, UndoKind};
 use crate::statuses::addressing::{self, ActorRef, Addressing};
 use crate::statuses::interaction_repository;
 use crate::statuses::model::Status;
+use crate::statuses::notification_sink::{
+    NotificationEvent, NotificationSinkRegistry, NotificationType,
+};
 use crate::statuses::status_repository::{self, CountKind};
 use crate::statuses::visibility::{self, RelationshipQuery};
 use axum::http::StatusCode;
@@ -194,6 +222,7 @@ where
     activity_builder: StatusActivityBuilder<A, D, L, H>,
     actor_lookup: A,
     relationship: R,
+    notifications: NotificationSinkRegistry,
 }
 
 impl<A, D, L, H, R> InteractionService<A, D, L, H, R>
@@ -211,8 +240,11 @@ where
     /// `activity_builder` (Activity generation + delivery, task 4.1),
     /// `actor_lookup` ([`ActorHandleLookup`], resolving a reblog/favourite
     /// *target*'s author to an [`ActorRef`] — see this module's doc comment,
-    /// "Resolving a target's author is local-only"), and `relationship`
-    /// ([`RelationshipQuery`], task 3.1).
+    /// "Resolving a target's author is local-only"), `relationship`
+    /// ([`RelationshipQuery`], task 3.1), and `notifications`
+    /// ([`NotificationSinkRegistry`], task 9.2 — see this module's doc
+    /// comment, "Notification emit (task 9.2)").
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
         runtime: RuntimeContext,
@@ -220,6 +252,7 @@ where
         activity_builder: StatusActivityBuilder<A, D, L, H>,
         actor_lookup: A,
         relationship: R,
+        notifications: NotificationSinkRegistry,
     ) -> Self {
         Self {
             pool,
@@ -228,6 +261,7 @@ where
             activity_builder,
             actor_lookup,
             relationship,
+            notifications,
         }
     }
 
@@ -254,6 +288,31 @@ where
             uri,
             recipient: Recipient::Local(handle),
         })
+    }
+
+    /// Tags `actor_id` [`AccountRef::Local`]/`Remote` for a
+    /// [`NotificationEvent`] (task 9.2) — reuses this service's own
+    /// [`ActorHandleLookup`] (the same local-only port `actor_ref_for`
+    /// already depends on), but unlike `actor_ref_for` does not fail
+    /// outright when `actor_id` does not resolve locally: a "not found
+    /// locally" ([`ErrorKind::Client`]) result maps to
+    /// [`AccountRef::Remote`] rather than propagating, because
+    /// `reblog`'s own `Announce` dispatch (unlike `favourite`/`unfavourite`/
+    /// `unreblog`) never resolves the target author at all (see this
+    /// module's doc comment, "`reblog`'s own delivery addressing..."), so a
+    /// remote-authored reblog target must still be taggable rather than
+    /// aborting the whole call. A genuine [`ErrorKind::Server`] failure
+    /// still propagates. See notifications/design.md's own invariant
+    /// ("上流はローカル発生・受信のいずれの経路でも...emit する（対称）",
+    /// "受信者がローカルアクターでないイベントは通知化されない" —
+    /// non-local-recipient filtering is `NotificationGenerator`'s job
+    /// downstream, not this emit call site's).
+    async fn account_ref_for_notification(&self, actor_id: Id) -> Result<AccountRef, AppError> {
+        match self.actor_lookup.resolve_handle(actor_id).await {
+            Ok(_) => Ok(AccountRef::Local(actor_id)),
+            Err(err) if err.kind == ErrorKind::Client => Ok(AccountRef::Remote(actor_id)),
+            Err(err) => Err(err),
+        }
     }
 
     /// Derives a freshly-created `status` (here: always a reblog row, which
@@ -329,6 +388,28 @@ where
             .deliver_announce(&reblog, &target, &addressing, recipients)
             .await?;
 
+        // Task 9.2: emit exactly once per *new* boost — this branch is only
+        // reached past the `find_reblog` duplicate-check's early return
+        // above, so a repeat `reblog` call by the same actor never re-emits
+        // (see this module's doc comment, "Notification emit (task 9.2)").
+        // Skipped for a self-reblog (boosting your own post) — notifying an
+        // actor about their own action is not a real notification-worthy
+        // event; no spec text covers this case either way, so this is a
+        // documented judgment call, applied consistently to `favourite`
+        // below.
+        if actor_id != target.actor_id {
+            let recipient = self.account_ref_for_notification(target.actor_id).await?;
+            self.notifications
+                .emit(NotificationEvent {
+                    recipient,
+                    origin: AccountRef::Local(actor_id),
+                    kind: NotificationType::Reblog,
+                    target_status_id: Some(target.id),
+                    occurred_at: now,
+                })
+                .await?;
+        }
+
         Ok(reblog)
     }
 
@@ -385,6 +466,27 @@ where
             self.activity_builder
                 .deliver_like(actor_id, &target, recipient)
                 .await?;
+
+            // Task 9.2: emit exactly once per *new* favourite — this branch
+            // only runs when `add_favourite` reports `is_new` (Requirement
+            // 10.4's own duplicate-favourite no-op already guards this), so
+            // a repeat `favourite` call by the same actor never re-emits.
+            // `target.actor_id` is guaranteed local here: `actor_ref_for`
+            // above (this service's only `Id -> Handle` port, local-only)
+            // already succeeded, so unlike `reblog` this does not need
+            // `account_ref_for_notification`'s Local/Remote fallback. See
+            // `reblog`'s own comment for the self-favourite skip rationale.
+            if actor_id != target.actor_id {
+                self.notifications
+                    .emit(NotificationEvent {
+                        recipient: AccountRef::Local(target.actor_id),
+                        origin: AccountRef::Local(actor_id),
+                        kind: NotificationType::Favourite,
+                        target_status_id: Some(target.id),
+                        occurred_at: now,
+                    })
+                    .await?;
+            }
         }
 
         status_repository::find_by_id(&self.pool, status_id)

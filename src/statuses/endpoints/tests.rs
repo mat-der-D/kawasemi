@@ -298,6 +298,7 @@ fn build_state(
         ),
         relationship.clone(),
         actor_lookup.clone(),
+        crate::statuses::notification_sink::NotificationSinkRegistry::new(),
     ));
 
     let interaction_service = Arc::new(InteractionService::new(
@@ -316,6 +317,7 @@ fn build_state(
         ),
         actor_lookup.clone(),
         relationship.clone(),
+        crate::statuses::notification_sink::NotificationSinkRegistry::new(),
     ));
 
     let poll_service = Arc::new(PollService::new(

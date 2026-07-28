@@ -170,6 +170,57 @@
 //! flagged here and in this task's status report rather than guessed past
 //! with an invented resolution mechanism.
 //!
+//! ## Notification emit (task 9.2, Requirements 9.1, 9.2, 10.1, 13.2)
+//! [`create_status`](StatusService::create_status) emits one `Mention`
+//! [`crate::statuses::notification_sink::NotificationEvent`] per resolved
+//! *local* mention (see "Mention resolution: local only" above — a remote-
+//! domain mention, never resolved to an [`ActorRef`]/[`Id`] in the first
+//! place, cannot be tagged and is silently excluded from this emit loop,
+//! the identical structural gap that section already documents, not a new
+//! one) to this service's own
+//! [`crate::statuses::notification_sink::NotificationSinkRegistry`]
+//! (default [`crate::statuses::notification_sink::NoopSink`] — see that
+//! module's own doc comment for why the type/trait live in this spec's
+//! boundary rather than notifications', which owns the contract but has no
+//! implemented tasks yet). Runs exactly once per `create_status` call
+//! (idempotent re-sends short-circuit earlier, at the
+//! `IdempotencyLookup::Existing` branch, before this code is ever reached),
+//! and skips a self-mention (documented judgment call, see
+//! `InteractionService`'s identical `reblog`/`favourite` self-interaction
+//! skip for the same reasoning).
+//!
+//! **Edit notification: not implemented (documented judgment call)**. The
+//! task text's own "（任意で）edit" marks an edit-triggered notification
+//! discretionary, unlike favourite/reblog/mention. Unlike those three —
+//! each with one structurally obvious recipient (the target's author, or
+//! the mentioned actor) — an edit's real-world Mastodon-equivalent
+//! notification (`NotificationType::Update`) fans out to every distinct
+//! account that previously favourited/reblogged/participated in the edited
+//! post's thread, none of which this task's boundary
+//! (`StatusService`/`InteractionService`/`PollService`) can enumerate
+//! without a cross-table join this task was not asked to design. Rather
+//! than invent a single-recipient interpretation not grounded in either
+//! spec, [`edit_status`](StatusService::edit_status) emits nothing —
+//! flagged here for a future task that wants to design that fan-out.
+//!
+//! **`PollService::vote`: intentionally not touched.** Requirement 13.2 is
+//! cited by this task only as the "投票が記録された" trigger for the
+//! already-implemented `deliver_vote` Activity dispatch — the task's own
+//! emit list (favourite/reblog/mention/edit) does not name poll votes, and
+//! `NotificationType::Poll` (per this spec's and notifications/design.md's
+//! own semantics) corresponds to a poll *ending*, not each individual
+//! vote — a trigger the task text itself defers ("poll-end は...本 spec・
+//! 現行 federation-core に存在しない...MVP では emit しない"). No change to
+//! `poll_service.rs`.
+//!
+//! **Known asymmetry (out of this task's boundary)**: `inbound_handlers.rs`
+//! (task 6.1) ingests a remote `Create(Note)` without persisting mentions
+//! at all (`ExtractedTokens::mentions` stays private — see that module's
+//! own doc comment), so a remote post mentioning a local actor does not
+//! currently emit a `NotificationEvent` either. See
+//! `InteractionService`'s doc comment ("Notification emit") for the
+//! identical asymmetry on the reblog/favourite side.
+//!
 //! ## Emoji shortcode extraction: extracted, not yet consumed (CONCERN)
 //! [`extract_content_tokens`] extracts `:shortcode:` tokens per Requirement
 //! 3.6's literal text, but nothing in this task's own boundary consumes
@@ -192,7 +243,7 @@ use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
 use crate::actor::{ActorDirectory, Handle};
-use crate::domain::{Id, Visibility};
+use crate::domain::{AccountRef, Id, Visibility};
 use crate::error::AppError;
 use crate::federation::{ActorUrls, DeliverySink, LocalActorLookup, ObjectKind, Recipient};
 use crate::media::media_repository;
@@ -201,6 +252,9 @@ use crate::statuses::activity_builder::{ActorHandleLookup, StatusActivityBuilder
 use crate::statuses::addressing::{self, ActorRef, Addressing};
 use crate::statuses::idempotency::{self, IdempotencyLookup};
 use crate::statuses::model::{Status, StatusEdit, Tag};
+use crate::statuses::notification_sink::{
+    NotificationEvent, NotificationSinkRegistry, NotificationType,
+};
 use crate::statuses::status_repository::{self, CountKind};
 use crate::statuses::tag_repository;
 use crate::statuses::visibility::{self, RelationshipQuery};
@@ -434,6 +488,7 @@ where
     activity_builder: StatusActivityBuilder<A, D, L, H>,
     relationship: R,
     mentions: M,
+    notifications: NotificationSinkRegistry,
 }
 
 impl<A, D, L, H, R, M> StatusService<A, D, L, H, R, M>
@@ -451,8 +506,10 @@ where
     /// same-domain mention as local, Requirement 3.6/4.2), `urls` (local
     /// object URI construction, e.g. a freshly-created post's own `uri`),
     /// `activity_builder` (Activity generation + delivery, task 4.1),
-    /// `relationship` ([`RelationshipQuery`], task 3.1), and `mentions`
-    /// ([`MentionLookup`], this task).
+    /// `relationship` ([`RelationshipQuery`], task 3.1), `mentions`
+    /// ([`MentionLookup`], this task), and `notifications`
+    /// ([`NotificationSinkRegistry`], task 9.2 — see this module's doc
+    /// comment, "Notification emit (task 9.2)").
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
@@ -462,6 +519,7 @@ where
         activity_builder: StatusActivityBuilder<A, D, L, H>,
         relationship: R,
         mentions: M,
+        notifications: NotificationSinkRegistry,
     ) -> Self {
         Self {
             pool,
@@ -471,6 +529,7 @@ where
             activity_builder,
             relationship,
             mentions,
+            notifications,
         }
     }
 
@@ -496,12 +555,21 @@ where
     /// [`edit_status`](Self::edit_status) all funnel through. See this
     /// module's doc comment ("Mention resolution: local only") for which
     /// mentions resolve to a real recipient.
+    ///
+    /// Also returns the [`Id`]s of every mention that resolved to a
+    /// registered local actor, in the same order as `mention_refs` (task
+    /// 9.2, "Notification emit"): [`create_status`](Self::create_status) is
+    /// the only caller that consumes this third element (to emit a
+    /// `Mention` [`NotificationEvent`] per resolved recipient) —
+    /// [`delete_status`](Self::delete_status)/[`edit_status`](Self::edit_status)
+    /// ignore it, since neither emits a mention notification.
     async fn build_addressing(
         &self,
         status: &Status,
         mentions: &[Mention],
-    ) -> Result<(Addressing, Vec<Recipient>), AppError> {
+    ) -> Result<(Addressing, Vec<Recipient>, Vec<Id>), AppError> {
         let mut mention_refs = Vec::with_capacity(mentions.len());
+        let mut mention_ids = Vec::with_capacity(mentions.len());
         for mention in mentions {
             if let Some(domain) = &mention.domain
                 && !domain.eq_ignore_ascii_case(&self.domain)
@@ -513,14 +581,15 @@ where
             let Ok(handle) = Handle::new(mention.local.clone()) else {
                 continue; // not a syntactically valid local handle
             };
-            if self.mentions.resolve_local_handle(&handle).await?.is_none() {
+            let Some(mentioned_id) = self.mentions.resolve_local_handle(&handle).await? else {
                 continue; // no local actor registered under this handle
-            }
+            };
             let uri = self.urls.actor_url(&handle);
             mention_refs.push(ActorRef {
                 uri,
                 recipient: Recipient::Local(handle),
             });
+            mention_ids.push(mentioned_id);
         }
 
         let followers = self.relationship.followers_of(status.actor_id).await?;
@@ -532,7 +601,7 @@ where
 
         let addressing = addressing::derive_addressing(status, &mention_refs, &followers_uri);
         let recipients = addressing::derive_recipients(&addressing, &mention_refs, &followers);
-        Ok((addressing, recipients))
+        Ok((addressing, recipients, mention_ids))
     }
 
     /// Persists every hashtag [`extract_content_tokens`] found in
@@ -672,10 +741,36 @@ where
             status_repository::adjust_counts(&self.pool, parent_id, CountKind::Replies, 1).await?;
         }
 
-        let (addressing, recipients) = self.build_addressing(&status, &extracted.mentions).await?;
+        let (addressing, recipients, mentioned_ids) =
+            self.build_addressing(&status, &extracted.mentions).await?;
         self.activity_builder
             .deliver_create(&status, &addressing, recipients, in_reply_to_uri.as_deref())
             .await?;
+
+        // Task 9.2: emit one `Mention` NotificationEvent per resolved local
+        // mention (Requirement 3.6's extraction, "Mention resolution: local
+        // only" above). One event per distinct mentioned actor — no
+        // duplication risk: `extract_content_tokens` already dedupes
+        // mentions by exact token text, and this runs exactly once, on
+        // creation, never on a later re-fetch/re-render of the same post.
+        // Skips a self-mention (mentioning your own handle) — see
+        // `InteractionService`'s identical self-interaction skip for
+        // `reblog`/`favourite` (same documented judgment call, applied
+        // consistently here).
+        for mentioned_id in mentioned_ids {
+            if mentioned_id == actor_id {
+                continue;
+            }
+            self.notifications
+                .emit(NotificationEvent {
+                    recipient: AccountRef::Local(mentioned_id),
+                    origin: AccountRef::Local(actor_id),
+                    kind: NotificationType::Mention,
+                    target_status_id: Some(status.id),
+                    occurred_at: now,
+                })
+                .await?;
+        }
 
         if let Some(key) = idem {
             idempotency::bind(&self.pool, actor_id, key, status.id, now).await?;
@@ -757,7 +852,11 @@ where
         status_repository::delete_status(&self.pool, id).await?;
 
         let extracted = extract_content_tokens(&status.content);
-        let (addressing, recipients) = self.build_addressing(&status, &extracted.mentions).await?;
+        // `_mentioned_ids` unused here: deletion emits no `NotificationEvent`
+        // (out of task 9.2's own emit list — favourite/reblog/mention/edit
+        // — none of which "delete" is).
+        let (addressing, recipients, _mentioned_ids) =
+            self.build_addressing(&status, &extracted.mentions).await?;
         self.activity_builder
             .deliver_delete(&status, &addressing, recipients)
             .await?;
@@ -824,7 +923,12 @@ where
         };
 
         let extracted = extract_content_tokens(&updated.content);
-        let (addressing, recipients) = self.build_addressing(&updated, &extracted.mentions).await?;
+        // `_mentioned_ids` unused here — see this module's doc comment
+        // ("Notification emit (task 9.2)", "Edit notification: not
+        // implemented") for why `edit_status` does not emit a
+        // `NotificationEvent` despite the task text's "（任意で）edit".
+        let (addressing, recipients, _mentioned_ids) =
+            self.build_addressing(&updated, &extracted.mentions).await?;
         self.activity_builder
             .deliver_update(
                 &updated,

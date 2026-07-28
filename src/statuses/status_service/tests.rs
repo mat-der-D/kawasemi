@@ -30,6 +30,7 @@ use crate::federation::outbound::target::{DeliveryTarget, RecipientTargetResolve
 use crate::federation::{CanonicalActivity, DeliveryService};
 use crate::media::model::{Focus, Media, MediaState, MediaType};
 use crate::runtime::{DeterministicSeed, SeqIdGenerator};
+use crate::statuses::notification_sink::NotificationEventSink;
 use crate::statuses::visibility::ViewerRelation;
 use crate::test_harness::{TestApp, spawn_test_app};
 
@@ -203,19 +204,65 @@ type TestService = StatusService<
     MockActorLookup,
 >;
 
+/// Records every [`NotificationEventSink::emit`] call — mirrors
+/// `RecordingSink`'s identical "capture every call" shape, for task 9.2's
+/// own emit-site tests.
+struct RecordingNotificationSink {
+    events: Mutex<Vec<NotificationEvent>>,
+}
+
+impl RecordingNotificationSink {
+    fn new() -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn events(&self) -> Vec<NotificationEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl NotificationEventSink for RecordingNotificationSink {
+    fn emit<'a>(
+        &'a self,
+        event: NotificationEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        })
+    }
+}
+
 /// Builds a ready-to-use `StatusService` against `app`'s own pool/runtime,
 /// with `author_id` pre-registered under `author_handle` (so
-/// `deliver_create`/`deliver_delete`/`deliver_update` can resolve a sender)
-/// and `is_follower` controlling `MockRelationshipQuery`'s `private`
-/// visibility answer.
-fn service(
+/// `deliver_create`/`deliver_delete`/`deliver_update` can resolve a sender),
+/// plus every `(Id, handle)` in `extra_actors` also registered (task 9.2's
+/// own mention-notification tests need a second, independently-resolvable
+/// local actor as the mention target — most callers pass `&[]`), and
+/// `is_follower` controlling `MockRelationshipQuery`'s `private` visibility
+/// answer. The returned [`NotificationSinkRegistry`]-backed
+/// [`RecordingNotificationSink`] handle lets a test assert on emitted
+/// [`NotificationEvent`]s (task 9.2); most tests ignore it (`_notifications`).
+fn build_service(
     app: &TestApp,
     author_id: Id,
     author_handle: &str,
+    extra_actors: &[(Id, &str)],
     is_follower: bool,
-) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
-    let actor_lookup = MockActorLookup::with_actors(&[(author_id, author_handle)]);
-    let local_lookup = MockLocalActorLookup::with_handles(&[author_handle]);
+) -> (
+    TestService,
+    Arc<RecordingSink>,
+    Arc<RecordingSink>,
+    Arc<RecordingNotificationSink>,
+) {
+    let mut known_actors = vec![(author_id, author_handle)];
+    known_actors.extend_from_slice(extra_actors);
+    let actor_lookup = MockActorLookup::with_actors(&known_actors);
+    let handles: Vec<&str> = known_actors.iter().map(|(_, h)| *h).collect();
+    let local_lookup = MockLocalActorLookup::with_handles(&handles);
     let local_sink = Arc::new(RecordingSink::new());
     let http_sink = Arc::new(RecordingSink::new());
     let delivery = DeliveryService::new(
@@ -238,6 +285,10 @@ fn service(
         Handle::new(author_handle).expect("valid test handle"),
     )];
 
+    let notifications = Arc::new(RecordingNotificationSink::new());
+    let notification_registry = NotificationSinkRegistry::new();
+    notification_registry.set_sink(Arc::clone(&notifications) as Arc<dyn NotificationEventSink>);
+
     let service = StatusService::new(
         app.pool.clone(),
         app.runtime.clone(),
@@ -246,8 +297,41 @@ fn service(
         activity_builder,
         MockRelationshipQuery::new(is_follower, followers),
         actor_lookup,
+        notification_registry,
     );
+    (service, local_sink, http_sink, notifications)
+}
+
+/// Existing-tests-facing wrapper: identical to `build_service`, minus the
+/// notification handle most tests do not need and with no extra
+/// mention-target actors.
+fn service(
+    app: &TestApp,
+    author_id: Id,
+    author_handle: &str,
+    is_follower: bool,
+) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
+    let (service, local_sink, http_sink, _notifications) =
+        build_service(app, author_id, author_handle, &[], is_follower);
     (service, local_sink, http_sink)
+}
+
+/// Mention-notification-facing wrapper: identical to `build_service`,
+/// additionally registering `extra_actors` (task 9.2's own mention target)
+/// and returning the notification handle.
+fn service_with_mentions(
+    app: &TestApp,
+    author_id: Id,
+    author_handle: &str,
+    extra_actors: &[(Id, &str)],
+    is_follower: bool,
+) -> (
+    TestService,
+    Arc<RecordingSink>,
+    Arc<RecordingSink>,
+    Arc<RecordingNotificationSink>,
+) {
+    build_service(app, author_id, author_handle, extra_actors, is_follower)
 }
 
 fn create_input(content: &str, visibility: Visibility) -> CreateStatus {
@@ -1025,6 +1109,222 @@ async fn source_returns_raw_text_and_spoiler_and_is_owner_scoped() {
         .await
         .expect_err("a non-owner must not be able to fetch another actor's source");
     assert_eq!(err.status, StatusCode::NOT_FOUND);
+
+    app.cleanup().await;
+}
+
+// -- NotificationEvent emit (task 9.2) ---------------------------------------
+
+/// Requirement 3.6 / task 9.2: a post mentioning a registered local actor
+/// emits exactly one `Mention` `NotificationEvent`, tagged with the
+/// mentioned actor as `recipient`, the posting actor as `origin`, and the
+/// new status as `target_status_id`.
+#[tokio::test]
+async fn create_status_with_a_local_mention_emits_a_mention_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let mentioned = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_mentions(&app, author, "alice", &[(mentioned, "bob")], false);
+
+    let status = service
+        .create_status(
+            author,
+            create_input("hello @bob, welcome!", Visibility::Public),
+            None,
+        )
+        .await
+        .expect("create_status with a valid local mention must succeed");
+
+    let events = notifications.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, NotificationType::Mention);
+    assert_eq!(events[0].recipient, AccountRef::Local(mentioned));
+    assert_eq!(events[0].origin, AccountRef::Local(author));
+    assert_eq!(events[0].target_status_id, Some(status.id));
+
+    app.cleanup().await;
+}
+
+/// A post mentioning two distinct registered local actors emits one
+/// `Mention` `NotificationEvent` per mentioned actor.
+#[tokio::test]
+async fn create_status_with_two_local_mentions_emits_two_mention_notification_events() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let bob = app.runtime.ids.next_id();
+    let carol = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) = service_with_mentions(
+        &app,
+        author,
+        "alice",
+        &[(bob, "bob"), (carol, "carol")],
+        false,
+    );
+
+    service
+        .create_status(
+            author,
+            create_input("hey @bob and @carol", Visibility::Public),
+            None,
+        )
+        .await
+        .expect("create_status with two valid local mentions must succeed");
+
+    let events = notifications.events();
+    assert_eq!(events.len(), 2);
+    let recipients: std::collections::HashSet<AccountRef> =
+        events.iter().map(|e| e.recipient).collect();
+    assert!(recipients.contains(&AccountRef::Local(bob)));
+    assert!(recipients.contains(&AccountRef::Local(carol)));
+    assert!(events.iter().all(|e| e.kind == NotificationType::Mention));
+
+    app.cleanup().await;
+}
+
+/// Requirement 5.1's own "Mention resolution: local only" gap: a mention
+/// naming a different domain is extracted but never resolved to a local
+/// actor, so it emits no `NotificationEvent` (there is no `Id` to tag it
+/// with).
+#[tokio::test]
+async fn create_status_with_a_remote_domain_mention_emits_no_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_mentions(&app, author, "alice", &[], false);
+
+    service
+        .create_status(
+            author,
+            create_input("hi @bob@remote.example", Visibility::Direct),
+            None,
+        )
+        .await
+        .expect("create_status with an unresolvable remote mention must still succeed");
+
+    assert!(
+        notifications.events().is_empty(),
+        "a remote-domain mention must not emit a NotificationEvent (never resolved to an Id)"
+    );
+
+    app.cleanup().await;
+}
+
+/// A self-mention (mentioning your own handle) does not emit a
+/// `NotificationEvent` — documented judgment call (this module's own doc
+/// comment, "Notification emit (task 9.2)").
+#[tokio::test]
+async fn create_status_with_a_self_mention_emits_no_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_mentions(&app, author, "alice", &[], false);
+
+    service
+        .create_status(
+            author,
+            create_input("talking to myself @alice", Visibility::Public),
+            None,
+        )
+        .await
+        .expect("create_status with a self-mention must succeed");
+
+    assert!(
+        notifications.events().is_empty(),
+        "a self-mention must not emit a NotificationEvent"
+    );
+
+    app.cleanup().await;
+}
+
+/// task 9.2's own idempotency requirement: a resend under the same
+/// `(actor, idempotency key)` (Requirements 5.1, 5.2) must not re-emit a
+/// `Mention` `NotificationEvent` — the idempotent-resend branch returns
+/// early, before `create_status`'s mention-emit loop is ever reached.
+#[tokio::test]
+async fn idempotent_resubmission_does_not_re_emit_a_mention_notification_event() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let mentioned = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_mentions(&app, author, "alice", &[(mentioned, "bob")], false);
+
+    service
+        .create_status(
+            author,
+            create_input("hi @bob", Visibility::Public),
+            Some("client-key-1"),
+        )
+        .await
+        .expect("first create_status must succeed");
+    service
+        .create_status(
+            author,
+            create_input("a different body — must be ignored", Visibility::Public),
+            Some("client-key-1"),
+        )
+        .await
+        .expect("resend with the same idempotency key must succeed, not create a new post");
+
+    assert_eq!(
+        notifications.events().len(),
+        1,
+        "an idempotent resend must not re-emit a Mention NotificationEvent"
+    );
+
+    app.cleanup().await;
+}
+
+/// `delete_status`/`edit_status` never emit a `NotificationEvent` (delete:
+/// out of task 9.2's own emit list; edit: a documented "not implemented"
+/// judgment call — see this module's doc comment, "Notification emit (task
+/// 9.2)").
+#[tokio::test]
+async fn delete_and_edit_do_not_emit_notification_events() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let (service, _local, _http, notifications) =
+        service_with_mentions(&app, author, "alice", &[], false);
+
+    let status = service
+        .create_status(
+            author,
+            create_input("hello world", Visibility::Public),
+            None,
+        )
+        .await
+        .expect("create_status must succeed");
+    // The create itself emitted no events (no mentions in this content).
+    assert_eq!(notifications.events().len(), 0);
+
+    service
+        .edit_status(
+            author,
+            status.id,
+            EditStatus {
+                content: "edited body".to_string(),
+                spoiler_text: String::new(),
+                sensitive: false,
+                media_ids: Vec::new(),
+            },
+        )
+        .await
+        .expect("edit_status must succeed");
+    assert_eq!(
+        notifications.events().len(),
+        0,
+        "edit_status must not emit a NotificationEvent"
+    );
+
+    service
+        .delete_status(author, status.id)
+        .await
+        .expect("delete_status must succeed");
+    assert_eq!(
+        notifications.events().len(),
+        0,
+        "delete_status must not emit a NotificationEvent"
+    );
 
     app.cleanup().await;
 }

@@ -188,6 +188,7 @@ pub mod ingest_service;
 pub mod interaction_repository;
 pub mod interaction_service;
 pub mod model;
+pub mod notification_sink;
 pub mod poll_repository;
 pub mod poll_service;
 pub mod serializer;
@@ -220,6 +221,7 @@ use crate::statuses::activity_builder::StatusActivityBuilder;
 use crate::statuses::endpoints::StatusesEndpointsState;
 use crate::statuses::inbound_handlers::{RemoteActorResolver, StatusInboundDeps};
 use crate::statuses::interaction_service::InteractionService;
+use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::poll_service::PollService;
 use crate::statuses::status_service::StatusService;
 use crate::statuses::visibility::NoRelationshipQuery;
@@ -430,6 +432,7 @@ pub struct StatusesModule {
     status_service: Arc<ConcreteStatusService>,
     interaction_service: Arc<ConcreteInteractionService>,
     poll_service: Arc<ConcretePollService>,
+    notifications: NotificationSinkRegistry,
 }
 
 impl StatusesModule {
@@ -446,6 +449,17 @@ impl StatusesModule {
     /// The shared `PollService` handle.
     pub fn poll_service(&self) -> Arc<ConcretePollService> {
         Arc::clone(&self.poll_service)
+    }
+
+    /// The shared [`NotificationSinkRegistry`] handle (task 9.2) — cheap to
+    /// clone (mirrors `crate::accounts::AccountsModule::ports()`'s identical
+    /// shape). A future notifications spec's own bootstrap calls
+    /// `.set_sink(...)` on the clone returned here to swap in its real
+    /// `NotificationEventSink` implementation, reaching every `emit` call
+    /// site this module's `status_service`/`interaction_service` already
+    /// hold without touching either service's call sites.
+    pub fn notification_sink_registry(&self) -> NotificationSinkRegistry {
+        self.notifications.clone()
     }
 }
 
@@ -473,6 +487,12 @@ pub fn build_statuses_module(
 ) -> StatusesModule {
     let domain = domain.into();
     let urls = ActorUrls::new(domain.clone());
+    // One shared registry (task 9.2) — `status_service`/`interaction_service`
+    // each hold a clone of this *same* instance so a single future
+    // `set_sink` call (via `StatusesModule::notification_sink_registry`)
+    // reaches every emit call site at once, defaulting to `NoopSink` until
+    // then.
+    let notifications = NotificationSinkRegistry::new();
 
     let status_builder = ConcreteStatusActivityBuilder::new(
         urls.clone(),
@@ -501,6 +521,7 @@ pub fn build_statuses_module(
         status_builder,
         NoRelationshipQuery,
         ActorDirectory::new(pool.clone()),
+        notifications.clone(),
     ));
 
     let interaction_service = Arc::new(InteractionService::new(
@@ -510,6 +531,7 @@ pub fn build_statuses_module(
         interaction_builder,
         ActorDirectory::new(pool.clone()),
         NoRelationshipQuery,
+        notifications.clone(),
     ));
 
     let poll_service = Arc::new(PollService::new(
@@ -525,6 +547,7 @@ pub fn build_statuses_module(
         status_service,
         interaction_service,
         poll_service,
+        notifications,
     }
 }
 
