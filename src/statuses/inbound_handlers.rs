@@ -185,8 +185,8 @@
 //! carries, so it is silently dropped on that path, matching Requirement
 //! 15.2's "未知の方言プロパティ...解釈せず継続".
 //!
-//! ## Idempotent re-delivery: `Create(Note)` only; `record_vote`'s own
-//! duplicate-vote rejection is left to propagate (documented judgment call)
+//! ## Idempotent re-delivery, `Create(Note)` and vote branch alike (revised
+//! by task 8.1's integration tests — see below)
 //! [`CreateNoteHandler`]'s ordinary (non-vote) ingestion path checks
 //! [`status_repository::find_by_uri`] first and returns
 //! [`HandleOutcome::Handled`] with no further action if a `Status` under that
@@ -195,21 +195,57 @@
 //! `Announce`/`Like`'s own repository calls
 //! ([`interaction_repository::find_reblog`]/[`interaction_repository::add_favourite`]'s
 //! `ON CONFLICT DO NOTHING`) are already naturally idempotent the same way.
-//! The vote branch is the one exception: a redelivered vote `Create` calls
-//! [`poll_repository::record_vote`] a second time, which rejects it as a
-//! duplicate vote (`422`) — that `AppError` is allowed to propagate
-//! unchanged rather than being caught and silently converted to `Handled`,
-//! mirroring `poll_service.rs`'s own documented philosophy ("Any rejection
-//! ... propagates ... never silently swallowed") applied one layer up, to
-//! the inbound path. Flagged here as a CONCERN per this task's own
-//! instructions: a literal re-delivery of the identical vote Activity is
-//! rare in practice (federation-core's own `ReceivedActivityStore` already
-//! deduplicates by Activity `id` before this dispatcher is ever reached,
-//! `dispatcher.rs`'s own doc comment, "Idempotency is the caller's
-//! responsibility") but not structurally impossible (e.g. two *different*
-//! vote Activities naming the same option, redelivered under different
-//! Activity ids) — this handler does not add a second application-level
-//! idempotency layer on top of `record_vote`'s own.
+//!
+//! The vote branch ([`CreateNoteHandler::try_record_vote`]) was originally
+//! left as a documented exception here — a redelivered vote `Create` would
+//! call [`poll_repository::record_vote`] a second time, rejecting it as a
+//! duplicate vote (`422`), and that `AppError` was allowed to propagate
+//! unchanged, on the theory that a literal re-delivery of the identical
+//! vote Activity is rare. Task 8.1's own integration tests
+//! (`tests/polls_it.rs`) found this was not merely a rare-redelivery risk
+//! but a **deterministic, always-reproducible failure** for the single most
+//! common case: an actor voting on a poll whose owning `Status` is authored
+//! by a **local** actor. `PollService::vote` records the vote directly
+//! (`poll_repository::record_vote`), then calls
+//! `StatusActivityBuilder::deliver_vote` to notify the poll's author; when
+//! that author is local, `DeliveryService::deliver`'s local-recipient path
+//! (federation-core, task 4.1/5.3's synchronous, in-process delivery
+//! architecture — out of this spec's boundary to change) dispatches the
+//! notification `Create{Note,name=...}` back to this exact dispatcher
+//! *within the same request*, landing here a moment after the direct call
+//! already wrote the identical `poll_votes` row. `record_vote`'s duplicate
+//! check correctly reports "already voted" — but that `AppError`, left to
+//! propagate, then bubbles all the way back up through
+//! `local_sink.dispatch(...).await?` inside `deliver()`, through
+//! `deliver_vote`, into `PollService::vote`'s own `self.activity_builder
+//! .deliver_vote(...).await?`, turning an already fully-recorded,
+//! successful vote into a spurious `422` returned to the voter who just
+//! made it — a direct violation of Requirement 13.2 ("有効な選択肢で投票し
+//! たとき...投票を記録し、更新後の集計を反映した Poll を返す") for the
+//! common local-poll case, not an edge case.
+//!
+//! [`CreateNoteHandler::try_record_vote`] therefore now catches
+//! specifically `record_vote`'s "actor has already voted in this poll"
+//! rejection (matched on `poll_repository.rs`'s own literal
+//! `AppError::client` message/status, the only signal currently available
+//! without widening that already-reviewed function's return type) and
+//! reports [`HandleOutcome::Handled`] instead of propagating it — the same
+//! outcome a genuine wire-level re-delivery of the identical vote Activity
+//! gets. This does not weaken Requirement 13.5: the transactional
+//! uniqueness `record_vote` itself enforces (task 2.3's `FOR UPDATE`-locked
+//! check) is completely unchanged — a second, truly independent vote
+//! attempt (a different actor, or a genuine duplicate *client* request via
+//! `PollService::vote`, Requirement 13.5's own literal target) is still
+//! rejected exactly as before. Only this *inbound-dispatch* branch's
+//! handling of an already-true "this actor already voted" fact changes,
+//! from "propagate as an error" to "report as already-applied" — which is
+//! also the textbook-correct idempotent-inbox-handler behavior for every
+//! *other* genuinely-rare re-delivery this section already covers (two
+//! *different* vote Activities naming the same option, redelivered under
+//! different Activity ids, remain covered by this same fix). Every *other*
+//! `record_vote` rejection (deadline passed, out-of-range choice,
+//! single/multiple violation) is a distinct wire condition this fix does
+//! not touch, and continues to propagate unchanged.
 //!
 //! ## What this handler does *not* persist (CONCERN — documented structural
 //! gaps, same class already flagged elsewhere in this spec)
@@ -584,11 +620,13 @@ impl<R: RemoteActorResolver> CreateNoteHandler<R> {
 
     /// Attempts the `Create{Note, name=...}` vote-wire-form branch (Requirement
     /// 13.6). Returns `Ok(Some(Handled))` when every vote-shape condition
-    /// held and the vote was recorded; `Ok(None)` when any condition failed
-    /// (the caller should fall through to ordinary `Note` ingestion); `Err`
-    /// only if `record_vote` itself rejects an otherwise-detected vote
-    /// (deadline/range/duplicate — see this module's doc comment,
-    /// "Idempotent re-delivery").
+    /// held and the vote was recorded *or* was already recorded (the
+    /// duplicate-vote case — see this module's doc comment, "Idempotent
+    /// re-delivery, `Create(Note)` and vote branch alike"); `Ok(None)` when
+    /// any vote-shape condition failed (the caller should fall through to
+    /// ordinary `Note` ingestion); `Err` only if `record_vote` rejects an
+    /// otherwise-detected vote for a reason *other* than "already voted"
+    /// (deadline passed, out-of-range choice, single/multiple violation).
     async fn try_record_vote(
         &self,
         object: &Map<String, Value>,
@@ -616,8 +654,43 @@ impl<R: RemoteActorResolver> CreateNoteHandler<R> {
         };
 
         let now = self.runtime.clock.now();
-        poll_repository::record_vote(&self.pool, poll_id, actor_id, &[option.idx], now).await?;
-        Ok(Some(HandleOutcome::Handled))
+        match poll_repository::record_vote(&self.pool, poll_id, actor_id, &[option.idx], now).await
+        {
+            Ok(_) => Ok(Some(HandleOutcome::Handled)),
+            // See this module's doc comment ("Idempotent re-delivery... /
+            // Self-notification loopback of a locally-already-recorded
+            // vote") — `record_vote`'s specific duplicate-vote rejection
+            // (`poll_repository.rs`'s own literal message) reaching this
+            // *inbound* branch does not mean a client made a genuinely new,
+            // rejected request: when the poll's author is local,
+            // `StatusActivityBuilder::deliver_vote`'s own notification
+            // Activity for a vote `PollService::vote` already recorded
+            // moments earlier (via the direct, synchronous local call)
+            // loops back in-process to this exact handler. The fact this
+            // duplicate check reports ("`actor_id` has already voted for
+            // this option") is already true and already correctly
+            // reflected in `poll_votes`/`poll_options.votes_count` — so
+            // this is reported as `Handled` (idempotent, already-applied),
+            // the same outcome a genuine wire-level re-delivery of the
+            // identical vote Activity gets, rather than an `AppError` that
+            // would otherwise propagate all the way back through
+            // `DeliveryService::deliver`'s local-recipient dispatch (task
+            // 4.1/5.3's synchronous, in-process delivery path) into
+            // `PollService::vote`'s own `Result`, turning an already
+            // fully-succeeded vote into a spurious 422 for the voter who
+            // just made it. Every *other* `record_vote` rejection (deadline
+            // passed, out-of-range choice, single/multiple violation) is a
+            // distinct wire condition, not the "I already knew that" case
+            // this arm narrowly targets, and continues to propagate
+            // unchanged.
+            Err(err)
+                if err.status == StatusCode::UNPROCESSABLE_ENTITY
+                    && err.public_message == "actor has already voted in this poll" =>
+            {
+                Ok(Some(HandleOutcome::Handled))
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 
