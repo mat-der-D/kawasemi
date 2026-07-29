@@ -1411,3 +1411,192 @@ async fn poll_vote_updates_the_tally_and_get_reflects_it() {
 
     app.cleanup().await;
 }
+
+// ==== `emojis` field resolution (task 10.4) ====
+
+/// Seeds one `custom_emojis` row — mirrors
+/// `accounts::emoji_repository::tests`'s own identical seeding helper (this
+/// module cannot import that one, it is private to its own `#[cfg(test)]`
+/// module, so a small duplicate is this crate's own documented convention
+/// for test-local fixtures across sibling test modules).
+async fn seed_custom_emoji(app: &TestApp, shortcode: &str) {
+    let now = app.runtime.clock.now();
+    let url = format!("https://example.test/emoji/{shortcode}.png");
+    sqlx::query(
+        "INSERT INTO custom_emojis \
+             (shortcode, domain, url, static_url, visible_in_picker, category, updated_at) \
+         VALUES ($1, '', $2, $2, TRUE, NULL, $3)",
+    )
+    .bind(shortcode)
+    .bind(&url)
+    .bind(now)
+    .execute(&app.pool)
+    .await
+    .expect("seeding a custom_emojis row must succeed");
+}
+
+#[tokio::test]
+async fn create_status_resolves_a_registered_shortcode_into_the_emojis_field() {
+    let app = spawn_test_app().await;
+    let actor_id = create_owner_with_actor(&app, "emoji_poster").await;
+    seed_custom_emoji(&app, "blobcat").await;
+    let (state, _local, _http) = build_state(&app, &[(actor_id, "emoji_poster")], false);
+    let router = test_router(state);
+
+    let app_id = register_test_app(&app.pool, &app.runtime).await;
+    let token = issue_test_token(
+        &app.pool,
+        &app.runtime,
+        app_id,
+        actor_id,
+        &["write:statuses"],
+    )
+    .await;
+
+    let response = router
+        .oneshot(json_request(
+            "POST",
+            STATUSES_PATH,
+            Some(&token),
+            &json!({
+                "status": "hello :blobcat: and :not_registered:",
+                "visibility": "public"
+            }),
+            &[("idempotency-key", "emoji-1")],
+        ))
+        .await
+        .expect("oneshot dispatch must succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+
+    let emojis = json["emojis"].as_array().expect("emojis must be an array");
+    assert_eq!(
+        emojis.len(),
+        1,
+        "only the registered shortcode must resolve, unregistered ones are silently omitted: {emojis:?}"
+    );
+    assert_eq!(emojis[0]["shortcode"], "blobcat");
+    assert_eq!(emojis[0]["url"], "https://example.test/emoji/blobcat.png");
+    assert_eq!(
+        emojis[0]["static_url"],
+        "https://example.test/emoji/blobcat.png"
+    );
+    assert_eq!(emojis[0]["visible_in_picker"], true);
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn create_status_with_no_registered_shortcode_has_empty_emojis() {
+    let app = spawn_test_app().await;
+    let actor_id = create_owner_with_actor(&app, "no_emoji_poster").await;
+    let (state, _local, _http) = build_state(&app, &[(actor_id, "no_emoji_poster")], false);
+    let router = test_router(state);
+
+    let app_id = register_test_app(&app.pool, &app.runtime).await;
+    let token = issue_test_token(
+        &app.pool,
+        &app.runtime,
+        app_id,
+        actor_id,
+        &["write:statuses"],
+    )
+    .await;
+
+    let response = router
+        .oneshot(json_request(
+            "POST",
+            STATUSES_PATH,
+            Some(&token),
+            &json!({"status": "hello :unknown_shortcode:", "visibility": "public"}),
+            &[("idempotency-key", "emoji-2")],
+        ))
+        .await
+        .expect("oneshot dispatch must succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+    assert_eq!(json["emojis"], json!([]));
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn poll_json_resolves_a_registered_shortcode_from_an_option_title() {
+    let app = spawn_test_app().await;
+    let actor_id = create_owner_with_actor(&app, "poll_emoji_owner").await;
+    seed_custom_emoji(&app, "partyparrot").await;
+    let (state, _local, _http) = build_state(&app, &[(actor_id, "poll_emoji_owner")], false);
+
+    let now = app.runtime.clock.now();
+    let status_id = app.runtime.ids.next_id();
+    let poll_id = app.runtime.ids.next_id();
+    let uri = format!("https://kawasemi.example/statuses/{}", status_id.as_i64());
+    let status = crate::statuses::model::Status {
+        id: status_id,
+        actor_id,
+        uri: uri.clone(),
+        url: Some(uri),
+        content: "pick one".to_string(),
+        visibility: Visibility::Public,
+        sensitive: false,
+        spoiler_text: String::new(),
+        in_reply_to_id: None,
+        in_reply_to_account_id: None,
+        reblog_of_id: None,
+        poll_id: Some(poll_id),
+        language: None,
+        reblogs_count: 0,
+        favourites_count: 0,
+        replies_count: 0,
+        local: true,
+        created_at: now,
+        edited_at: None,
+    };
+    crate::statuses::status_repository::insert_status(&app.pool, &status)
+        .await
+        .expect("insert_status must succeed");
+    crate::statuses::poll_repository::insert_poll(
+        &app.pool,
+        &crate::statuses::model::Poll {
+            id: poll_id,
+            status_id,
+            expires_at: None,
+            multiple: false,
+        },
+        &[
+            crate::statuses::model::PollOption {
+                poll_id,
+                idx: 0,
+                title: "Cats :partyparrot:".to_string(),
+                votes_count: 0,
+            },
+            crate::statuses::model::PollOption {
+                poll_id,
+                idx: 1,
+                title: "Dogs".to_string(),
+                votes_count: 0,
+            },
+        ],
+    )
+    .await
+    .expect("insert_poll must succeed");
+
+    let router = test_router(state);
+
+    let get_response = router
+        .oneshot(get_request(
+            &format!("/api/v1/polls/{}", poll_id.as_i64()),
+            None,
+        ))
+        .await
+        .expect("get poll dispatch must succeed");
+    assert_eq!(get_response.status(), StatusCode::OK);
+    let get_json = body_json(get_response).await;
+    let emojis = get_json["emojis"]
+        .as_array()
+        .expect("emojis must be an array");
+    assert_eq!(emojis.len(), 1, "{emojis:?}");
+    assert_eq!(emojis[0]["shortcode"], "partyparrot");
+
+    app.cleanup().await;
+}

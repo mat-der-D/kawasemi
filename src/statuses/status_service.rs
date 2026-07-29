@@ -261,17 +261,22 @@
 //! comment ("Notification emit") for the identical reblog/favourite-side gap
 //! task 10.2 also closes.
 //!
-//! ## Emoji shortcode extraction: extracted, not yet consumed (CONCERN)
+//! ## Emoji shortcode extraction: extracted, resolved by the endpoint layer
+//! (closed by task 10.4)
 //! [`extract_content_tokens`] extracts `:shortcode:` tokens per Requirement
-//! 3.6's literal text, but nothing in this task's own boundary consumes
-//! them: `Status` carries no emoji field (by design, `model.rs`'s dialect-
-//! isolation proof), no schema table associates custom emoji shortcodes
-//! with a post, and rendering them is `StatusSerializer`/the endpoint
-//! layer's job (out of this task's boundary, and that layer's own doc
-//! comment already documents taking emoji info as a pre-resolved caller
-//! input it does not yet have a real source for). Extraction is
-//! implemented and unit-tested per the requirement's letter; there is
-//! deliberately no persistence sink for it yet.
+//! 3.6's literal text. `Status` still carries no emoji field (by design,
+//! `model.rs`'s dialect-isolation proof) and no schema table associates
+//! custom emoji shortcodes with a post — extraction stays a pure, stateless
+//! scan, not a persistence sink. As of task 10.4, `ExtractedTokens::
+//! emoji_shortcodes` (widened to `pub(crate)`, the same treatment
+//! `hashtags`/`mentions` already got) is consumed by the endpoint-layer
+//! `StatusRenderInput`-assembly glue (`endpoints.rs`'s `resolve_common`/
+//! `poll_json`), which resolves each extracted shortcode against
+//! accounts-and-instance's existing `emoji_repository::resolve_emojis` and
+//! hands the result to `StatusSerializer`/`PollSerializer` as their already-
+//! resolved `emojis` input — closing Requirement 3.6's `emojis` half (the
+//! `mentions` half remains the separate, larger structural gap task 10.3
+//! documents; not this task's boundary).
 
 #[cfg(test)]
 mod tests;
@@ -402,15 +407,18 @@ pub(crate) struct Mention {
 /// rather than a second, duplicated hashtag scanner) — see
 /// `inbound_handlers.rs`'s own doc comment. `mentions` is `pub(crate)` too
 /// (task 10.2, the identical reuse rationale applied to mention-notification
-/// resolution — see [`Mention`]'s own doc comment). `emoji_shortcodes` stays
-/// private: nothing outside this module consumes it yet (task 10.4's own
-/// still-open gap, this module's own doc comment, "Emoji shortcode
-/// extraction").
+/// resolution — see [`Mention`]'s own doc comment). `emoji_shortcodes` is
+/// `pub(crate)` too (task 10.4, `Boundary: StatusService, StatusSerializer`):
+/// the endpoint-layer `StatusRenderInput`-assembly glue (`endpoints.rs`)
+/// reuses this exact same extraction to resolve a post's/poll's `emojis`
+/// field via `accounts::emoji_repository::resolve_emojis`, the same
+/// "reuse this module's own already-reviewed scanner rather than
+/// duplicating it" rationale `hashtags`/`mentions` already established.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ExtractedTokens {
     pub(crate) mentions: Vec<Mention>,
     pub(crate) hashtags: Vec<String>,
-    emoji_shortcodes: Vec<String>,
+    pub(crate) emoji_shortcodes: Vec<String>,
 }
 
 /// Whether the character at `chars[i]` starts a new token (Requirement

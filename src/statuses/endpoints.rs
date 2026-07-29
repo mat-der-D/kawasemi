@@ -105,15 +105,23 @@
 //!   `status_service.rs`'s "Mention resolution: local only" section and
 //!   `serializer.rs`'s own doc comment both already name; not a new gap
 //!   introduced here).
-//! - `emojis`: always `&[]`/`Vec::new()` (CONCERN, same gap class as
-//!   `mentions`) — `status_service.rs`'s own "Emoji shortcode extraction"
-//!   section already documents that shortcodes are extracted but never
-//!   persisted/resolved to a `CustomEmojiView`, and this module has no
-//!   shortcode-matching pipeline of its own to build one from without
-//!   duplicating `accounts::serializer`'s private `match_referenced_emojis`
-//!   for a different entity, which no task's boundary has asked for yet.
-//! - `poll`: `PollService::poll(viewer, poll_id)` + `poll_to_json` (with
-//!   `emojis: &[]`, same gap) when `status.poll_id.is_some()`.
+//! - `emojis` (task 10.4, closing the gap the previous paragraph names for
+//!   `Status`): `status_service::extract_content_tokens(&status.content)
+//!   .emoji_shortcodes` (widened to `pub(crate)` by this task, the same
+//!   treatment `hashtags`/`mentions` already got) resolved via
+//!   `accounts::emoji_repository::resolve_emojis` — reused verbatim, never
+//!   reimplemented (this module has no shortcode-matching pipeline of its
+//!   own, and does not need one: an unregistered shortcode simply is not in
+//!   `resolve_emojis`'s result, no error). `CustomEmojiView`'s -> JSON
+//!   mapping stays `serializer.rs`'s own `emoji_to_json`, called from
+//!   `to_status_json`/`to_poll_json`, not duplicated here.
+//! - `poll`: `PollService::poll(viewer, poll_id)` + `poll_to_json`, with
+//!   `emojis` resolved the same way as the `Status` case above, but scanned
+//!   from every `PollOption::title` in the tally (a poll option's title is
+//!   its own shortcode-bearing text, distinct from the owning `Status`'s
+//!   `content` — Requirement 2.1 lists `emojis` as a Poll field in its own
+//!   right, not merely inherited from the parent Status) when
+//!   `status.poll_id.is_some()`.
 //! - `interactions`: `interaction_repository::exists_favourite`/
 //!   `exists_bookmark`/`exists_pin`/`find_reblog` against the *viewer*
 //!   (never the post's own author unless they are also the viewer) —
@@ -208,6 +216,8 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::accounts::account_service::AccountService;
+use crate::accounts::emoji_repository;
+use crate::accounts::model::CustomEmojiView;
 use crate::api::pagination::{PageParams, RequestUriContext, build_link_header};
 use crate::domain::{Id, Visibility};
 use crate::error::AppError;
@@ -232,6 +242,7 @@ use crate::statuses::serializer::{
 use crate::statuses::status_repository;
 use crate::statuses::status_service::{
     CreateStatus, CreateStatusPoll, EditStatus, MentionLookup, StatusService,
+    extract_content_tokens,
 };
 use crate::statuses::tag_repository;
 use crate::statuses::visibility::RelationshipQuery;
@@ -429,6 +440,22 @@ where
             .collect())
     }
 
+    /// Resolves `content`'s `:shortcode:` tokens (Requirement 3.6's
+    /// extraction, `status_service::extract_content_tokens`) against
+    /// accounts-and-instance's custom-emoji directory
+    /// (`emoji_repository::resolve_emojis`) — task 10.4's `emojis`-field
+    /// glue, shared by both the `Status`-content case and the `Poll`-option-
+    /// titles case (see this module's doc comment, "`StatusRenderInput`
+    /// assembly glue"). An unregistered shortcode is simply absent from the
+    /// result, never an error.
+    async fn resolve_emojis(&self, content: &str) -> Result<Vec<CustomEmojiView>, AppError> {
+        let shortcodes = extract_content_tokens(content).emoji_shortcodes;
+        if shortcodes.is_empty() {
+            return Ok(Vec::new());
+        }
+        emoji_repository::resolve_emojis(&self.pool, &shortcodes).await
+    }
+
     async fn interaction_state(
         &self,
         viewer: Option<Id>,
@@ -456,11 +483,23 @@ where
 
     async fn poll_json(&self, viewer: Option<Id>, poll_id: Id) -> Result<Value, AppError> {
         let (poll, tally) = self.poll_service.poll(viewer, poll_id).await?;
+        // Each option's own title is its own shortcode-bearing text,
+        // distinct from the owning Status's `content` (see this module's
+        // doc comment, "`StatusRenderInput` assembly glue" -> `poll`).
+        // Joined with a space so a scan across the boundary between two
+        // titles never spuriously merges them into one token.
+        let combined_titles = tally
+            .options
+            .iter()
+            .map(|option| option.title.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let emojis = self.resolve_emojis(&combined_titles).await?;
         let ctx = SerializeContext {
             viewer,
             now: self.runtime.clock.now(),
         };
-        Ok(poll_to_json(&poll, &tally, &[], &ctx))
+        Ok(poll_to_json(&poll, &tally, &emojis, &ctx))
     }
 
     /// The four/five pieces every rendered [`Status`] needs beyond the bare
@@ -477,6 +516,7 @@ where
             Value,
             Vec<Value>,
             Vec<TagJson>,
+            Vec<CustomEmojiView>,
             StatusInteractionState,
             Option<Value>,
         ),
@@ -485,12 +525,13 @@ where
         let account = self.account_json(status.actor_id, origin).await?;
         let media_attachments = self.media_json(status.id, origin).await?;
         let tags = self.tags_json(status.id, origin).await?;
+        let emojis = self.resolve_emojis(&status.content).await?;
         let interactions = self.interaction_state(viewer, status.id).await?;
         let poll = match status.poll_id {
             Some(poll_id) => Some(self.poll_json(viewer, poll_id).await?),
             None => None,
         };
-        Ok((account, media_attachments, tags, interactions, poll))
+        Ok((account, media_attachments, tags, emojis, interactions, poll))
     }
 
     /// Builds a non-recursive [`StatusRenderInput`] (its own `reblog` field
@@ -502,7 +543,7 @@ where
         status: &'a Status,
         origin: &crate::api::pagination::ForwardedOrigin,
     ) -> Result<StatusRenderInput<'a>, AppError> {
-        let (account, media_attachments, tags, interactions, poll) =
+        let (account, media_attachments, tags, emojis, interactions, poll) =
             self.resolve_common(viewer, status, origin).await?;
         Ok(StatusRenderInput {
             status,
@@ -510,7 +551,7 @@ where
             media_attachments,
             mentions: Vec::new(),
             tags,
-            emojis: Vec::new(),
+            emojis,
             poll,
             interactions,
             reblog: None,
@@ -540,7 +581,7 @@ where
             )),
             None => None,
         };
-        let (account, media_attachments, tags, interactions, poll) =
+        let (account, media_attachments, tags, emojis, interactions, poll) =
             self.resolve_common(viewer, &status, origin).await?;
         let input = StatusRenderInput {
             status: &status,
@@ -548,7 +589,7 @@ where
             media_attachments,
             mentions: Vec::new(),
             tags,
-            emojis: Vec::new(),
+            emojis,
             poll,
             interactions,
             reblog: reblog_box,
