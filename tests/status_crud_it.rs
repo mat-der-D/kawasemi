@@ -35,6 +35,8 @@
 //! for exercising voting without re-deriving a poll-bearing status through
 //! the endpoint each time.
 
+use std::sync::{Arc, Mutex};
+
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -43,12 +45,15 @@ use tower::ServiceExt;
 
 use kawasemi::actor::owner::create_owner;
 use kawasemi::actor::{ActorType, Handle, NewActor, ResolvedActor};
-use kawasemi::domain::Id;
+use kawasemi::domain::{AccountRef, Id};
 use kawasemi::media::{Focus, Media, MediaState, MediaType, insert_media};
 use kawasemi::oauth::app_repository::{self, NewApp};
 use kawasemi::oauth::model::ScopeSet as ModelScopeSet;
 use kawasemi::oauth::token_repository::{self, NewAccessToken};
 use kawasemi::server;
+use kawasemi::statuses::notification_sink::{
+    NotificationEvent, NotificationEventSink, NotificationType,
+};
 use kawasemi::test_harness::{TestApp, spawn_test_app};
 
 // ---- Fixture plumbing (each `tests/*.rs` file is its own compiled crate,
@@ -204,6 +209,39 @@ async fn insert_owned_media(app: &TestApp, actor_id: Id) -> Id {
         .await
         .expect("insert media fixture");
     id
+}
+
+/// Records every [`NotificationEventSink::emit`] call made through the real,
+/// fully-wired router — task 10.5's own "observe task 9.2's mention emit
+/// through the public API" technique. Registered via
+/// `app.state.statuses().notification_sink_registry().set_sink(..)` (see
+/// `src/statuses/notification_sink.rs`'s own doc comment, "Registry: one
+/// replaceable slot" — every composition-root caller, including
+/// `spawn_test_app`'s, shares one instance, so replacing the sink here is
+/// visible to the exact `StatusService` the router dispatches to).
+#[derive(Default)]
+struct RecordingNotificationSink {
+    events: Mutex<Vec<NotificationEvent>>,
+}
+
+impl RecordingNotificationSink {
+    fn events(&self) -> Vec<NotificationEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl NotificationEventSink for RecordingNotificationSink {
+    fn emit<'a>(
+        &'a self,
+        event: NotificationEvent,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), kawasemi::error::AppError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        })
+    }
 }
 
 // ==== Creation (Requirements 3.1-3.6) ====
@@ -910,6 +948,267 @@ async fn editing_a_status_updates_it_records_history_and_exposes_source_owner_on
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "got: {body:?}");
+
+    app.cleanup().await;
+}
+
+/// Task 10.5 (`.kiro/specs/statuses-core/tasks.md`, "7.1 で指摘済みの未テスト
+/// ハンドラ...に...専用テストを追加する"): `GET /api/v1/statuses/:id/history`
+/// (`status_history`, `design.md`'s API Contract row: "Bearer 任意" / errors
+/// "404" only — no scope, no owner-only gate) is, per
+/// `StatusService::history`'s own doc comment, "subject to the same
+/// visibility rule as `show`" — not owner-scoped like `source`. The
+/// `editing_a_status_...` test above only ever exercises the *owner*
+/// fetching their own post's history, so this test proves the actually
+/// distinct behavior design.md specifies: a public post's history is visible
+/// to anyone (even unauthenticated), while a private post's history 404s for
+/// everyone except its author (Requirements 6.1, 6.2, 8.2).
+#[tokio::test]
+async fn status_history_endpoint_is_gated_by_the_same_visibility_rule_as_show() {
+    let app = spawn_test_app().await;
+    let router = real_router(&app);
+    let alice = insert_actor_fixture(&app, "alice_hist_vis").await;
+    let bob = insert_actor_fixture(&app, "bob_hist_vis").await;
+    let app_id = register_test_app(&app).await;
+    let alice_token = issue_test_token(&app, app_id, alice.id, &["write:statuses"]).await;
+    let bob_token = issue_test_token(&app, app_id, bob.id, &["write:statuses"]).await;
+
+    // A public post, edited once so it has a non-empty history.
+    let (_, created) = send(
+        &router,
+        req(
+            "POST",
+            "/api/v1/statuses",
+            Some(&alice_token),
+            Some(json!({"status": "public original", "visibility": "public"})),
+        ),
+    )
+    .await;
+    let public_id = created["id"].as_str().unwrap().to_string();
+    let (status, _) = send(
+        &router,
+        req(
+            "PUT",
+            &format!("/api/v1/statuses/{public_id}"),
+            Some(&alice_token),
+            Some(json!({
+                "status": "public edited", "spoiler_text": "", "sensitive": false,
+                "media_ids": []
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A private post, edited once too.
+    let (_, created) = send(
+        &router,
+        req(
+            "POST",
+            "/api/v1/statuses",
+            Some(&alice_token),
+            Some(json!({"status": "private original", "visibility": "private"})),
+        ),
+    )
+    .await;
+    let private_id = created["id"].as_str().unwrap().to_string();
+    let (status, _) = send(
+        &router,
+        req(
+            "PUT",
+            &format!("/api/v1/statuses/{private_id}"),
+            Some(&alice_token),
+            Some(json!({
+                "status": "private edited", "spoiler_text": "", "sensitive": false,
+                "media_ids": []
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The public post's history is visible to a non-owner...
+    let (status, history) = send(
+        &router,
+        req(
+            "GET",
+            &format!("/api/v1/statuses/{public_id}/history"),
+            Some(&bob_token),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {history:?}");
+    assert_eq!(history.as_array().map(Vec::len), Some(1));
+    assert_eq!(history[0]["content"], "public original");
+
+    // ...and to an unauthenticated caller (design.md's "Bearer 任意").
+    let (status, history) = send(
+        &router,
+        req(
+            "GET",
+            &format!("/api/v1/statuses/{public_id}/history"),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {history:?}");
+    assert_eq!(history.as_array().map(Vec::len), Some(1));
+
+    // The private post's history is invisible to a non-owner...
+    let (status, body) = send(
+        &router,
+        req(
+            "GET",
+            &format!("/api/v1/statuses/{private_id}/history"),
+            Some(&bob_token),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a private post's history must not leak to a non-follower: {body:?}"
+    );
+
+    // ...and to an unauthenticated caller.
+    let (status, body) = send(
+        &router,
+        req(
+            "GET",
+            &format!("/api/v1/statuses/{private_id}/history"),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a private post's history must not leak unauthenticated: {body:?}"
+    );
+
+    // ...but remains visible to its own author.
+    let (status, history) = send(
+        &router,
+        req(
+            "GET",
+            &format!("/api/v1/statuses/{private_id}/history"),
+            Some(&alice_token),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {history:?}");
+    assert_eq!(history.as_array().map(Vec::len), Some(1));
+
+    app.cleanup().await;
+}
+
+// ==== Combination: poll creation + mention notification (task 10.5) ====
+
+/// Task 10.5's own combination-path requirement: "投票を含む投稿がメンション
+/// も同時に含む場合に 9.1 remediation の poll 作成ブロックと 9.2 の
+/// メンション通知 emit ブロックが正しく共存することを直接証明する結合テスト"
+/// (Requirements 13.1, 9.1, 9.2). A single `POST /api/v1/statuses` request
+/// whose content both mentions a second local actor and carries a `poll`
+/// input exercises two independent remediation blocks inside
+/// `StatusService::create_status` back to back (see that module's own doc
+/// comment / `tasks.md`'s "9.2 追補" and "9.2" Implementation Notes): the
+/// poll-persistence block (`poll_repository::insert_poll`, wired by the
+/// 9.2-追補 remediation for Requirement 13.1) and the mention-notification
+/// emit loop (task 9.2, only exercised for a poll-less post in every existing
+/// test). This proves neither block's control flow accidentally short-
+/// circuits or skips the other when both fire in the same request:
+/// - the poll is actually persisted (independently queryable via
+///   `GET /api/v1/polls/:id`, not merely echoed back in the create response)
+/// - exactly one `Mention` `NotificationEvent` is emitted for the mentioned
+///   actor, observed through the real `NotificationSinkRegistry` the router's
+///   own `StatusService` dispatches to (task 9.2's established test-double
+///   technique, driven here through the public HTTP API rather than an
+///   in-process service call).
+#[tokio::test]
+async fn create_status_with_a_poll_and_a_mention_persists_the_poll_and_emits_the_mention_notification()
+ {
+    let app = spawn_test_app().await;
+    let router = real_router(&app);
+    let alice = insert_actor_fixture(&app, "alice_poll_mention").await;
+    let bob = insert_actor_fixture(&app, "bob_poll_mention_target").await;
+    let app_id = register_test_app(&app).await;
+    let alice_token = issue_test_token(&app, app_id, alice.id, &["write:statuses"]).await;
+
+    let sink = Arc::new(RecordingNotificationSink::default());
+    app.state
+        .statuses()
+        .notification_sink_registry()
+        .set_sink(Arc::clone(&sink) as Arc<dyn NotificationEventSink>);
+
+    let (status, body) = send(
+        &router,
+        req(
+            "POST",
+            "/api/v1/statuses",
+            Some(&alice_token),
+            Some(json!({
+                "status": "hey @bob_poll_mention_target, pick one",
+                "poll": {"options": ["red", "blue"], "multiple": false}
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+
+    // The poll block fired: the response embeds a real poll...
+    let poll = body
+        .get("poll")
+        .expect("a poll-bearing create response must embed a poll object");
+    let poll_id = poll["id"].as_str().expect("poll.id must be a string");
+    let option_titles: Vec<&str> = poll["options"]
+        .as_array()
+        .expect("poll.options must be an array")
+        .iter()
+        .map(|option| option["title"].as_str().expect("option.title"))
+        .collect();
+    assert_eq!(option_titles, vec!["red", "blue"]);
+
+    // ...and it is independently, durably persisted (not just echoed back):
+    // a fresh `GET /api/v1/polls/:id` round-trip proves real persistence.
+    let (status, fetched_poll) = send(
+        &router,
+        req(
+            "GET",
+            &format!("/api/v1/polls/{poll_id}"),
+            Some(&alice_token),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {fetched_poll:?}");
+    assert_eq!(fetched_poll["id"], *poll_id);
+    assert_eq!(
+        fetched_poll["options"].as_array().map(Vec::len),
+        Some(2),
+        "the persisted poll must retain both options: {fetched_poll:?}"
+    );
+
+    // The mention block also fired, in the same request: exactly one
+    // `Mention` NotificationEvent for bob, not skipped/short-circuited by
+    // the poll block running first.
+    let events = sink.events();
+    let mention_events: Vec<&NotificationEvent> = events
+        .iter()
+        .filter(|event| event.kind == NotificationType::Mention)
+        .collect();
+    assert_eq!(
+        mention_events.len(),
+        1,
+        "expected exactly one Mention NotificationEvent, got: {events:?}"
+    );
+    let mention = mention_events[0];
+    assert_eq!(mention.recipient, AccountRef::Local(bob.id));
+    assert_eq!(mention.origin, AccountRef::Local(alice.id));
 
     app.cleanup().await;
 }

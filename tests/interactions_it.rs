@@ -616,3 +616,197 @@ async fn pinning_enforces_ownership_and_rejects_direct_visibility() {
 
     app.cleanup().await;
 }
+
+// ==== Unbookmark / unpin dedicated endpoint tests (task 10.5) ====
+
+/// Task 10.5's own "7.1 で指摘済みの未テストハンドラ...に...専用テストを
+/// 追加する" for `unbookmark_status`. `bookmarking_toggles_state_...` above
+/// already proves the success-path toggle-off; this test proves
+/// `design.md`'s API Contract row for `POST /api/v1/statuses/:id/unbookmark`
+/// (`write:bookmarks`, errors "401, 403, 404") on its remaining, previously-
+/// unverified edges (Requirement 11.2): unauthenticated is rejected, a
+/// missing `write:bookmarks` scope is rejected, an unknown target 404s (
+/// `InteractionService::bookmark`'s `find_by_id` runs unconditionally, even
+/// for `on == false` — see that method's own doc comment), and — unlike
+/// `pin`/`unpin` — revoking a bookmark the caller never held is a no-op
+/// success rather than an error (the same doc comment's "revoking a private
+/// state the actor already holds is always allowed" rule).
+#[tokio::test]
+async fn unbookmark_status_endpoint_requires_auth_and_scope_and_rejects_unknown_targets() {
+    let app = spawn_test_app().await;
+    let router = real_router(&app);
+    let alice = insert_actor_fixture(&app, "alice_unbm").await;
+    let bob = insert_actor_fixture(&app, "bob_unbm").await;
+    let app_id = register_test_app(&app).await;
+    let alice_token = issue_test_token(&app, app_id, alice.id, &["write:statuses"]).await;
+    let bob_full_token =
+        issue_test_token(&app, app_id, bob.id, &["write:bookmarks", "read:bookmarks"]).await;
+    let bob_no_scope_token = issue_test_token(&app, app_id, bob.id, &["write:statuses"]).await;
+
+    let post = create_status(&router, &alice_token, json!({"status": "unbookmark me"})).await;
+    let id = id_of(&post);
+
+    // Unauthenticated is rejected.
+    let (status, body) = send(
+        &router,
+        req(
+            "POST",
+            &format!("/api/v1/statuses/{id}/unbookmark"),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "got: {body:?}");
+
+    // A token without `write:bookmarks` is rejected.
+    let (status, body) = send(
+        &router,
+        req(
+            "POST",
+            &format!("/api/v1/statuses/{id}/unbookmark"),
+            Some(&bob_no_scope_token),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "got: {body:?}");
+
+    // An unknown target 404s.
+    let (status, body) = send(
+        &router,
+        req(
+            "POST",
+            "/api/v1/statuses/999999999999/unbookmark",
+            Some(&bob_full_token),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "got: {body:?}");
+
+    // Unbookmarking a post bob never bookmarked is an idempotent success,
+    // not an error (Requirement 11.2's "bookmarked=false を反映").
+    let (status, body) = send(
+        &router,
+        req(
+            "POST",
+            &format!("/api/v1/statuses/{id}/unbookmark"),
+            Some(&bob_full_token),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    assert_eq!(body["bookmarked"], false);
+
+    app.cleanup().await;
+}
+
+/// Task 10.5's own "...に...専用テストを追加する" for `unpin_status`.
+/// `pinning_enforces_ownership_and_rejects_direct_visibility` above only
+/// exercises *pin*'s ownership rejection, never unpin's — but
+/// `InteractionService::pin`'s ownership check (`target.actor_id !=
+/// actor_id`) runs identically for both `on == true` and `on == false`, and
+/// `design.md`'s API Contract row for `POST /api/v1/statuses/:id/unpin`
+/// lists the same "401, 403, 404" error set as `pin`. This test proves the
+/// previously-unverified `unpin` half: unauthenticated is rejected, a
+/// missing `write:statuses` scope is rejected, and — the real gap — a
+/// non-owner attempting to unpin someone else's post 404s exactly like a
+/// non-owner attempting to pin it (Requirement 12.2's counterpart to 12.3).
+#[tokio::test]
+async fn unpin_status_endpoint_enforces_ownership_scope_and_authentication() {
+    let app = spawn_test_app().await;
+    let router = real_router(&app);
+    let alice = insert_actor_fixture(&app, "alice_unpin").await;
+    let bob = insert_actor_fixture(&app, "bob_unpin").await;
+    let app_id = register_test_app(&app).await;
+    let alice_token = issue_test_token(&app, app_id, alice.id, &["write:statuses"]).await;
+    let bob_token = issue_test_token(&app, app_id, bob.id, &["write:statuses"]).await;
+    let bob_no_scope_token = issue_test_token(&app, app_id, bob.id, &["read:statuses"]).await;
+
+    let (status, pinned_post) = send(
+        &router,
+        req(
+            "POST",
+            "/api/v1/statuses",
+            Some(&alice_token),
+            Some(json!({"status": "alice's pin"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {pinned_post:?}");
+    let alice_post_id = id_of(&pinned_post);
+    let (status, pinned) = send(
+        &router,
+        req(
+            "POST",
+            &format!("/api/v1/statuses/{alice_post_id}/pin"),
+            Some(&alice_token),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {pinned:?}");
+    assert_eq!(pinned["pinned"], true);
+
+    // Unauthenticated is rejected.
+    let (status, body) = send(
+        &router,
+        req(
+            "POST",
+            &format!("/api/v1/statuses/{alice_post_id}/unpin"),
+            None,
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "got: {body:?}");
+
+    // A token without `write:statuses` is rejected.
+    let (status, body) = send(
+        &router,
+        req(
+            "POST",
+            &format!("/api/v1/statuses/{alice_post_id}/unpin"),
+            Some(&bob_no_scope_token),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "got: {body:?}");
+
+    // A non-owner may not unpin someone else's post (the real gap this test
+    // closes: only *pin*'s ownership rejection had a test before task 10.5).
+    let (status, body) = send(
+        &router,
+        req(
+            "POST",
+            &format!("/api/v1/statuses/{alice_post_id}/unpin"),
+            Some(&bob_token),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a non-owner must not be able to unpin another actor's post: {body:?}"
+    );
+
+    // The owner can unpin.
+    let (status, unpinned) = send(
+        &router,
+        req(
+            "POST",
+            &format!("/api/v1/statuses/{alice_post_id}/unpin"),
+            Some(&alice_token),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {unpinned:?}");
+    assert_eq!(unpinned["pinned"], false);
+
+    app.cleanup().await;
+}

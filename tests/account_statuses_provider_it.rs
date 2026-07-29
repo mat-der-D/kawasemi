@@ -282,3 +282,78 @@ async fn account_statuses_and_counts_reflect_real_posts_once_wired() {
 
     app.cleanup().await;
 }
+
+/// Task 10.5's own "`GET /accounts/:id/statuses` が `create_status` 経由で
+/// 作成された投票付き投稿を正しく描画することを証明する
+/// `account_statuses_provider_it.rs` 側のテストを追加する" (Requirements 6.1,
+/// 7.1, 13.1). `AccountStatusesProviderImpl::page` (`src/statuses/
+/// account_provider.rs`) has its own `poll_json` rendering helper, but every
+/// existing test in this file only ever posts plain-text statuses — this
+/// test proves that helper actually surfaces real poll data for a status
+/// that went through the full `POST /api/v1/statuses` create pipeline (task
+/// 9.2-追補's poll-persistence remediation), not a hand-inserted DB row like
+/// `tests/polls_it.rs`'s own established fixture technique uses.
+#[tokio::test]
+async fn account_statuses_endpoint_renders_a_poll_created_via_the_real_create_status_flow() {
+    let app = spawn_test_app().await;
+    let router = real_router(&app);
+
+    let alice = insert_actor_fixture(&app, "alice_provider_poll").await;
+    let app_id = register_test_app(&app).await;
+    let token = issue_test_token(&app, app_id, alice.id, &["write:statuses"]).await;
+
+    let (status, created) = post_json(
+        &router,
+        "/api/v1/statuses",
+        &token,
+        serde_json::json!({
+            "status": "which color?",
+            "poll": {"options": ["red", "green", "blue"], "multiple": false}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "poll status creation: {created:?}");
+    let created_id = created["id"].as_str().unwrap().to_string();
+    let created_poll_id = created["poll"]["id"]
+        .as_str()
+        .expect("create response must embed a poll id")
+        .to_string();
+
+    let (status, page) = get_json(
+        &router,
+        &format!("/api/v1/accounts/{}/statuses", alice.id.as_i64()),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "got: {page:?}");
+    let items = page.as_array().expect("statuses page must be a JSON array");
+    assert_eq!(items.len(), 1, "got: {page:?}");
+    let rendered = &items[0];
+    assert_eq!(rendered["id"], created_id);
+
+    let poll = rendered
+        .get("poll")
+        .expect("AccountStatusesProviderImpl must render the poll field for a poll-bearing status");
+    assert!(
+        !poll.is_null(),
+        "the poll field must not be null for a status created with a poll: {rendered}"
+    );
+    assert_eq!(poll["id"], created_poll_id);
+    assert_eq!(poll["multiple"], false);
+    let option_titles: Vec<&str> = poll["options"]
+        .as_array()
+        .expect("poll.options must be an array")
+        .iter()
+        .map(|option| option["title"].as_str().expect("option.title"))
+        .collect();
+    assert_eq!(
+        option_titles,
+        vec!["red", "green", "blue"],
+        "the rendered poll must retain the real options from the create request: {poll}"
+    );
+    for option in poll["options"].as_array().unwrap() {
+        assert_eq!(option["votes_count"], 0);
+    }
+
+    app.cleanup().await;
+}
