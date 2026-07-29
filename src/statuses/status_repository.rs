@@ -849,6 +849,128 @@ pub async fn media_ids_for_status(pool: &PgPool, status_id: Id) -> Result<Vec<Id
     Ok(rows.into_iter().map(|(id,)| Id::from_i64(id)).collect())
 }
 
+// -- status_mentions / status_remote_attachments (added by task 10.3,
+// `InboundHandlers, StatusIngestService` — Requirement 14.2's "添付・メンショ
+// ンを反映する", closing the gap task 6.1/6.2's own doc comments flagged) --
+//
+// `migrations/0011_status_mentions_and_remote_attachments.sql` (added by this
+// same task) has never had a writer anywhere in this crate before now — see
+// that migration's own doc comment for the full schema/scoping rationale
+// (why `status_remote_attachments` stores plain metadata rather than a real
+// media-pipeline `Media`/`status_media` row, and why `status_mentions` only
+// ever holds locally-resolved actor ids). These four functions are added
+// here, alongside `attach_media`/`replace_media`/`media_ids_for_status`
+// above, since both new tables share `statuses`' own lifecycle (`ON DELETE
+// CASCADE` against `statuses(id)` — `delete_status` needs no further
+// change).
+
+/// One reflected entry from a remote `Note`'s `attachment` property
+/// (`inbound_handlers.rs::extract_attachments`), stored as lightweight,
+/// statuses-core-owned metadata — see
+/// `migrations/0011_status_mentions_and_remote_attachments.sql`'s own doc
+/// comment for why this is a plain URL/type/description tuple rather than a
+/// real media-pipeline `Media` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteAttachment {
+    pub url: String,
+    pub media_type: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Persists `status_id`'s resolved-local mentioned actor ids as new
+/// `status_mentions` rows (Requirement 14.2). `ON CONFLICT DO NOTHING`: a
+/// `Note`'s `tag` array naming the same local actor twice (already
+/// deduplicated by `extract_tag_mentions`, but defensively covered here too)
+/// or a caller retrying this call is a safe no-op, matching this table's own
+/// `(status_id, actor_id)` primary key.
+pub async fn insert_mentions(
+    pool: &PgPool,
+    status_id: Id,
+    actor_ids: &[Id],
+) -> Result<(), AppError> {
+    for actor_id in actor_ids {
+        sqlx::query(
+            "INSERT INTO status_mentions (status_id, actor_id) VALUES ($1, $2) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(status_id.as_i64())
+        .bind(actor_id.as_i64())
+        .execute(pool)
+        .await
+        .map_err(map_server_error)?;
+    }
+    Ok(())
+}
+
+/// Returns `status_id`'s persisted, locally-resolved mentioned actor ids
+/// (Requirement 14.2's read side), in ascending `actor_id` order (this
+/// table's own primary-key order — no separate ordering column exists, and
+/// `tag`-array order is not preserved by design, mirroring
+/// `status_service.rs::extract_content_tokens`'s own "dedup by exact token
+/// text" precedent for mentions being a set, not a sequence).
+pub async fn mentioned_actor_ids(pool: &PgPool, status_id: Id) -> Result<Vec<Id>, AppError> {
+    let rows: Vec<(i64,)> = sqlx::query_as(
+        "SELECT actor_id FROM status_mentions WHERE status_id = $1 ORDER BY actor_id",
+    )
+    .bind(status_id.as_i64())
+    .fetch_all(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    Ok(rows.into_iter().map(|(id,)| Id::from_i64(id)).collect())
+}
+
+/// Persists `status_id`'s reflected remote attachments as new
+/// `status_remote_attachments` rows, in `attachments`' given order
+/// (`position` 0-based) — Requirement 14.2.
+pub async fn insert_remote_attachments(
+    pool: &PgPool,
+    status_id: Id,
+    attachments: &[RemoteAttachment],
+) -> Result<(), AppError> {
+    for (position, attachment) in attachments.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO status_remote_attachments \
+             (status_id, position, url, media_type, description) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(status_id.as_i64())
+        .bind(position as i32)
+        .bind(&attachment.url)
+        .bind(&attachment.media_type)
+        .bind(&attachment.description)
+        .execute(pool)
+        .await
+        .map_err(map_server_error)?;
+    }
+    Ok(())
+}
+
+/// Returns `status_id`'s reflected remote attachments, in attachment order
+/// (Requirement 14.2's read side).
+pub async fn remote_attachments_for_status(
+    pool: &PgPool,
+    status_id: Id,
+) -> Result<Vec<RemoteAttachment>, AppError> {
+    let rows: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT url, media_type, description FROM status_remote_attachments \
+         WHERE status_id = $1 ORDER BY position",
+    )
+    .bind(status_id.as_i64())
+    .fetch_all(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(url, media_type, description)| RemoteAttachment {
+            url,
+            media_type,
+            description,
+        })
+        .collect())
+}
+
 // -- account-scoped listing (added by task 9.1, `AccountStatusesProviderImpl`) --
 //
 // accounts-and-instance's `AccountStatusesProvider`/`AccountCountsProvider`

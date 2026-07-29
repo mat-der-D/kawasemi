@@ -329,31 +329,71 @@
 //! "cheap, defensive, documented" judgment call this task's own brief asks
 //! for.
 //!
-//! ## What this handler does *not* persist (CONCERN — documented structural
-//! gaps, same class already flagged elsewhere in this spec)
-//! - **Attachments**: an ingested remote `Note`'s `attachment` property is
-//!   never read at all. `status_media.media_id` is a logical reference to
-//!   media-pipeline's own `media.id` (`status_repository.rs`'s own doc
-//!   comment) — there is no reachable service in this task's dependency set
-//!   ( `_Depends: 2.1, 2.2, 2.3, 3.1, 5.3_`) that fetches/normalizes/persists
-//!   a *remote* media object into a local `media` row a `status_media` row
-//!   could then reference; fabricating a `media_id` here would either
-//!   violate that logical reference's own intended meaning or require this
-//!   task to reach into media-pipeline's boundary, which it does not own.
-//! - **Standalone (non-reply) mentions**: `Status`/`migrations/
-//!   0007_statuses.sql` carry no mentions/addressee table at all
-//!   (`status_service.rs`'s own "Mention resolution: local only" section
-//!   already documents this exact schema limitation for the *outbound*
-//!   direction; it is structurally identical, not a new gap, for inbound). A
-//!   `tag`-array `Mention` entry on an ingested `Note` is therefore never
-//!   read or persisted; the one form of "mention reflection" this schema
-//!   *can* support — `in_reply_to_account_id`, set whenever `inReplyTo`
-//!   resolves to a known [`Status`] — is implemented.
+//! ## Attachment/mention reflection (task 10.3, closes the gap task 6.1's own
+//! doc comment flagged here — "要件14.2の未充足解消")
+//! Task 6.1 originally left an ingested remote `Note`'s `attachment`/`tag`
+//! (`Mention`) properties entirely unread, for two structural reasons this
+//! section previously documented in full: (1) `status_media.media_id`
+//! (`migrations/0007_statuses.sql`) is a logical FK to media-pipeline's own
+//! `media.id`, and no capability anywhere in `src/media/*` can create a
+//! `Media` row from a remote URL (`MediaService::accept_upload` takes raw
+//! uploaded bytes, not a URL to fetch — building that would be new
+//! media-pipeline capability, out of this spec's boundary per design.md's Out
+//! of Boundary note); (2) `Status`/`migrations/0007_statuses.sql` carried no
+//! mentions/addressee table at all.
 //!
-//! Both gaps are read-omissions, not silent failures: nothing in this module
-//! errors because of them, matching Requirement 15.2's "未知の方言プロパティ
-//! ...を意味論として解釈せずコア処理を継続する" applied to a structural
-//! (schema-level), not merely dialect-level, absence.
+//! Task 10.3 closes both gaps **within this task's own boundary**
+//! (`InboundHandlers`, `StatusIngestService`), deliberately *not* by building
+//! new media-pipeline capability:
+//! - **Attachments**: [`extract_attachments`] reads an ingested `Note`'s
+//!   `attachment` property and [`ingest_note_object`] persists each entry as
+//!   lightweight, statuses-core-owned metadata (`url`/`media_type`/
+//!   `description`) via [`status_repository::insert_remote_attachments`], a
+//!   brand-new table (`status_remote_attachments`,
+//!   `migrations/0011_status_mentions_and_remote_attachments.sql`, added by
+//!   this task) — **not** a real media-pipeline `Media` row, and **not** a
+//!   `status_media` row (that table's `media_id` stays a logical FK to a real
+//!   `media.id` this task never fabricates). This deliberately mirrors this
+//!   crate's own already-implemented precedent for the identical class of
+//!   problem: [`crate::accounts::remote_fetcher::RemoteAccountFetcher::
+//!   fetch_and_normalize`] reflects a remote actor's avatar/header image as a
+//!   plain URL string (`account_profiles.avatar_url`/`header_url`), never as
+//!   a full local `Media` row, for the same reason (no capability to
+//!   fetch-and-own a remote media object exists outside media-pipeline's own
+//!   upload boundary). A future task that gives media-pipeline a genuine
+//!   "create a `Media` row from a remote URL" capability could migrate
+//!   `status_remote_attachments` rows into real `status_media` rows: that
+//!   migration is out of this task's scope, not attempted here.
+//! - **Mentions**: [`extract_tag_mentions`] reads an ingested `Note`'s
+//!   `tag`-array `Mention` entries (the authoritative ActivityPub mention
+//!   source — distinct from the *content*-text `@handle` scanning
+//!   [`resolve_local_mentions`]/[`extract_content_tokens`] already used for
+//!   task 10.2's notification emit, see that function's own doc comment for
+//!   why this task does not unify the two: they serve genuinely different
+//!   purposes from genuinely different wire sources, changing task 10.2's
+//!   already-reviewed notification behavior is out of this task's scope).
+//!   Both extraction paths funnel into the *same* resolution primitive,
+//!   [`resolve_mentions`] (the domain-filter + [`Handle`]-parse +
+//!   [`LocalMentionResolver::resolve_local_mention`] call task 10.2's
+//!   [`resolve_local_mentions`] already established) — this task does not
+//!   fork a second resolution algorithm, only a second *extraction* source.
+//!   Only mentions that resolve to a **local** actor are persisted (this
+//!   crate's single, already-established "mention resolution: local only"
+//!   convention, `status_service.rs`'s own doc comment of that exact title,
+//!   applied symmetrically here), via the new `status_mentions` table (same
+//!   migration as above) and
+//!   [`status_repository::insert_mentions`]/[`status_repository::mentioned_actor_ids`].
+//!   A remote-domain mention (naming neither no domain nor this instance's
+//!   own `domain`) is left unresolved and therefore unpersisted, matching
+//!   Requirement 15.2's "未知の方言プロパティ...を意味論として解釈せずコア
+//!   処理を継続する" applied to a mention this instance has no local identity
+//!   for.
+//!
+//! Both new tables share `ingest_note_object`'s existing idempotency guard
+//! (its own `find_by_uri` pre-check, "Idempotent re-delivery" above): a
+//! redelivered `Create(Note)` returns the already-persisted [`Status`]
+//! without a second `insert_mentions`/`insert_remote_attachments` call, the
+//! same discipline `persist_tags` already follows.
 //!
 //! ## Visibility derivation from `to`/`cc` (mirrors the outbound convention
 //! in reverse)
@@ -393,8 +433,8 @@ use crate::statuses::notification_sink::{
     NotificationEvent, NotificationSinkRegistry, NotificationType,
 };
 use crate::statuses::poll_repository;
-use crate::statuses::status_repository::{self, CountKind};
-use crate::statuses::status_service::{MentionLookup, extract_content_tokens};
+use crate::statuses::status_repository::{self, CountKind, RemoteAttachment};
+use crate::statuses::status_service::{Mention, MentionLookup, extract_content_tokens};
 use crate::statuses::tag_repository;
 
 /// The narrow `actor_uri -> Id` port every handler in this module depends on
@@ -613,25 +653,31 @@ async fn persist_tags(
     Ok(())
 }
 
-/// Resolves `content`'s extracted mentions (via [`extract_content_tokens`])
-/// to registered **local** actor [`Id`]s (task 10.2, Requirement 9.1's
-/// local/remote-symmetric emit invariant applied to mentions). Mirrors
+/// Resolves a list of already-extracted [`Mention`]s to registered **local**
+/// actor [`Id`]s (task 10.2, Requirement 9.1's local/remote-symmetric emit
+/// invariant applied to mentions; widened by task 10.3, Requirement 14.2, to
+/// also serve mention *persistence*). Mirrors
 /// `status_service.rs::StatusService::build_addressing`'s own mention-
 /// resolution loop exactly: a mention is only resolved when it names no
 /// domain at all (a bare `@handle`, assumed local by this crate's own
 /// established convention) or names `domain` itself (case-insensitively);
 /// any other domain is left unresolved (see that module's own doc comment,
-/// "Mention resolution: local only"). `Id`s are returned in first-appearance
-/// order, already deduplicated by [`extract_content_tokens`]'s own exact-
-/// token-text dedup.
-async fn resolve_local_mentions<M: LocalMentionResolver>(
+/// "Mention resolution: local only"). `Id`s are returned in `extracted`'s own
+/// order.
+///
+/// This is the single shared resolution primitive both
+/// [`resolve_local_mentions`] (content-text-derived, task 10.2's notification
+/// source) and [`extract_tag_mentions`] (`tag`-array-derived, task 10.3's
+/// persistence source) funnel into — task 10.3 does not fork a second
+/// resolution algorithm, only a second *extraction* source feeding this same
+/// function (see this module's doc comment, "Attachment/mention reflection").
+async fn resolve_mentions<M: LocalMentionResolver>(
     mentions: &M,
     domain: &str,
-    content: &str,
+    extracted: &[Mention],
 ) -> Result<Vec<Id>, AppError> {
-    let extracted = extract_content_tokens(content);
-    let mut ids = Vec::with_capacity(extracted.mentions.len());
-    for mention in &extracted.mentions {
+    let mut ids = Vec::with_capacity(extracted.len());
+    for mention in extracted {
         if let Some(mention_domain) = &mention.domain
             && !mention_domain.eq_ignore_ascii_case(domain)
         {
@@ -645,6 +691,131 @@ async fn resolve_local_mentions<M: LocalMentionResolver>(
         }
     }
     Ok(ids)
+}
+
+/// Resolves `content`'s extracted mentions (via [`extract_content_tokens`])
+/// to registered **local** actor [`Id`]s (task 10.2, Requirement 9.1's
+/// local/remote-symmetric emit invariant applied to mentions). `Id`s are
+/// returned in first-appearance order, already deduplicated by
+/// [`extract_content_tokens`]'s own exact-token-text dedup. See
+/// [`resolve_mentions`] (this function's shared resolution core) for the
+/// domain-filtering/`Handle`-parsing contract.
+async fn resolve_local_mentions<M: LocalMentionResolver>(
+    mentions: &M,
+    domain: &str,
+    content: &str,
+) -> Result<Vec<Id>, AppError> {
+    let extracted = extract_content_tokens(content);
+    resolve_mentions(mentions, domain, &extracted.mentions).await
+}
+
+/// Extracts `tag`-array `Mention` entries from an inbound `Note` object
+/// (task 10.3, Requirement 14.2's "メンションを反映する"): the ActivityStreams
+/// convention this crate's own outbound side already emits
+/// (`activity_builder.rs`'s `Mention` tag shape, `{"type":"Mention",
+/// "href":"...","name":"@user@domain"}`). Reads only `name` (the
+/// conventional `@user`/`@user@domain` acct form) — `href` is intentionally
+/// not read: resolving a mention to a local actor goes through the identical
+/// [`Handle`]-based [`LocalMentionResolver`] port [`resolve_local_mentions`]
+/// already uses for the content-derived case (via the shared
+/// [`resolve_mentions`]), not a second, URI-keyed resolution path. Tolerant
+/// of a missing/malformed `tag` entry (skipped, not an error — `tag` is a
+/// foreign wire property this module never trusted to be well-formed,
+/// Requirement 15.2). Deduplicated by exact `(local, domain)` pair, in
+/// first-appearance order, mirroring [`extract_content_tokens`]'s own
+/// dedup discipline for the sibling content-derived extraction.
+fn extract_tag_mentions(object: &Map<String, Value>) -> Vec<Mention> {
+    let Some(Value::Array(tags)) = object.get("tag") else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for tag in tags {
+        let Some(tag_obj) = tag.as_object() else {
+            continue;
+        };
+        if tag_obj.get("type").and_then(Value::as_str) != Some("Mention") {
+            continue;
+        }
+        let Some(name) = tag_obj.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let trimmed = name.trim_start_matches('@');
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (local, domain) = match trimmed.split_once('@') {
+            Some((local, domain)) if !local.is_empty() && !domain.is_empty() => {
+                (local.to_string(), Some(domain.to_string()))
+            }
+            _ => (trimmed.to_string(), None),
+        };
+        let key = format!("{local}@{}", domain.as_deref().unwrap_or(""));
+        if seen.insert(key) {
+            result.push(Mention { local, domain });
+        }
+    }
+    result
+}
+
+/// Reads an attachment entry's own `url`/`href` property, tolerating the
+/// same string-or-object-or-array shapes
+/// `remote_fetcher.rs::extract_image_url` already tolerates for `icon`/
+/// `image` — the identical ActivityStreams property-value ambiguity, applied
+/// here to a `Document`/`Image`-typed `attachment` entry's own `url` member
+/// (an embedded object's `href` is checked first, then its `url`, since a
+/// conventional AS2 `Link`-shaped attachment entry names its target via
+/// `href` while a `Document`/`Image`-shaped one names it via `url`).
+fn attachment_url(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(url) => Some(url.clone()),
+        Value::Object(map) => map
+            .get("href")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| attachment_url(map.get("url"))),
+        Value::Array(items) => items.iter().find_map(|item| attachment_url(Some(item))),
+        _ => None,
+    }
+}
+
+/// Extracts a remote `Note`'s `attachment` property as
+/// [`RemoteAttachment`]s (task 10.3, Requirement 14.2's "添付を反映する") —
+/// see this module's doc comment ("Attachment/mention reflection") for why
+/// this reads plain metadata rather than fetching/normalizing the referenced
+/// media into a real media-pipeline `Media`/`status_media` row. An entry
+/// missing a usable `url` is skipped, not an error (Requirement 15.2 applied
+/// to a malformed/foreign attachment shape); `mediaType` maps to
+/// `RemoteAttachment::media_type`, and `name` (falling back to `summary`) —
+/// the conventional ActivityStreams attachment-description property, mirrors
+/// `activity_builder.rs`'s own outbound attachment `name`/description
+/// convention — maps to `RemoteAttachment::description`. Order-preserving:
+/// [`status_repository::insert_remote_attachments`] persists this `Vec`'s own
+/// order as `position`.
+fn extract_attachments(object: &Map<String, Value>) -> Vec<RemoteAttachment> {
+    let Some(Value::Array(items)) = object.get("attachment") else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let entry = item.as_object()?;
+            let url = attachment_url(entry.get("url")).or_else(|| {
+                entry
+                    .get("href")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })?;
+            let media_type = optional_string(entry, "mediaType");
+            let description =
+                optional_string(entry, "name").or_else(|| optional_string(entry, "summary"));
+            Some(RemoteAttachment {
+                url,
+                media_type,
+                description,
+            })
+        })
+        .collect()
 }
 
 /// Shared dependencies every handler [`register_status_handlers`] builds
@@ -684,15 +855,26 @@ pub struct StatusInboundDeps<R: RemoteActorResolver, M: LocalMentionResolver> {
 /// "受信ハンドラ経路と同一結果になる").
 ///
 /// Idempotent: if `object`'s `id` already names an ingested [`Status`], that
-/// existing row is returned unchanged (no re-insert, no re-`persist_tags`) —
-/// see this module's doc comment ("Idempotent re-delivery"). Fails with a
-/// `422 Unprocessable Entity` [`AppError`] if `object` carries no `id`
-/// property at all.
-pub(crate) async fn ingest_note_object(
+/// existing row is returned unchanged (no re-insert, no re-`persist_tags`, no
+/// re-`insert_mentions`/`insert_remote_attachments`) — see this module's doc
+/// comment ("Idempotent re-delivery"). Fails with a `422 Unprocessable
+/// Entity` [`AppError`] if `object` carries no `id` property at all.
+///
+/// `domain`/`mentions` (task 10.3, Requirement 14.2): threaded through by
+/// both callers — [`CreateNoteHandler`] passes its own `domain`/`mentions`
+/// fields, [`crate::statuses::ingest_service::StatusIngestService`] passes
+/// its own identically-named fields (added by this same task) — so mention
+/// persistence goes through the exact same [`resolve_mentions`] primitive
+/// task 10.2's notification emit already established, from both entry
+/// points, rather than only one of them. See this module's doc comment
+/// ("Attachment/mention reflection") for the full reasoning.
+pub(crate) async fn ingest_note_object<M: LocalMentionResolver>(
     pool: &PgPool,
     runtime: &RuntimeContext,
     object: &Map<String, Value>,
     actor_id: Id,
+    domain: &str,
+    mentions: &M,
 ) -> Result<Status, AppError> {
     let Some(object_uri) = object.get("id").and_then(Value::as_str) else {
         return Err(malformed("Note object is missing a required 'id' property"));
@@ -758,6 +940,25 @@ pub(crate) async fn ingest_note_object(
     }
 
     persist_tags(pool, runtime, status.id, &status.content, now).await?;
+
+    // Task 10.3 (Requirement 14.2): reflect the remote Note's tag-array
+    // Mention entries and attachment entries — see this module's doc
+    // comment ("Attachment/mention reflection") for the full boundary
+    // reasoning (why attachments become plain metadata, not a real
+    // media-pipeline Media row; why only locally-resolved mentions are
+    // persisted).
+    let tag_mentions = extract_tag_mentions(object);
+    if !tag_mentions.is_empty() {
+        let mentioned_ids = resolve_mentions(mentions, domain, &tag_mentions).await?;
+        if !mentioned_ids.is_empty() {
+            status_repository::insert_mentions(pool, status.id, &mentioned_ids).await?;
+        }
+    }
+
+    let attachments = extract_attachments(object);
+    if !attachments.is_empty() {
+        status_repository::insert_remote_attachments(pool, status.id, &attachments).await?;
+    }
 
     Ok(status)
 }
@@ -926,7 +1127,15 @@ impl<R: RemoteActorResolver, M: LocalMentionResolver> InboundActivityHandler
             // by `StatusIngestService` — see [`ingest_note_object`]'s own
             // doc comment for why (Requirement 14.5's "共通コードパス",
             // task 6.2's "受信ハンドラ経路と同一結果になる").
-            let status = ingest_note_object(&self.pool, &self.runtime, object, actor_id).await?;
+            let status = ingest_note_object(
+                &self.pool,
+                &self.runtime,
+                object,
+                actor_id,
+                &self.domain,
+                &self.mentions,
+            )
+            .await?;
 
             // Task 10.2: emit a `Mention` NotificationEvent per resolved
             // local mention, only for a genuinely new ingestion — see this

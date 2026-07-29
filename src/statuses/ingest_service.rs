@@ -114,6 +114,20 @@
 //! maps to a caller-facing `404 Not Found`, mirroring
 //! `RemoteAccountFetcher::fetch_and_upsert`'s identical non-success-status
 //! mapping (that module's own doc comment, "Error mapping").
+//!
+//! ## `domain`/`mentions` fields (task 10.3, Requirement 14.2)
+//! [`ingest_note_object`] now also persists a `Note`'s `tag`-array `Mention`
+//! entries that resolve to a **local** actor (`inbound_handlers.rs`'s own
+//! doc comment, "Attachment/mention reflection"), which needs this
+//! instance's own configured `domain` (mention-domain filtering) and a
+//! [`LocalMentionResolver`] port — the identical pair
+//! `StatusInboundDeps`/`CreateNoteHandler` already carry. This service now
+//! carries the same two fields so both callers of the shared
+//! [`ingest_note_object`] function pass identical inputs, keeping this
+//! task's own observable-completion criterion ("受信ハンドラ経路と同一結果
+//! になる") true for mention persistence too, not just for reply/visibility.
+//! Attachment reflection needs no such port (it reads `object` alone), so no
+//! further field was added for it.
 
 #[cfg(test)]
 mod tests;
@@ -129,7 +143,7 @@ use crate::federation::jsonld::parse_activity;
 use crate::federation::signatures::FederationHttpClient;
 use crate::runtime::RuntimeContext;
 use crate::statuses::inbound_handlers::{
-    RemoteActorResolver, ingest_note_object, object_reference_uri,
+    LocalMentionResolver, RemoteActorResolver, ingest_note_object, object_reference_uri,
 };
 use crate::statuses::model::Status;
 
@@ -218,32 +232,57 @@ fn check_fetched_host(url: &str, document: &Value) -> Result<(), AppError> {
 /// `R: RemoteActorResolver` (held as `Arc<R>`), mirroring
 /// `RemoteAccountFetcher<H>`'s/`CreateNoteHandler<R>`'s identical rationale:
 /// both are traits of literal `async fn` methods, not object-safe as `dyn`.
-pub struct StatusIngestService<H: FederationHttpClient, R: RemoteActorResolver> {
+/// `M: LocalMentionResolver` (task 10.3, Requirement 14.2 — held by value,
+/// mirroring `CreateNoteHandler<R, M>`'s own identical `mentions: M` field):
+/// [`ingest_note_object`] needs a `domain`/[`LocalMentionResolver`] pair to
+/// resolve a `Note`'s `tag`-array `Mention` entries to local actor ids for
+/// persistence (Requirement 14.5's "共通コードパス" — this service reuses the
+/// exact same resolution primitive `CreateNoteHandler` uses, not a second
+/// one), so this service now carries the same two fields
+/// `StatusInboundDeps`/`CreateNoteHandler` already carry for that purpose.
+pub struct StatusIngestService<
+    H: FederationHttpClient,
+    R: RemoteActorResolver,
+    M: LocalMentionResolver,
+> {
     pool: PgPool,
     http_client: Arc<H>,
     runtime: RuntimeContext,
     remote_actors: Arc<R>,
+    domain: String,
+    mentions: M,
 }
 
-impl<H: FederationHttpClient, R: RemoteActorResolver> StatusIngestService<H, R> {
+impl<H: FederationHttpClient, R: RemoteActorResolver, M: LocalMentionResolver>
+    StatusIngestService<H, R, M>
+{
     /// Builds a service against `pool` (`StatusRepository`'s connection
     /// pool, shared with `CreateNoteHandler`'s own), `http_client` (the
     /// URL-fetch network boundary [`Self::ingest_url`] uses), `runtime` (the
     /// injected clock/id boundaries [`ingest_note_object`] threads through),
-    /// and `remote_actors` (the `attributedTo` -> [`crate::domain::Id`]
+    /// `remote_actors` (the `attributedTo` -> [`crate::domain::Id`]
     /// resolution port, the same [`RemoteActorResolver`] implementation a
-    /// caller wires up for `CreateNoteHandler`).
+    /// caller wires up for `CreateNoteHandler`), `domain` (this instance's
+    /// own configured domain, task 10.3 — mention-domain filtering, mirroring
+    /// `StatusInboundDeps::domain`), and `mentions` (the
+    /// [`LocalMentionResolver`] port, task 10.3, mirroring
+    /// `StatusInboundDeps::mentions`).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
         http_client: Arc<H>,
         runtime: RuntimeContext,
         remote_actors: Arc<R>,
+        domain: impl Into<String>,
+        mentions: M,
     ) -> Self {
         Self {
             pool,
             http_client,
             runtime,
             remote_actors,
+            domain: domain.into(),
+            mentions,
         }
     }
 
@@ -320,6 +359,14 @@ impl<H: FederationHttpClient, R: RemoteActorResolver> StatusIngestService<H, R> 
             .resolve_remote_actor(attributed_to)
             .await?;
 
-        ingest_note_object(&self.pool, &self.runtime, object, actor_id).await
+        ingest_note_object(
+            &self.pool,
+            &self.runtime,
+            object,
+            actor_id,
+            &self.domain,
+            &self.mentions,
+        )
+        .await
     }
 }

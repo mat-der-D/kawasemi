@@ -21,7 +21,7 @@ use axum::http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};
 
 use super::*;
-use crate::actor::ActorDirectory;
+use crate::actor::{ActorDirectory, Handle};
 use crate::domain::{Id, Visibility};
 use crate::error::ErrorKind;
 use crate::federation::VerifiedSigner;
@@ -62,6 +62,35 @@ impl RemoteActorResolver for FakeRemoteActors {
     }
 }
 
+/// An in-memory [`LocalMentionResolver`] double (task 10.3): knows a fixed
+/// set of `(Id, handle)` pairs — mirrors
+/// `inbound_handlers/tests.rs::FakeMentionLookup`'s identical precedent
+/// (this module's own copy rather than a cross-module import, matching this
+/// file's own doc comment's established rationale for `FakeRemoteActors`).
+#[derive(Clone, Default)]
+struct FakeMentionLookup {
+    by_handle: HashMap<String, Id>,
+}
+
+impl FakeMentionLookup {
+    fn with_actors(pairs: &[(Id, &str)]) -> Self {
+        let mut by_handle = HashMap::new();
+        for (id, raw) in pairs {
+            by_handle.insert((*raw).to_string(), *id);
+        }
+        Self { by_handle }
+    }
+}
+
+impl LocalMentionResolver for FakeMentionLookup {
+    fn resolve_local_mention(
+        &self,
+        handle: &Handle,
+    ) -> impl std::future::Future<Output = Result<Option<Id>, AppError>> + Send {
+        std::future::ready(Ok(self.by_handle.get(handle.as_str()).copied()))
+    }
+}
+
 const REMOTE_ALICE: &str = "https://remote.example/actors/alice";
 const NOTE_URI: &str = "https://remote.example/notes/1";
 
@@ -88,16 +117,40 @@ fn note_document(uri: &str) -> Value {
     })
 }
 
+const TEST_DOMAIN: &str = "kawasemi.example";
+
 fn service_for(
     app: &TestApp,
     http_client: Arc<MockFederationHttpClient>,
     remote_actors: Arc<FakeRemoteActors>,
-) -> StatusIngestService<MockFederationHttpClient, FakeRemoteActors> {
+) -> StatusIngestService<MockFederationHttpClient, FakeRemoteActors, ActorDirectory> {
     StatusIngestService::new(
         app.pool.clone(),
         http_client,
         app.runtime.clone(),
         remote_actors,
+        TEST_DOMAIN,
+        ActorDirectory::new(app.pool.clone()),
+    )
+}
+
+/// Like [`service_for`], but with a caller-supplied [`FakeMentionLookup`]
+/// instead of the real DB-backed `ActorDirectory` (task 10.3, Requirement
+/// 14.2) — for tests exercising mention *persistence* without needing to
+/// insert a real `local_actors` row.
+fn service_with_mentions_for(
+    app: &TestApp,
+    http_client: Arc<MockFederationHttpClient>,
+    remote_actors: Arc<FakeRemoteActors>,
+    mentions: FakeMentionLookup,
+) -> StatusIngestService<MockFederationHttpClient, FakeRemoteActors, FakeMentionLookup> {
+    StatusIngestService::new(
+        app.pool.clone(),
+        http_client,
+        app.runtime.clone(),
+        remote_actors,
+        TEST_DOMAIN,
+        mentions,
     )
 }
 
@@ -535,6 +588,55 @@ async fn ingest_document_matches_the_inbound_dispatch_path_for_the_same_note() {
     assert_eq!(via_dispatch.spoiler_text, via_service.spoiler_text);
     assert!(!via_dispatch.local);
     assert!(!via_service.local);
+}
+
+/// Requirement 14.2 (task 10.3): `ingest_document` reflects a standalone
+/// `Note`'s `tag`-array `Mention` entries (resolved to local actors) and
+/// `attachment` entries — the same persistence `CreateNoteHandler` performs,
+/// via the identical shared `ingest_note_object` codepath (this module's own
+/// doc comment, "受信ハンドラ経路と同一結果になる").
+#[tokio::test]
+async fn ingest_document_persists_tag_mentions_and_attachments() {
+    let app = spawn_test_app().await;
+    let bob = app.runtime.ids.next_id();
+    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let service = service_with_mentions_for(
+        &app,
+        Arc::new(MockFederationHttpClient::new()),
+        remote_actors,
+        FakeMentionLookup::with_actors(&[(bob, "bob")]),
+    );
+
+    let mut document = note_document(NOTE_URI);
+    document["tag"] = json!([
+        {"type": "Mention", "href": "https://kawasemi.example/actors/bob", "name": format!("@bob@{TEST_DOMAIN}")},
+        {"type": "Mention", "href": "https://other.example/actors/eve", "name": "@eve@other.example"},
+    ]);
+    document["attachment"] = json!([
+        {"type": "Document", "mediaType": "image/png", "url": "https://remote.example/media/1.png", "name": "alt text"},
+    ]);
+
+    let status = service
+        .ingest_document(&document)
+        .await
+        .expect("a Note with attachments/mentions must ingest successfully");
+
+    let mentioned = status_repository::mentioned_actor_ids(&app.pool, status.id)
+        .await
+        .expect("mention lookup must succeed");
+    assert_eq!(
+        mentioned,
+        vec![bob],
+        "only the locally-resolved mention must be persisted"
+    );
+
+    let attachments = status_repository::remote_attachments_for_status(&app.pool, status.id)
+        .await
+        .expect("attachment lookup must succeed");
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].url, "https://remote.example/media/1.png");
+    assert_eq!(attachments[0].media_type.as_deref(), Some("image/png"));
+    assert_eq!(attachments[0].description.as_deref(), Some("alt text"));
 }
 
 /// Inserts a real `statuses` row directly, owned by `actor_id` -- mirrors

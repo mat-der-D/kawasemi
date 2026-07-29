@@ -762,6 +762,225 @@ async fn create_note_self_mention_via_a_coincident_id_is_not_notified() {
     app.cleanup().await;
 }
 
+// -- CreateNoteHandler: attachment/mention persistence (task 10.3, 14.2) ----
+
+/// Requirement 14.2 (task 10.3): a remote `Create(Note)` carrying `tag`-array
+/// `Mention` entries and `attachment` entries has both reflected in the
+/// persisted `Status` — mentions that resolve to a **local** actor via
+/// `status_mentions`, attachments as lightweight metadata via
+/// `status_remote_attachments`.
+#[tokio::test]
+async fn create_note_persists_tag_mentions_and_attachments() {
+    let app = spawn_test_app().await;
+    let bob = app.runtime.ids.next_id();
+
+    let handler = CreateNoteHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        TEST_DOMAIN,
+        FakeMentionLookup::with_actors(&[(bob, "bob")]),
+        NotificationSinkRegistry::new(),
+    );
+
+    let activity = activity_from(json!({
+        "id": "https://remote.example/activities/create-attach-1",
+        "type": "Create",
+        "actor": REMOTE_ALICE,
+        "object": {
+            "id": "https://remote.example/notes/attach-1",
+            "type": "Note",
+            "attributedTo": REMOTE_ALICE,
+            "content": "check this out",
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+            "tag": [
+                {
+                    "type": "Mention",
+                    "href": "https://kawasemi.example/actors/bob",
+                    "name": format!("@bob@{TEST_DOMAIN}"),
+                },
+                {
+                    // A remote-domain mention must not be persisted (this
+                    // crate's established "mention resolution: local only"
+                    // convention, applied symmetrically to persistence).
+                    "type": "Mention",
+                    "href": "https://other.example/actors/eve",
+                    "name": "@eve@other.example",
+                },
+            ],
+            "attachment": [
+                {
+                    "type": "Document",
+                    "mediaType": "image/png",
+                    "url": "https://remote.example/media/1.png",
+                    "name": "a screenshot",
+                },
+                {
+                    "type": "Document",
+                    "mediaType": "image/jpeg",
+                    "url": "https://remote.example/media/2.jpg",
+                },
+            ],
+        }
+    }));
+
+    let outcome = handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("a well-formed Create(Note) with attachments/mentions must be handled");
+    assert_eq!(outcome, HandleOutcome::Handled);
+
+    let ingested =
+        status_repository::find_by_uri(&app.pool, "https://remote.example/notes/attach-1")
+            .await
+            .expect("query must succeed")
+            .expect("the Note must be ingested");
+
+    let mentioned = status_repository::mentioned_actor_ids(&app.pool, ingested.id)
+        .await
+        .expect("mention lookup must succeed");
+    assert_eq!(
+        mentioned,
+        vec![bob],
+        "only the locally-resolved mention must be persisted"
+    );
+
+    let attachments = status_repository::remote_attachments_for_status(&app.pool, ingested.id)
+        .await
+        .expect("attachment lookup must succeed");
+    assert_eq!(
+        attachments.len(),
+        2,
+        "both attachment entries must be reflected"
+    );
+    assert_eq!(attachments[0].url, "https://remote.example/media/1.png");
+    assert_eq!(attachments[0].media_type.as_deref(), Some("image/png"));
+    assert_eq!(attachments[0].description.as_deref(), Some("a screenshot"));
+    assert_eq!(attachments[1].url, "https://remote.example/media/2.jpg");
+    assert_eq!(attachments[1].media_type.as_deref(), Some("image/jpeg"));
+    assert_eq!(attachments[1].description, None);
+
+    app.cleanup().await;
+}
+
+/// A `tag`-array `Mention` naming a handle with no local actor registered
+/// under it is simply left unresolved and unpersisted (not an error) —
+/// mirrors this module's identical content-derived mention-resolution
+/// tolerance.
+#[tokio::test]
+async fn create_note_tag_mention_for_an_unregistered_handle_persists_no_mention() {
+    let app = spawn_test_app().await;
+
+    let handler = CreateNoteHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        TEST_DOMAIN,
+        FakeMentionLookup::default(),
+        NotificationSinkRegistry::new(),
+    );
+
+    let activity = activity_from(json!({
+        "id": "https://remote.example/activities/create-attach-2",
+        "type": "Create",
+        "actor": REMOTE_ALICE,
+        "object": {
+            "id": "https://remote.example/notes/attach-2",
+            "type": "Note",
+            "attributedTo": REMOTE_ALICE,
+            "content": "no local mentions here",
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+            "tag": [
+                {"type": "Mention", "name": "@ghost"},
+            ],
+        }
+    }));
+
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("must be handled");
+
+    let ingested =
+        status_repository::find_by_uri(&app.pool, "https://remote.example/notes/attach-2")
+            .await
+            .expect("query must succeed")
+            .expect("the Note must be ingested");
+    let mentioned = status_repository::mentioned_actor_ids(&app.pool, ingested.id)
+        .await
+        .expect("mention lookup must succeed");
+    assert!(
+        mentioned.is_empty(),
+        "an unregistered handle must not be persisted as a mention"
+    );
+
+    app.cleanup().await;
+}
+
+/// Redelivery idempotency (mirrors `persist_tags`'s own identical
+/// discipline): re-handling the identical `Create(Note)` must not duplicate
+/// `status_mentions`/`status_remote_attachments` rows.
+#[tokio::test]
+async fn create_note_redelivery_does_not_duplicate_mentions_or_attachments() {
+    let app = spawn_test_app().await;
+    let bob = app.runtime.ids.next_id();
+
+    let handler = CreateNoteHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        TEST_DOMAIN,
+        FakeMentionLookup::with_actors(&[(bob, "bob")]),
+        NotificationSinkRegistry::new(),
+    );
+
+    let activity = activity_from(json!({
+        "id": "https://remote.example/activities/create-attach-3",
+        "type": "Create",
+        "actor": REMOTE_ALICE,
+        "object": {
+            "id": "https://remote.example/notes/attach-3",
+            "type": "Note",
+            "attributedTo": REMOTE_ALICE,
+            "content": "redelivered",
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+            "tag": [{"type": "Mention", "name": format!("@bob@{TEST_DOMAIN}")}],
+            "attachment": [{"type": "Document", "mediaType": "image/png", "url": "https://remote.example/media/3.png"}],
+        }
+    }));
+
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("first delivery must be handled");
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("redelivery must not error");
+
+    let ingested =
+        status_repository::find_by_uri(&app.pool, "https://remote.example/notes/attach-3")
+            .await
+            .expect("query must succeed")
+            .expect("the Note must be ingested");
+
+    let mentioned = status_repository::mentioned_actor_ids(&app.pool, ingested.id)
+        .await
+        .expect("mention lookup must succeed");
+    assert_eq!(mentioned, vec![bob]);
+
+    let attachments = status_repository::remote_attachments_for_status(&app.pool, ingested.id)
+        .await
+        .expect("attachment lookup must succeed");
+    assert_eq!(
+        attachments.len(),
+        1,
+        "redelivery must not duplicate attachments"
+    );
+
+    app.cleanup().await;
+}
+
 // -- AnnounceHandler ----------------------------------------------------------
 
 /// Requirement 14.3: an inbound `Announce` of a local post records a reblog
