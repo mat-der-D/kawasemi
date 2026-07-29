@@ -14,7 +14,7 @@
   - _Boundary: model_
   - _Depends: 1.1_
 
-- [ ] 1.3 関係状態リポジトリ
+- [x] 1.3 関係状態リポジトリ
   - follows / follow_requests / mutes / blocks の upsert・削除・存在確認、受信保留一覧のページネーション取得、閲覧者+対象群のバッチ逆引き合成、ブロック/被ブロック/ミュート（期限考慮）/フォロー集合の問い合わせを実装する
   - 同一関係の二重 upsert が一意制約で冪等になり、期限切れミュートが集合・導出から除外されることをリポジトリ単体で確認できる状態
   - _Requirements: 1.6, 2.2, 4.3, 8.1, 8.4, 9.1, 9.2, 9.3_
@@ -148,3 +148,6 @@
 
 - タスク 1.1: `tasks.md`/`design.md` が指定するマイグレーション番号 `0006` は実際には `migrations/0006_accounts.sql`（accounts-and-instance）で既に使用済みであり、`0007`（statuses-core）・`0011`（status_mentions_and_remote_attachments）も既に埋まっていた。次の空き番号 `migrations/0012_social_graph.sql` を採用した（0008-0010 は他 spec 予約と推定し使用せず）。番号以外は design.md の Physical Data Model ブロックと完全一致。今後 social-graph 内で新規マイグレーションが必要になった場合は 0013 以降を使うこと。
 - タスク 1.2: 単体テストの配置規約について — `model.rs` のような純粋データ型ファイルは、`accounts/model.rs` / `statuses/model.rs` / `media/model.rs` / `actor/model.rs` / `oauth/model.rs` / `domain/primitives.rs`（6/6 例外なし）に倣い、ファイル末尾のインライン `#[cfg(test)] mod tests { use super::*; ... }` を使うこと。別ファイル `xxx/tests.rs` サブモジュール規約（`.kiro/steering/structure.md`）は `*_service.rs` / `*_repository.rs` / `endpoints.rs` 等の振る舞いを持つファイル向けであり、`model.rs` には適用しない。本タスクでは一度別ファイルで実装しレビューで指摘され、インラインへ移設して承認された。
+- タスク 1.3: design.md の `RelationshipRepository` Service Interface は `&self` メソッドのスケッチだが、本リポジトリの `*_repository.rs`（12ファイル全数確認）は例外なく `pool: &PgPool` を明示的に取る自由関数スタイルであり、本タスクもそれに追従した（design.md 側の記法上の慣習であり齟齬ではない、と判断してレビュー承認済み）。今後の repository 系タスクも同様に自由関数スタイルに従うこと。
+  - `RelationshipState`（`RelationshipMapper` が消費する viewer×target 1件分の関係状態）は design.md の File Structure Plan では `model.rs` 記載だが、task 1.2 の `tasks.md` 記述にはこの型は現れず、task 1.2 の境界（クローズ済みレビュー範囲）を侵さないため `src/social_graph/repository.rs` 側に定義した。task 2.4（RelationshipMapper）実装時はこの型を `repository.rs` から import すること（`model.rs` には存在しない）。
+  - `upsert_follow` / `upsert_request` / `upsert_mute` / `upsert_block` は design.md のシグネチャに無い先頭 `id: Id` 引数を追加している（各テーブルの主キーに DB 側デフォルトがなく、ドメイン型も `id` を持たないため。`interaction_repository.rs::add_bookmark` の既存前例に追従）。呼び出し側（task 3.x のサービス層）はこの `id` を `RuntimeContext` の `IdGenerator` から採番して渡すこと。

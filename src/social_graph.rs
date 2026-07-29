@@ -30,6 +30,7 @@
 //! boundary (`SocialGraphModule` wiring, design.md's File Structure Plan).
 
 pub mod model;
+pub mod repository;
 
 pub use model::{
     Block, Follow, FollowOptions, FollowRequest, FollowRequestDirection, Mute, MuteOptions,
