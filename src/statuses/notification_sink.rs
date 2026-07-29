@@ -53,11 +53,17 @@
 //! construction, yet a future notifications spec's registration must be
 //! able to happen after this registry is already live), and cheap to
 //! `Clone` (clones one `Arc`). `StatusService`/`InteractionService` each
-//! hold their own clone of the *same* registry instance
-//! (`build_statuses_module` constructs it once) so a single future
-//! `set_sink` call — exposed via `StatusesModule::notification_sink_registry`,
-//! mirroring `AccountsModule::ports()` — reaches every emit call site at
-//! once.
+//! hold their own clone of the *same* registry instance (each composition-
+//! root caller — `src/bootstrap.rs`/`src/test_harness.rs`/
+//! `src/federation/test_harness.rs` — constructs it once, *before*
+//! `federation::build_federation_module` runs, and passes a clone to both
+//! `build_statuses_module` and `statuses::register_downstream_handlers`; see
+//! `build_statuses_module`'s own doc comment, task 10.2) so
+//! `inbound_handlers.rs`'s `CreateNoteHandler`/`AnnounceHandler`/
+//! `LikeHandler` (remote-origin emit, task 10.2) hold a clone of the
+//! identical instance too, and a single future `set_sink` call — exposed via
+//! `StatusesModule::notification_sink_registry`, mirroring
+//! `AccountsModule::ports()` — reaches every emit call site at once.
 
 use std::future::Future;
 use std::pin::Pin;

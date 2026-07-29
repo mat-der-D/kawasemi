@@ -247,6 +247,88 @@
 //! single/multiple violation) is a distinct wire condition this fix does
 //! not touch, and continues to propagate unchanged.
 //!
+//! ## Notification emit (task 10.2, Requirements 9.1, 9.2, 10.1) — closes the
+//! known gap `interaction_service.rs`'/`status_service.rs`' own task-9.2 doc
+//! comments flagged ("リモートアクター起点の reblog/favourite/mention...は
+//! emit されず...ローカル/リモート対称配信を満たしていない")
+//! [`AnnounceHandler`]/[`LikeHandler`]/[`CreateNoteHandler`] each emit to the
+//! *same* [`crate::statuses::notification_sink::NotificationSinkRegistry`]
+//! instance `InteractionService`/`StatusService` already hold (task 9.2) —
+//! not a second, independent registry — via `StatusInboundDeps::notifications`,
+//! threaded through `register_downstream_handlers`
+//! (`crate::statuses::register_downstream_handlers`) from the *same*
+//! `NotificationSinkRegistry` `crate::statuses::build_statuses_module` builds
+//! (`src/bootstrap.rs`/`src/test_harness.rs` construct it once, before
+//! `federation::build_federation_module` runs, and pass a clone to each), so
+//! a single future `set_sink` call reaches every emit site — local- and
+//! remote-origin alike — at once, exactly as task 9.2's own doc comment
+//! promises for `StatusesModule::notification_sink_registry`.
+//!
+//! Each handler emits only on the branch that records a genuinely *new*
+//! state transition — mirroring task 9.2's own placement discipline exactly:
+//! - [`AnnounceHandler`]: only past its own `find_reblog`-miss branch (the
+//!   same duplicate-Announce guard that already exists for idempotent
+//!   re-delivery — see this module's doc comment, "Idempotent re-delivery").
+//! - [`LikeHandler`]: only when `interaction_repository::add_favourite`
+//!   reports `is_new` (its own `ON CONFLICT DO NOTHING` already makes a
+//!   duplicate `Like` naturally idempotent).
+//! - [`CreateNoteHandler`]: only when [`ingest_note_object`]'s own
+//!   `find_by_uri` pre-check (this task's own addition, mirroring
+//!   [`AnnounceHandler`]'s explicit pre-check pattern rather than widening
+//!   [`ingest_note_object`]'s return type — that function is shared with
+//!   `StatusIngestService`, task 6.2's boundary, which this task does not
+//!   touch) finds no existing `Status` under that `uri` — i.e. a genuinely
+//!   new ingestion, not a redelivery. Mentions are resolved from the
+//!   ingested `Note`'s `content` via [`extract_content_tokens`]/
+//!   [`crate::statuses::status_service::ExtractedTokens::mentions`] (widened
+//!   from private to `pub(crate)` by this task — see that module's own doc
+//!   comment) through [`LocalMentionResolver`] (a `Send`-bound-future wrapper
+//!   around [`crate::statuses::status_service::MentionLookup`] — see that
+//!   trait's own doc comment for why it exists instead of a direct
+//!   `MentionLookup` bound), filtered to this instance's own configured
+//!   `domain` (a bare `@handle` or `@handle@{own domain}`) exactly like
+//!   `status_service.rs::build_addressing`'s own local-origin mention loop —
+//!   see that module's doc comment, "Mention resolution: local only" —
+//!   applied symmetrically here for the inbound
+//!   direction.
+//!
+//! **Recipient/origin tagging**: `AnnounceHandler`/`LikeHandler` only ever
+//! reach their emit branch when `target.local` (this handler's own existing
+//! gate), so `recipient: AccountRef::Local(target.actor_id)` needs no extra
+//! resolution call (unlike `InteractionService::reblog`'s own
+//! `account_ref_for_notification` fallback, which exists only because
+//! *that* call site does not already know the target is local).
+//! `origin: AccountRef::Remote(actor_id)` in all three handlers: `actor_id`
+//! comes from [`resolve_actor_id`]/[`RemoteActorResolver`], and every branch
+//! that reaches an emit call is, by the "genuinely new state transition"
+//! discipline just above, an interaction *not already recorded* by
+//! `InteractionService`/`StatusService` — the only two call sites that ever
+//! write these rows for a local actor's own action — so despite
+//! `ProdRemoteActorResolver`'s documented local-actor loopback shortcut (its
+//! own doc comment, "Local-actor shortcut": a local-to-local in-process
+//! delivery can resolve `actor_id` to a genuine `local_actors.id`), an
+//! emit-reachable branch here can only be a genuinely first-recorded, remote-
+//! origin interaction: a local actor's own reblog/favourite/mentioning-post
+//! is always inserted by `InteractionService`/`StatusService` *before* that
+//! same call delivers the Activity (see each's own code — insert then
+//! deliver), so any in-process loopback of that exact interaction always
+//! lands on this module's already-recorded branch (duplicate `find_reblog`
+//! hit, `is_new == false`, or `already_ingested == true`) and never reaches
+//! the emit call.
+//!
+//! **Self-interaction skip (defensive, currently unreachable — kept for
+//! symmetry)**: each handler additionally skips emit when the resolved
+//! recipient/mentioned actor equals `actor_id` — mirroring
+//! `InteractionService::reblog`/`favourite`'s and `StatusService::create_status`'s
+//! own self-interaction skip verbatim. Per the previous paragraph's own
+//! reasoning this condition cannot currently be reached (an emit-reachable
+//! branch is never a local actor's own already-recorded interaction), but
+//! it costs one cheap `Id` comparison and guards against a future change to
+//! that invariant (e.g. a new entry point that writes these rows without
+//! going through `InteractionService`/`StatusService` first) — the same
+//! "cheap, defensive, documented" judgment call this task's own brief asks
+//! for.
+//!
 //! ## What this handler does *not* persist (CONCERN — documented structural
 //! gaps, same class already flagged elsewhere in this spec)
 //! - **Attachments**: an ingested remote `Note`'s `attachment` property is
@@ -296,7 +378,8 @@ use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::domain::{Id, Visibility};
+use crate::actor::Handle;
+use crate::domain::{AccountRef, Id, Visibility};
 use crate::error::AppError;
 use crate::federation::inbound::dispatcher::{
     HandleOutcome, InboundActivityDispatcher, InboundActivityHandler, InboundContext,
@@ -306,9 +389,12 @@ use crate::runtime::RuntimeContext;
 use crate::statuses::addressing::PUBLIC_COLLECTION_URI;
 use crate::statuses::interaction_repository;
 use crate::statuses::model::{Status, StatusEdit};
+use crate::statuses::notification_sink::{
+    NotificationEvent, NotificationSinkRegistry, NotificationType,
+};
 use crate::statuses::poll_repository;
 use crate::statuses::status_repository::{self, CountKind};
-use crate::statuses::status_service::extract_content_tokens;
+use crate::statuses::status_service::{MentionLookup, extract_content_tokens};
 use crate::statuses::tag_repository;
 
 /// The narrow `actor_uri -> Id` port every handler in this module depends on
@@ -352,6 +438,51 @@ pub trait RemoteActorResolver: Send + Sync {
 // call site — this task's own boundary is the handlers and the port
 // contract, not federation-core's `FederationHttpClient` signature or task
 // 7.2's production wiring.
+
+/// The narrow `Handle -> local actor Id` port [`CreateNoteHandler`] depends
+/// on to resolve an extracted mention (task 10.2, Requirements 9.1, 9.2,
+/// 10.1). A separate, `Send`-bound-future trait rather than a direct
+/// [`CreateNoteHandler`] generic bound on
+/// [`crate::statuses::status_service::MentionLookup`] itself — mirrors
+/// [`RemoteActorResolver`]'s own identical treatment (see that trait's own
+/// doc comment) for the identical reason: `MentionLookup::resolve_local_handle`
+/// (task 5.1, `#[allow(async_fn_in_trait)]`) is a plain `async fn` with no
+/// `Send` bound, adequate for `StatusService`'s own never-boxed call site but
+/// not for this module's `Pin<Box<dyn Future<Output = ..> + Send + 'a>>`
+/// handler boundary.
+pub trait LocalMentionResolver: Send + Sync {
+    /// Resolves `handle` to a registered local actor's [`Id`], if any.
+    /// `Ok(None)` (not an error) when no local actor is registered under
+    /// `handle` — mirrors `MentionLookup::resolve_local_handle`'s own
+    /// identical "no error for absence" contract.
+    fn resolve_local_mention(
+        &self,
+        handle: &Handle,
+    ) -> impl std::future::Future<Output = Result<Option<Id>, AppError>> + Send;
+}
+
+/// Unlike [`RemoteActorResolver`] (no blanket impl possible — see that
+/// trait's own doc comment), [`crate::actor::ActorDirectory`]'s own
+/// [`MentionLookup`] implementation (`status_service.rs`) *can* satisfy this
+/// port directly: `ActorDirectory` is a concrete, non-generic type (a thin
+/// `PgPool` wrapper, `crate::actor::directory`'s own doc comment), so its
+/// `resolve_local_handle` body's desugared future is a fully concrete,
+/// monomorphized type the compiler can — and does — verify is `Send`
+/// (`sqlx::PgPool` queries are `Send`), the same reason
+/// `ProdRemoteActorResolver::resolve_remote_actor` can call
+/// `ActorDirectory::resolve_actor_by_handle` directly in place without a
+/// `tokio::spawn` shim, unlike its own genuinely-generic
+/// `RemoteAccountFetcher<H>` fallback immediately below it in this same
+/// file. Production wiring (`crate::statuses::register_downstream_handlers`)
+/// passes a fresh `ActorDirectory` here.
+impl LocalMentionResolver for crate::actor::ActorDirectory {
+    fn resolve_local_mention(
+        &self,
+        handle: &Handle,
+    ) -> impl std::future::Future<Output = Result<Option<Id>, AppError>> + Send {
+        MentionLookup::resolve_local_handle(self, handle)
+    }
+}
 
 /// Resolves `ctx.signer.actor_uri` (the HTTP-Signature-verified acting
 /// remote actor — never the JSON body's own `actor`/`attributedTo`
@@ -482,26 +613,58 @@ async fn persist_tags(
     Ok(())
 }
 
+/// Resolves `content`'s extracted mentions (via [`extract_content_tokens`])
+/// to registered **local** actor [`Id`]s (task 10.2, Requirement 9.1's
+/// local/remote-symmetric emit invariant applied to mentions). Mirrors
+/// `status_service.rs::StatusService::build_addressing`'s own mention-
+/// resolution loop exactly: a mention is only resolved when it names no
+/// domain at all (a bare `@handle`, assumed local by this crate's own
+/// established convention) or names `domain` itself (case-insensitively);
+/// any other domain is left unresolved (see that module's own doc comment,
+/// "Mention resolution: local only"). `Id`s are returned in first-appearance
+/// order, already deduplicated by [`extract_content_tokens`]'s own exact-
+/// token-text dedup.
+async fn resolve_local_mentions<M: LocalMentionResolver>(
+    mentions: &M,
+    domain: &str,
+    content: &str,
+) -> Result<Vec<Id>, AppError> {
+    let extracted = extract_content_tokens(content);
+    let mut ids = Vec::with_capacity(extracted.mentions.len());
+    for mention in &extracted.mentions {
+        if let Some(mention_domain) = &mention.domain
+            && !mention_domain.eq_ignore_ascii_case(domain)
+        {
+            continue;
+        }
+        let Ok(handle) = Handle::new(mention.local.clone()) else {
+            continue;
+        };
+        if let Some(id) = mentions.resolve_local_mention(&handle).await? {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
 /// Shared dependencies every handler [`register_status_handlers`] builds
 /// needs: the repository connection pool, the id/clock injection boundary,
-/// and the [`RemoteActorResolver`] port. Bundled into one struct (design.md's
+/// the [`RemoteActorResolver`] port, this instance's own configured
+/// `domain` (task 10.2 — mention-domain filtering,
+/// [`resolve_local_mentions`]), the [`LocalMentionResolver`] port (task 10.2
+/// — [`CreateNoteHandler`]'s mention-notification resolution), and the
+/// shared [`NotificationSinkRegistry`] (task 10.2 — see this module's own
+/// doc comment, "Notification emit"). Bundled into one struct (design.md's
 /// exact `register_status_handlers(dispatcher, deps: StatusInboundDeps)`
 /// signature) so a future caller (task 7.2's bootstrap wiring) passes one
-/// value rather than three positional parameters.
-pub struct StatusInboundDeps<R: RemoteActorResolver> {
+/// value rather than several positional parameters.
+pub struct StatusInboundDeps<R: RemoteActorResolver, M: LocalMentionResolver> {
     pub pool: PgPool,
     pub runtime: RuntimeContext,
     pub remote_actors: Arc<R>,
-}
-
-impl<R: RemoteActorResolver> Clone for StatusInboundDeps<R> {
-    fn clone(&self) -> Self {
-        Self {
-            pool: self.pool.clone(),
-            runtime: self.runtime.clone(),
-            remote_actors: Arc::clone(&self.remote_actors),
-        }
-    }
+    pub domain: String,
+    pub mentions: M,
+    pub notifications: NotificationSinkRegistry,
 }
 
 // ---------------------------------------------------------------------------
@@ -601,20 +764,37 @@ pub(crate) async fn ingest_note_object(
 
 /// Ingests an inbound `Create(Note)` as a remote [`Status`] (Requirements
 /// 14.1, 14.2), or — when the wire shape matches a poll vote (Requirement
-/// 13.6) — branches into [`poll_repository::record_vote`] instead. See this
-/// module's doc comment for the full ingestion/vote-detection contract.
-pub struct CreateNoteHandler<R: RemoteActorResolver> {
+/// 13.6) — branches into [`poll_repository::record_vote`] instead. Also
+/// emits a `Mention` [`NotificationEvent`] per resolved local mention on a
+/// genuinely new ingestion (task 10.2 — see this module's own doc comment,
+/// "Notification emit"). See this module's doc comment for the full
+/// ingestion/vote-detection contract.
+pub struct CreateNoteHandler<R: RemoteActorResolver, M: LocalMentionResolver> {
     pool: PgPool,
     runtime: RuntimeContext,
     remote_actors: Arc<R>,
+    domain: String,
+    mentions: M,
+    notifications: NotificationSinkRegistry,
 }
 
-impl<R: RemoteActorResolver> CreateNoteHandler<R> {
-    pub fn new(pool: PgPool, runtime: RuntimeContext, remote_actors: Arc<R>) -> Self {
+impl<R: RemoteActorResolver, M: LocalMentionResolver> CreateNoteHandler<R, M> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        pool: PgPool,
+        runtime: RuntimeContext,
+        remote_actors: Arc<R>,
+        domain: impl Into<String>,
+        mentions: M,
+        notifications: NotificationSinkRegistry,
+    ) -> Self {
         Self {
             pool,
             runtime,
             remote_actors,
+            domain: domain.into(),
+            mentions,
+            notifications,
         }
     }
 
@@ -694,7 +874,9 @@ impl<R: RemoteActorResolver> CreateNoteHandler<R> {
     }
 }
 
-impl<R: RemoteActorResolver> InboundActivityHandler for CreateNoteHandler<R> {
+impl<R: RemoteActorResolver, M: LocalMentionResolver> InboundActivityHandler
+    for CreateNoteHandler<R, M>
+{
     fn activity_types(&self) -> &[&str] {
         &["Create"]
     }
@@ -723,11 +905,53 @@ impl<R: RemoteActorResolver> InboundActivityHandler for CreateNoteHandler<R> {
                 return Ok(outcome);
             }
 
+            // Task 10.2: determined *before* ingestion (mirrors
+            // `AnnounceHandler`'s own explicit pre-check pattern — see this
+            // module's doc comment, "Notification emit") so a redelivered
+            // `Create(Note)` (already ingested by `ingest_note_object`'s own
+            // `find_by_uri` idempotency guard, "Idempotent re-delivery")
+            // never re-emits a `Mention` notification. `ingest_note_object`
+            // itself repeats this exact `find_by_uri` lookup internally —
+            // deliberately not widened to return a New/Existing distinction,
+            // since that function is shared with `StatusIngestService` (task
+            // 6.2, out of this task's boundary to touch).
+            let already_ingested = match object.get("id").and_then(Value::as_str) {
+                Some(uri) => status_repository::find_by_uri(&self.pool, uri)
+                    .await?
+                    .is_some(),
+                None => false,
+            };
+
             // Delegates to the shared Note-ingestion code path also called
             // by `StatusIngestService` — see [`ingest_note_object`]'s own
             // doc comment for why (Requirement 14.5's "共通コードパス",
             // task 6.2's "受信ハンドラ経路と同一結果になる").
-            ingest_note_object(&self.pool, &self.runtime, object, actor_id).await?;
+            let status = ingest_note_object(&self.pool, &self.runtime, object, actor_id).await?;
+
+            // Task 10.2: emit a `Mention` NotificationEvent per resolved
+            // local mention, only for a genuinely new ingestion — see this
+            // module's doc comment ("Notification emit") for the full
+            // reasoning (resolution scope, recipient/origin tagging, the
+            // defensive self-mention skip).
+            if !already_ingested {
+                let mentioned_ids =
+                    resolve_local_mentions(&self.mentions, &self.domain, &status.content).await?;
+                let occurred_at = self.runtime.clock.now();
+                for mentioned_id in mentioned_ids {
+                    if mentioned_id == actor_id {
+                        continue;
+                    }
+                    self.notifications
+                        .emit(NotificationEvent {
+                            recipient: AccountRef::Local(mentioned_id),
+                            origin: AccountRef::Remote(actor_id),
+                            kind: NotificationType::Mention,
+                            target_status_id: Some(status.id),
+                            occurred_at,
+                        })
+                        .await?;
+                }
+            }
 
             Ok(HandleOutcome::Handled)
         })
@@ -740,19 +964,28 @@ impl<R: RemoteActorResolver> InboundActivityHandler for CreateNoteHandler<R> {
 
 /// Records an inbound `Announce` (a remote boost of a **local** post) as a
 /// reblog row and increments the target's `reblogs_count` (Requirements
-/// 14.1, 14.3).
+/// 14.1, 14.3). Also emits a `Reblog` [`NotificationEvent`] on a genuinely
+/// new boost (task 10.2 — see this module's own doc comment, "Notification
+/// emit").
 pub struct AnnounceHandler<R: RemoteActorResolver> {
     pool: PgPool,
     runtime: RuntimeContext,
     remote_actors: Arc<R>,
+    notifications: NotificationSinkRegistry,
 }
 
 impl<R: RemoteActorResolver> AnnounceHandler<R> {
-    pub fn new(pool: PgPool, runtime: RuntimeContext, remote_actors: Arc<R>) -> Self {
+    pub fn new(
+        pool: PgPool,
+        runtime: RuntimeContext,
+        remote_actors: Arc<R>,
+        notifications: NotificationSinkRegistry,
+    ) -> Self {
         Self {
             pool,
             runtime,
             remote_actors,
+            notifications,
         }
     }
 }
@@ -822,6 +1055,24 @@ impl<R: RemoteActorResolver> InboundActivityHandler for AnnounceHandler<R> {
             status_repository::insert_status(&self.pool, &reblog).await?;
             status_repository::adjust_counts(&self.pool, target.id, CountKind::Reblogs, 1).await?;
 
+            // Task 10.2: emit exactly once per new remote-origin boost — only
+            // reached past the `find_reblog` duplicate-check above (see this
+            // module's doc comment, "Notification emit"). Defensive
+            // self-interaction skip (currently unreachable — see that same
+            // doc comment) mirrors `InteractionService::reblog`'s identical
+            // guard.
+            if actor_id != target.actor_id {
+                self.notifications
+                    .emit(NotificationEvent {
+                        recipient: AccountRef::Local(target.actor_id),
+                        origin: AccountRef::Remote(actor_id),
+                        kind: NotificationType::Reblog,
+                        target_status_id: Some(target.id),
+                        occurred_at: now,
+                    })
+                    .await?;
+            }
+
             Ok(HandleOutcome::Handled)
         })
     }
@@ -833,18 +1084,28 @@ impl<R: RemoteActorResolver> InboundActivityHandler for AnnounceHandler<R> {
 
 /// Records an inbound `Like` (a remote favourite of a **local** post) and
 /// increments the target's `favourites_count` (Requirements 14.1, 14.3).
+/// Also emits a `Favourite` [`NotificationEvent`] on a genuinely new
+/// favourite (task 10.2 — see this module's own doc comment, "Notification
+/// emit").
 pub struct LikeHandler<R: RemoteActorResolver> {
     pool: PgPool,
     runtime: RuntimeContext,
     remote_actors: Arc<R>,
+    notifications: NotificationSinkRegistry,
 }
 
 impl<R: RemoteActorResolver> LikeHandler<R> {
-    pub fn new(pool: PgPool, runtime: RuntimeContext, remote_actors: Arc<R>) -> Self {
+    pub fn new(
+        pool: PgPool,
+        runtime: RuntimeContext,
+        remote_actors: Arc<R>,
+        notifications: NotificationSinkRegistry,
+    ) -> Self {
         Self {
             pool,
             runtime,
             remote_actors,
+            notifications,
         }
     }
 }
@@ -884,6 +1145,24 @@ impl<R: RemoteActorResolver> InboundActivityHandler for LikeHandler<R> {
             if is_new {
                 status_repository::adjust_counts(&self.pool, target.id, CountKind::Favourites, 1)
                     .await?;
+
+                // Task 10.2: emit exactly once per new remote-origin
+                // favourite — only reached when `add_favourite` reports
+                // `is_new` (see this module's doc comment, "Notification
+                // emit"). Defensive self-interaction skip (currently
+                // unreachable — see that same doc comment) mirrors
+                // `InteractionService::favourite`'s identical guard.
+                if actor_id != target.actor_id {
+                    self.notifications
+                        .emit(NotificationEvent {
+                            recipient: AccountRef::Local(target.actor_id),
+                            origin: AccountRef::Remote(actor_id),
+                            kind: NotificationType::Favourite,
+                            target_status_id: Some(target.id),
+                            occurred_at: now,
+                        })
+                        .await?;
+                }
             }
 
             Ok(HandleOutcome::Handled)
@@ -1146,26 +1425,37 @@ impl<R: RemoteActorResolver> InboundActivityHandler for UndoHandler<R> {
 /// Registers all six post-related inbound handlers against `dispatcher`
 /// (design.md's exact `register_status_handlers` Service Interface;
 /// Requirement 14.1). `deps` is cloned once per handler (`PgPool`/
-/// `RuntimeContext` are cheap-clone handles; `Arc<R>` is a pointer clone) —
-/// this function itself never touches the database or network.
-pub fn register_status_handlers<R: RemoteActorResolver + 'static>(
+/// `RuntimeContext`/`NotificationSinkRegistry` are cheap-clone handles;
+/// `Arc<R>` is a pointer clone) — this function itself never touches the
+/// database or network. `deps.mentions` (`M`, task 10.2) is moved, not
+/// cloned: only [`CreateNoteHandler`] consumes it, so no `M: Clone` bound is
+/// needed.
+pub fn register_status_handlers<
+    R: RemoteActorResolver + 'static,
+    M: LocalMentionResolver + 'static,
+>(
     dispatcher: &mut InboundActivityDispatcher,
-    deps: StatusInboundDeps<R>,
+    deps: StatusInboundDeps<R, M>,
 ) {
     dispatcher.register(Arc::new(CreateNoteHandler::new(
         deps.pool.clone(),
         deps.runtime.clone(),
         Arc::clone(&deps.remote_actors),
+        deps.domain.clone(),
+        deps.mentions,
+        deps.notifications.clone(),
     )));
     dispatcher.register(Arc::new(AnnounceHandler::new(
         deps.pool.clone(),
         deps.runtime.clone(),
         Arc::clone(&deps.remote_actors),
+        deps.notifications.clone(),
     )));
     dispatcher.register(Arc::new(LikeHandler::new(
         deps.pool.clone(),
         deps.runtime.clone(),
         Arc::clone(&deps.remote_actors),
+        deps.notifications.clone(),
     )));
     dispatcher.register(Arc::new(DeleteHandler::new(
         deps.pool.clone(),

@@ -145,16 +145,15 @@
 //! favourited/already-reblogged idempotent no-op branch, so a duplicate
 //! call never re-emits. Both skip a self-interaction (favouriting/
 //! reblogging your own post) — a documented judgment call, see `reblog`'s
-//! own inline comment. **Known asymmetry (out of this task's `_Boundary:
-//! InteractionService, StatusService, PollService_`)**: `inbound_handlers.rs`'s
-//! `AnnounceHandler`/`LikeHandler` (task 6.1) record a remote actor's
-//! reblog/favourite of a local post via the *same* repository functions
-//! this service calls, but bypass this service entirely (see that module's
-//! own doc comment) — so a remotely-received reblog/favourite does not
-//! currently emit a `NotificationEvent`, even though notifications/
-//! design.md's own invariant calls for symmetric local/remote emission
-//! (5.1, 5.2). Wiring that path is `inbound_handlers.rs`'s task, not this
-//! one's.
+//! own inline comment. **Formerly-known asymmetry, closed by task 10.2**:
+//! `inbound_handlers.rs`'s `AnnounceHandler`/`LikeHandler` (task 6.1) record
+//! a remote actor's reblog/favourite of a local post via the *same*
+//! repository functions this service calls, and — as of task 10.2 — also
+//! emit to the *same* `NotificationSinkRegistry` instance this service holds
+//! (threaded through as a constructor parameter, not a second, independent
+//! registry — see `inbound_handlers.rs`'s own doc comment, "Notification
+//! emit"), closing the local/remote-symmetric emission gap notifications/
+//! design.md's own invariant calls for (5.1, 5.2).
 //!
 //! ## `unreblog`/`unfavourite` return the (fresh) target/original status
 //! (documented choice)

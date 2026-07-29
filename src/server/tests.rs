@@ -46,6 +46,7 @@ use crate::federation::{FederationWiringConfig, build_federation_module};
 use crate::media;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
+use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::telemetry::{REQUEST_ID_FIELD, REQUEST_SPAN_NAME};
 
 const LAZY_TEST_DB_URL: &str = "postgres://lazy-user:lazy-pw@127.0.0.1:5432/lazy-test-db";
@@ -201,6 +202,7 @@ fn test_state(seed: u64) -> AppState {
         runtime.clone(),
         config.server.domain.clone(),
         Arc::clone(federation_module.delivery_service()),
+        NotificationSinkRegistry::new(),
     );
     AppState::new(
         pool,

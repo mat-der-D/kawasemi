@@ -105,6 +105,7 @@ use crate::oauth::OauthModule;
 use crate::runtime::{RuntimeContext, SnowflakeIdGenerator, SystemClock, SystemRng};
 use crate::server::{self, ServeError};
 use crate::state::AppState;
+use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{self, ProdRemoteActorResolver};
 use crate::telemetry::{self, TelemetryError};
 
@@ -399,6 +400,16 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         statuses_remote_actor_fetcher,
     ));
 
+    // Task 10.2: built here — *before* `federation::build_federation_module`
+    // runs `register_downstream_handlers` (which needs its own clone) — so
+    // the exact same `NotificationSinkRegistry` instance also reaches
+    // `statuses::build_statuses_module` below (`StatusService`/
+    // `InteractionService`'s own task-9.2 local-origin emit sink). A single
+    // future notifications bootstrap's `set_sink` call then reaches every
+    // emit call site, local- and remote-origin alike, at once — see
+    // `statuses::build_statuses_module`'s own doc comment.
+    let notifications = NotificationSinkRegistry::new();
+
     // Assembles the federation-core port bundle (task 5.4, Requirements 7.3,
     // 10.1, 11.1, 11.2): every federation-core port constructed with one
     // concrete production type (`crate::federation::build_federation_module`),
@@ -429,7 +440,9 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         statuses::register_downstream_handlers(
             pool.clone(),
             runtime.clone(),
+            cfg.server.domain.clone(),
             statuses_remote_actor_resolver,
+            notifications.clone(),
         ),
     );
     // Starts the delivery-worker poll loop and received-Activity pruning
@@ -491,12 +504,17 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     // `Arc<ConcreteDeliveryService>` handle (`StatusActivityBuilder`'s only
     // delivery path — see `activity_builder.rs`'s own doc comment on why
     // this field is now an `Arc`). No background task to spawn here —
-    // mirrors `accounts_module`'s own "no resident worker" precedent.
+    // mirrors `accounts_module`'s own "no resident worker" precedent. Passes
+    // this same `notifications` instance (task 10.2) already handed to
+    // `register_downstream_handlers` above, so `StatusService`/
+    // `InteractionService`'s local-origin emit sites and
+    // `inbound_handlers.rs`'s remote-origin ones share one registry.
     let statuses_module = statuses::build_statuses_module(
         pool.clone(),
         runtime.clone(),
         cfg.server.domain.clone(),
         Arc::clone(federation_module.delivery_service()),
+        notifications,
     );
 
     // Supplies statuses-core's own real implementations of the two

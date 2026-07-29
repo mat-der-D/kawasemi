@@ -21,12 +21,14 @@ use axum::http::{HeaderMap, StatusCode};
 use serde_json::{Value, json};
 
 use super::*;
+use crate::actor::ActorDirectory;
 use crate::domain::{Id, Visibility};
 use crate::error::ErrorKind;
 use crate::federation::VerifiedSigner;
 use crate::federation::inbound::dispatcher::InboundContext;
 use crate::federation::signatures::{HttpResponse, MockFederationHttpClient};
 use crate::statuses::inbound_handlers::CreateNoteHandler;
+use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::status_repository;
 use crate::test_harness::{TestApp, spawn_test_app};
 
@@ -478,6 +480,9 @@ async fn ingest_document_matches_the_inbound_dispatch_path_for_the_same_note() {
         app.pool.clone(),
         app.runtime.clone(),
         Arc::clone(&remote_actors),
+        "kawasemi.example",
+        ActorDirectory::new(app.pool.clone()),
+        NotificationSinkRegistry::new(),
     );
     let ctx = InboundContext {
         signer: VerifiedSigner {

@@ -479,20 +479,25 @@ impl StatusesModule {
 /// reference to — so callers (`src/bootstrap.rs`, `src/test_harness.rs`)
 /// pass `Arc::clone(federation_module.delivery_service())` directly, after
 /// `federation::build_federation_module` has already run.
+///
+/// `notifications` (task 10.2, widened from an internally-constructed value):
+/// callers now build one [`NotificationSinkRegistry`] *before* calling
+/// [`federation::build_federation_module`] and pass a clone both here and to
+/// [`register_downstream_handlers`], so `StatusService`/`InteractionService`
+/// (local-origin emit, task 9.2) and `inbound_handlers.rs`'s
+/// `CreateNoteHandler`/`AnnounceHandler`/`LikeHandler` (remote-origin emit,
+/// task 10.2) share the *same* registry instance — a single future
+/// `set_sink` call (via [`StatusesModule::notification_sink_registry`])
+/// reaches every emit call site, local and remote alike, at once.
 pub fn build_statuses_module(
     pool: PgPool,
     runtime: RuntimeContext,
     domain: impl Into<String>,
     delivery: Arc<ConcreteDeliveryService>,
+    notifications: NotificationSinkRegistry,
 ) -> StatusesModule {
     let domain = domain.into();
     let urls = ActorUrls::new(domain.clone());
-    // One shared registry (task 9.2) — `status_service`/`interaction_service`
-    // each hold a clone of this *same* instance so a single future
-    // `set_sink` call (via `StatusesModule::notification_sink_registry`)
-    // reaches every emit call site at once, defaulting to `NoopSink` until
-    // then.
-    let notifications = NotificationSinkRegistry::new();
 
     let status_builder = ConcreteStatusActivityBuilder::new(
         urls.clone(),
@@ -594,23 +599,37 @@ pub fn register_account_ports(
 }
 
 /// Builds the registration closure `crate::federation::build_federation_module`'s
-/// own `register_downstream` parameter expects (task 7.2, Requirement 14.1):
-/// registers all six post-related inbound handlers
+/// own `register_downstream` parameter expects (task 7.2, Requirement 14.1;
+/// `domain`/`notifications` params added by task 10.2, Requirements 9.1, 9.2,
+/// 10.1): registers all six post-related inbound handlers
 /// ([`inbound_handlers::register_status_handlers`]) against the live
 /// dispatcher, using [`ProdRemoteActorResolver`] as the production
-/// `RemoteActorResolver`. Callers (`src/bootstrap.rs`, `src/test_harness.rs`)
+/// `RemoteActorResolver` and a fresh [`ActorDirectory`] as the production
+/// [`crate::statuses::status_service::MentionLookup`] (the same port
+/// `build_statuses_module`'s own `StatusService` construction uses — see
+/// this module's own doc comment there, "one `ActorDirectory` per
+/// generic-port slot"). Callers (`src/bootstrap.rs`, `src/test_harness.rs`)
 /// build this closure's captured `resolver` from a `RemoteAccountFetcher`
 /// constructed the same way `crate::accounts::build_accounts_module`'s own
 /// call site does (its own, separately-constructed `ReqwestFederationHttpClient`
 /// — never the same `Arc` `FederationModule`'s own client uses), *before*
 /// calling `build_federation_module` (registration must happen inside that
 /// function, before its own `InboxService::new` call — see
-/// `src/federation/module.rs`'s own doc comment).
+/// `src/federation/module.rs`'s own doc comment), and pass the *same*
+/// [`NotificationSinkRegistry`] instance both here and to
+/// [`build_statuses_module`] (see that function's own doc comment) so a
+/// remote-origin emit (task 10.2) reaches whatever sink a future
+/// notifications bootstrap registers, exactly like a local-origin one
+/// (task 9.2) already does.
 pub fn register_downstream_handlers(
     pool: PgPool,
     runtime: RuntimeContext,
+    domain: impl Into<String>,
     resolver: Arc<ProdRemoteActorResolver>,
+    notifications: NotificationSinkRegistry,
 ) -> impl FnOnce(&mut InboundActivityDispatcher) {
+    let domain = domain.into();
+    let mentions = ActorDirectory::new(pool.clone());
     move |dispatcher: &mut InboundActivityDispatcher| {
         inbound_handlers::register_status_handlers(
             dispatcher,
@@ -618,6 +637,9 @@ pub fn register_downstream_handlers(
                 pool,
                 runtime,
                 remote_actors: resolver,
+                domain,
+                mentions,
+                notifications,
             },
         );
     }

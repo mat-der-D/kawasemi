@@ -103,6 +103,7 @@ use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::server;
 use crate::state::AppState;
+use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{self, ProdRemoteActorResolver};
 
 /// Environment variable overriding the shared test database's connection
@@ -641,6 +642,14 @@ pub async fn spawn_test_app() -> TestApp {
         statuses_remote_actor_fetcher,
     ));
 
+    // Task 10.2: built here, before `federation::build_federation_module`
+    // runs `register_downstream_handlers`, so the exact same
+    // `NotificationSinkRegistry` instance also reaches
+    // `statuses::build_statuses_module` below — mirrors `bootstrap()`'s own
+    // identical wiring, see that module's own doc comment at its matching
+    // call site.
+    let notifications = NotificationSinkRegistry::new();
+
     // Assembles the federation-core port bundle (task 5.4) the same way
     // `bootstrap()`'s production path does
     // (`crate::federation::build_federation_module`), sharing this
@@ -672,7 +681,9 @@ pub async fn spawn_test_app() -> TestApp {
         statuses::register_downstream_handlers(
             pool.clone(),
             runtime.clone(),
+            config.server.domain.clone(),
             statuses_remote_actor_resolver,
+            notifications.clone(),
         ),
     );
     federation_background.spawn();
@@ -723,6 +734,7 @@ pub async fn spawn_test_app() -> TestApp {
         runtime.clone(),
         config.server.domain.clone(),
         Arc::clone(federation_module.delivery_service()),
+        notifications,
     );
 
     // Supplies statuses-core's own real implementations of the two

@@ -247,13 +247,19 @@
 //! 現行 federation-core に存在しない...MVP では emit しない"). No change to
 //! `poll_service.rs`.
 //!
-//! **Known asymmetry (out of this task's boundary)**: `inbound_handlers.rs`
-//! (task 6.1) ingests a remote `Create(Note)` without persisting mentions
-//! at all (`ExtractedTokens::mentions` stays private — see that module's
-//! own doc comment), so a remote post mentioning a local actor does not
-//! currently emit a `NotificationEvent` either. See
-//! `InteractionService`'s doc comment ("Notification emit") for the
-//! identical asymmetry on the reblog/favourite side.
+//! **Formerly-known asymmetry, closed by task 10.2**: `inbound_handlers.rs`
+//! (task 6.1) ingests a remote `Create(Note)` without persisting mentions as
+//! a table (still true — see that module's own doc comment, "What this
+//! handler does *not* persist"), but as of task 10.2 it reuses
+//! [`extract_content_tokens`]/[`ExtractedTokens::mentions`] (widened from
+//! private to `pub(crate)`, the same treatment `hashtags` already got from
+//! task 6.1) to resolve a mentioning remote `Create(Note)`'s local mentions
+//! and emit a `Mention` `NotificationEvent` per resolved recipient —
+//! transient emit, not persistence, closing the *notification* half of this
+//! gap while the *persistence* half (a `status_mentions`-style table)
+//! remains open, tracked by task 10.3. See `InteractionService`'s doc
+//! comment ("Notification emit") for the identical reblog/favourite-side gap
+//! task 10.2 also closes.
 //!
 //! ## Emoji shortcode extraction: extracted, not yet consumed (CONCERN)
 //! [`extract_content_tokens`] extracts `:shortcode:` tokens per Requirement
@@ -373,10 +379,17 @@ pub struct StatusSource {
 /// (see [`extract_content_tokens`]). `domain` is `None` for a bare `@handle`
 /// mention (assumed local, matching this crate's own established
 /// mention-shorthand convention).
+///
+/// `pub(crate)` (widened by task 10.2, `Boundary: InboundHandlers`, mirroring
+/// `hashtags`' own identical task-6.1 widening below): a remote-origin
+/// `Create(Note)` ingestion also needs to resolve mentions to local
+/// notification recipients (Requirement 9.1/9.2/10.1's local/remote-symmetric
+/// emit invariant, applied to the mention side) — see
+/// `inbound_handlers.rs`'s own doc comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Mention {
-    local: String,
-    domain: Option<String>,
+pub(crate) struct Mention {
+    pub(crate) local: String,
+    pub(crate) domain: Option<String>,
 }
 
 /// The result of scanning a post's `content` for mentions/hashtags/emoji
@@ -387,15 +400,15 @@ struct Mention {
 /// function for hashtag persistence (Requirement 14.5's "共通コードパス" —
 /// the same extraction logic local-origin `create_status` already uses,
 /// rather than a second, duplicated hashtag scanner) — see
-/// `inbound_handlers.rs`'s own doc comment. `mentions`/`emoji_shortcodes`
-/// stay private: `InboundHandlers` does not consume them (see that module's
-/// own doc comment for why standalone-mention/emoji reflection is a
-/// documented structural gap, the same class this module's own "Mention
-/// resolution: local only"/"Emoji shortcode extraction" sections already
-/// flag).
+/// `inbound_handlers.rs`'s own doc comment. `mentions` is `pub(crate)` too
+/// (task 10.2, the identical reuse rationale applied to mention-notification
+/// resolution — see [`Mention`]'s own doc comment). `emoji_shortcodes` stays
+/// private: nothing outside this module consumes it yet (task 10.4's own
+/// still-open gap, this module's own doc comment, "Emoji shortcode
+/// extraction").
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct ExtractedTokens {
-    mentions: Vec<Mention>,
+    pub(crate) mentions: Vec<Mention>,
     pub(crate) hashtags: Vec<String>,
     emoji_shortcodes: Vec<String>,
 }

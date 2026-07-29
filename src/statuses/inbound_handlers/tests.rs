@@ -21,11 +21,20 @@ use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::domain::Visibility;
+use crate::actor::Handle;
+use crate::domain::{AccountRef, Visibility};
 use crate::error::ErrorKind;
 use crate::federation::VerifiedSigner;
 use crate::statuses::model::{Poll, PollOption};
+use crate::statuses::notification_sink::{NotificationEvent, NotificationEventSink};
 use crate::test_harness::{TestApp, spawn_test_app};
+
+/// Test-instance-wide "own domain" for mention-resolution tests (task
+/// 10.2), matching `CreateNoteHandler`'s own `domain` parameter — arbitrary
+/// but self-consistent, unrelated to `TestApp`'s own
+/// `config.server.domain` (nothing in these tests routes mention resolution
+/// through `TestApp`'s real config).
+const TEST_DOMAIN: &str = "kawasemi.example";
 
 // --- Test doubles -----------------------------------------------------------
 
@@ -58,6 +67,80 @@ impl RemoteActorResolver for FakeRemoteActors {
         map.insert(actor_uri.to_string(), id);
         Ok(id)
     }
+}
+
+/// An in-memory [`MentionLookup`] double (task 10.2): knows a fixed set of
+/// `(Id, handle)` pairs, mirroring
+/// `status_service/tests.rs::MockActorLookup`'s identical `MentionLookup`
+/// half — implements [`LocalMentionResolver`] (not `MentionLookup` directly;
+/// see that trait's own doc comment for why) via [`std::future::ready`],
+/// trivially `Send` since it captures only an already-computed
+/// `Result<Option<Id>, AppError>`.
+#[derive(Clone, Default)]
+struct FakeMentionLookup {
+    by_handle: HashMap<String, Id>,
+}
+
+impl FakeMentionLookup {
+    fn with_actors(pairs: &[(Id, &str)]) -> Self {
+        let mut by_handle = HashMap::new();
+        for (id, raw) in pairs {
+            by_handle.insert((*raw).to_string(), *id);
+        }
+        Self { by_handle }
+    }
+}
+
+impl LocalMentionResolver for FakeMentionLookup {
+    fn resolve_local_mention(
+        &self,
+        handle: &Handle,
+    ) -> impl std::future::Future<Output = Result<Option<Id>, AppError>> + Send {
+        std::future::ready(Ok(self.by_handle.get(handle.as_str()).copied()))
+    }
+}
+
+/// Records every [`NotificationEventSink::emit`] call (task 10.2) — mirrors
+/// `interaction_service/tests.rs::RecordingNotificationSink`/
+/// `status_service/tests.rs::RecordingNotificationSink`'s identical
+/// precedent.
+struct RecordingNotificationSink {
+    events: Mutex<Vec<NotificationEvent>>,
+}
+
+impl RecordingNotificationSink {
+    fn new() -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn events(&self) -> Vec<NotificationEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl NotificationEventSink for RecordingNotificationSink {
+    fn emit<'a>(
+        &'a self,
+        event: NotificationEvent,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        })
+    }
+}
+
+/// Builds a fresh [`NotificationSinkRegistry`] wired to a
+/// [`RecordingNotificationSink`], returning both — the registry to pass into
+/// a handler constructor, the recording handle to assert on afterward.
+fn recording_notifications() -> (NotificationSinkRegistry, Arc<RecordingNotificationSink>) {
+    let sink = Arc::new(RecordingNotificationSink::new());
+    let registry = NotificationSinkRegistry::new();
+    registry.set_sink(Arc::clone(&sink) as Arc<dyn NotificationEventSink>);
+    (registry, sink)
 }
 
 const REMOTE_ALICE: &str = "https://remote.example/actors/alice";
@@ -155,11 +238,14 @@ async fn insert_test_poll(app: &TestApp, status_id: Id, poll_id: Id, titles: &[&
     poll
 }
 
-fn deps(app: &TestApp) -> StatusInboundDeps<FakeRemoteActors> {
+fn deps(app: &TestApp) -> StatusInboundDeps<FakeRemoteActors, FakeMentionLookup> {
     StatusInboundDeps {
         pool: app.pool.clone(),
         runtime: app.runtime.clone(),
         remote_actors: Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        domain: TEST_DOMAIN.to_string(),
+        mentions: FakeMentionLookup::default(),
+        notifications: NotificationSinkRegistry::new(),
     }
 }
 
@@ -177,6 +263,9 @@ async fn create_note_ingests_a_remote_status_with_reply_and_visibility() {
         app.pool.clone(),
         app.runtime.clone(),
         Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        TEST_DOMAIN,
+        FakeMentionLookup::default(),
+        NotificationSinkRegistry::new(),
     );
 
     let activity = activity_from(json!({
@@ -239,6 +328,9 @@ async fn create_ignores_a_non_note_inner_object() {
         app.pool.clone(),
         app.runtime.clone(),
         Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        TEST_DOMAIN,
+        FakeMentionLookup::default(),
+        NotificationSinkRegistry::new(),
     );
 
     let activity = activity_from(json!({
@@ -269,6 +361,9 @@ async fn create_note_redelivery_is_idempotent() {
         app.pool.clone(),
         app.runtime.clone(),
         Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        TEST_DOMAIN,
+        FakeMentionLookup::default(),
+        NotificationSinkRegistry::new(),
     );
 
     let activity = activity_from(json!({
@@ -313,7 +408,14 @@ async fn create_note_matching_the_vote_wire_shape_records_a_vote_not_a_status() 
     insert_test_poll(&app, poll_status.id, poll_id, &["Pizza", "Sushi", "Tacos"]).await;
 
     let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
-    let handler = CreateNoteHandler::new(app.pool.clone(), app.runtime.clone(), remote_actors);
+    let handler = CreateNoteHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        remote_actors,
+        TEST_DOMAIN,
+        FakeMentionLookup::default(),
+        NotificationSinkRegistry::new(),
+    );
 
     let activity = activity_from(json!({
         "id": "https://remote.example/activities/create-vote",
@@ -370,6 +472,9 @@ async fn create_note_with_unmatched_name_falls_through_to_ordinary_ingestion() {
         app.pool.clone(),
         app.runtime.clone(),
         Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        TEST_DOMAIN,
+        FakeMentionLookup::default(),
+        NotificationSinkRegistry::new(),
     );
 
     let activity = activity_from(json!({
@@ -403,6 +508,260 @@ async fn create_note_with_unmatched_name_falls_through_to_ordinary_ingestion() {
     app.cleanup().await;
 }
 
+// -- CreateNoteHandler: mention notifications (task 10.2, Requirements 9.1,
+// 9.2, 10.1) -----------------------------------------------------------------
+
+/// A remote `Create(Note)` mentioning a registered local actor emits exactly
+/// one `Mention` `NotificationEvent` — recipient the mentioned local actor,
+/// origin the remote author — and a redelivery of the identical `Create`
+/// does not re-emit (mirrors `create_note_redelivery_is_idempotent`'s own
+/// `find_by_uri`-gated idempotency, applied here to the notification side).
+#[tokio::test]
+async fn create_note_mentioning_a_local_actor_emits_a_mention_notification_event_exactly_once() {
+    let app = spawn_test_app().await;
+    let bob = app.runtime.ids.next_id();
+
+    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actor_id = remote_actors
+        .resolve_remote_actor(REMOTE_ALICE)
+        .await
+        .expect("resolve must succeed");
+    let (notifications, sink) = recording_notifications();
+    let handler = CreateNoteHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        Arc::clone(&remote_actors),
+        TEST_DOMAIN,
+        FakeMentionLookup::with_actors(&[(bob, "bob")]),
+        notifications,
+    );
+
+    let activity = activity_from(json!({
+        "id": "https://remote.example/activities/create-mention-1",
+        "type": "Create",
+        "actor": REMOTE_ALICE,
+        "object": {
+            "id": "https://remote.example/notes/mention-1",
+            "type": "Note",
+            "attributedTo": REMOTE_ALICE,
+            "content": "hello @bob, welcome!",
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+        }
+    }));
+
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("must be handled");
+    // Redelivery of the identical Create must hit `ingest_note_object`'s own
+    // `find_by_uri` idempotency guard and must not re-emit.
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("a redelivered Create must not error");
+
+    let ingested =
+        status_repository::find_by_uri(&app.pool, "https://remote.example/notes/mention-1")
+            .await
+            .expect("query must succeed")
+            .expect("the mentioning Note must be ingested");
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "a redelivered Create must not re-emit");
+    assert_eq!(events[0].kind, NotificationType::Mention);
+    assert_eq!(events[0].recipient, AccountRef::Local(bob));
+    assert_eq!(events[0].origin, AccountRef::Remote(remote_actor_id));
+    assert_eq!(events[0].target_status_id, Some(ingested.id));
+
+    app.cleanup().await;
+}
+
+/// A `Create(Note)` mentioning two distinct registered local actors emits
+/// one `Mention` `NotificationEvent` per mentioned actor.
+#[tokio::test]
+async fn create_note_mentioning_two_local_actors_emits_two_mention_notification_events() {
+    let app = spawn_test_app().await;
+    let bob = app.runtime.ids.next_id();
+    let carol = app.runtime.ids.next_id();
+
+    let (notifications, sink) = recording_notifications();
+    let handler = CreateNoteHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        TEST_DOMAIN,
+        FakeMentionLookup::with_actors(&[(bob, "bob"), (carol, "carol")]),
+        notifications,
+    );
+
+    let activity = activity_from(json!({
+        "id": "https://remote.example/activities/create-mention-2",
+        "type": "Create",
+        "actor": REMOTE_ALICE,
+        "object": {
+            "id": "https://remote.example/notes/mention-2",
+            "type": "Note",
+            "attributedTo": REMOTE_ALICE,
+            "content": "hey @bob and @carol",
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+        }
+    }));
+
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("must be handled");
+
+    let events = sink.events();
+    assert_eq!(events.len(), 2);
+    let recipients: std::collections::HashSet<AccountRef> =
+        events.iter().map(|e| e.recipient).collect();
+    assert!(recipients.contains(&AccountRef::Local(bob)));
+    assert!(recipients.contains(&AccountRef::Local(carol)));
+    assert!(events.iter().all(|e| e.kind == NotificationType::Mention));
+
+    app.cleanup().await;
+}
+
+/// A mention naming a domain other than this instance's own configured
+/// `domain` is never resolved (mirrors `status_service.rs`'s identical
+/// local-origin "Mention resolution: local only" gap, applied symmetrically
+/// here) — even when a local actor happens to be registered under the same
+/// bare handle, so it must not be notified about a mention that, on the
+/// wire, actually named someone else's domain.
+#[tokio::test]
+async fn create_note_mentioning_a_different_domain_emits_no_notification_event() {
+    let app = spawn_test_app().await;
+    let bob = app.runtime.ids.next_id();
+
+    let (notifications, sink) = recording_notifications();
+    let handler = CreateNoteHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        TEST_DOMAIN,
+        FakeMentionLookup::with_actors(&[(bob, "bob")]),
+        notifications,
+    );
+
+    let activity = activity_from(json!({
+        "id": "https://remote.example/activities/create-mention-3",
+        "type": "Create",
+        "actor": REMOTE_ALICE,
+        "object": {
+            "id": "https://remote.example/notes/mention-3",
+            "type": "Note",
+            "attributedTo": REMOTE_ALICE,
+            "content": "hi @bob@other.example",
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+        }
+    }));
+
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("must be handled");
+
+    assert!(
+        sink.events().is_empty(),
+        "a mention naming a different domain must not resolve to a local recipient"
+    );
+
+    app.cleanup().await;
+}
+
+/// A `Create(Note)` mentioning a handle with no locally-registered actor
+/// emits no `NotificationEvent` (there is no `Id` to tag it with).
+#[tokio::test]
+async fn create_note_mentioning_an_unregistered_handle_emits_no_notification_event() {
+    let app = spawn_test_app().await;
+
+    let (notifications, sink) = recording_notifications();
+    let handler = CreateNoteHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        TEST_DOMAIN,
+        FakeMentionLookup::default(),
+        notifications,
+    );
+
+    let activity = activity_from(json!({
+        "id": "https://remote.example/activities/create-mention-4",
+        "type": "Create",
+        "actor": REMOTE_ALICE,
+        "object": {
+            "id": "https://remote.example/notes/mention-4",
+            "type": "Note",
+            "attributedTo": REMOTE_ALICE,
+            "content": "hi @nobody",
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+        }
+    }));
+
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("must be handled");
+
+    assert!(sink.events().is_empty());
+
+    app.cleanup().await;
+}
+
+/// Defensive self-mention guard (task 10.2 — currently unreachable in
+/// production, see `inbound_handlers.rs`'s own doc comment, "Notification
+/// emit": a genuinely emit-reachable branch here can only be a first-
+/// recorded remote-origin interaction, so `mentioned_id == actor_id` cannot
+/// occur through any real call path today). Proven directly by artificially
+/// constructing a [`FakeMentionLookup`] that resolves a mention to the exact
+/// same [`Id`] [`FakeRemoteActors`] assigns the acting remote actor —
+/// exercising the skip condition itself, not a realistic wire scenario.
+#[tokio::test]
+async fn create_note_self_mention_via_a_coincident_id_is_not_notified() {
+    let app = spawn_test_app().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actor_id = remote_actors
+        .resolve_remote_actor(REMOTE_ALICE)
+        .await
+        .expect("resolve must succeed");
+
+    let (notifications, sink) = recording_notifications();
+    let handler = CreateNoteHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        Arc::clone(&remote_actors),
+        TEST_DOMAIN,
+        FakeMentionLookup::with_actors(&[(remote_actor_id, "alice")]),
+        notifications,
+    );
+
+    let activity = activity_from(json!({
+        "id": "https://remote.example/activities/create-mention-5",
+        "type": "Create",
+        "actor": REMOTE_ALICE,
+        "object": {
+            "id": "https://remote.example/notes/mention-5",
+            "type": "Note",
+            "attributedTo": REMOTE_ALICE,
+            "content": "talking to myself, @alice",
+            "to": ["https://www.w3.org/ns/activitystreams#Public"],
+        }
+    }));
+
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("must be handled");
+
+    assert!(
+        sink.events().is_empty(),
+        "a mention resolving to the same Id as the acting actor must be skipped"
+    );
+
+    app.cleanup().await;
+}
+
 // -- AnnounceHandler ----------------------------------------------------------
 
 /// Requirement 14.3: an inbound `Announce` of a local post records a reblog
@@ -417,6 +776,7 @@ async fn announce_of_a_local_post_records_reblog_and_increments_count() {
         app.pool.clone(),
         app.runtime.clone(),
         Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        NotificationSinkRegistry::new(),
     );
 
     let activity = activity_from(json!({
@@ -441,6 +801,59 @@ async fn announce_of_a_local_post_records_reblog_and_increments_count() {
     app.cleanup().await;
 }
 
+/// Task 10.2, Requirements 9.1, 9.2, 10.1: an inbound `Announce` of a local
+/// post emits exactly one `Reblog` `NotificationEvent` — recipient the
+/// target's local author, origin the remote booster — and a redelivered
+/// (duplicate) `Announce` does not re-emit (mirrors the `find_reblog`
+/// duplicate-guard `announce_of_a_local_post_records_reblog_and_increments_count`
+/// already exercises for the counter side).
+#[tokio::test]
+async fn announce_of_a_local_post_emits_a_reblog_notification_event_exactly_once() {
+    let app = spawn_test_app().await;
+    let local_author = app.runtime.ids.next_id();
+    let target = insert_test_status(&app, local_author, Visibility::Public, true, None).await;
+
+    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actor_id = remote_actors
+        .resolve_remote_actor(REMOTE_ALICE)
+        .await
+        .expect("resolve must succeed");
+    let (notifications, sink) = recording_notifications();
+    let handler = AnnounceHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        Arc::clone(&remote_actors),
+        notifications,
+    );
+
+    let activity = activity_from(json!({
+        "id": "https://remote.example/activities/announce-notify-1",
+        "type": "Announce",
+        "actor": REMOTE_ALICE,
+        "object": target.uri,
+    }));
+
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("must be handled");
+    // Redelivery of the identical Announce must hit the existing
+    // `find_reblog` duplicate-guard and must not re-emit.
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("a redelivered Announce must not error");
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "a duplicate Announce must not re-emit");
+    assert_eq!(events[0].kind, NotificationType::Reblog);
+    assert_eq!(events[0].recipient, AccountRef::Local(local_author));
+    assert_eq!(events[0].origin, AccountRef::Remote(remote_actor_id));
+    assert_eq!(events[0].target_status_id, Some(target.id));
+
+    app.cleanup().await;
+}
+
 /// Requirement 14.3: an `Announce` of a **remote** (not-locally-owned) post
 /// is not this handler's concern.
 #[tokio::test]
@@ -449,10 +862,12 @@ async fn announce_of_a_remote_post_is_ignored() {
     let remote_author = app.runtime.ids.next_id();
     let target = insert_test_status(&app, remote_author, Visibility::Public, false, None).await;
 
+    let (notifications, sink) = recording_notifications();
     let handler = AnnounceHandler::new(
         app.pool.clone(),
         app.runtime.clone(),
         Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        notifications,
     );
 
     let activity = activity_from(json!({
@@ -467,6 +882,10 @@ async fn announce_of_a_remote_post_is_ignored() {
         .await
         .expect("must not error");
     assert_eq!(outcome, HandleOutcome::Ignored);
+    assert!(
+        sink.events().is_empty(),
+        "an Announce of a non-local target must not emit a NotificationEvent"
+    );
 
     app.cleanup().await;
 }
@@ -482,7 +901,12 @@ async fn like_of_a_local_post_increments_count_and_is_idempotent() {
     let target = insert_test_status(&app, local_author, Visibility::Public, true, None).await;
 
     let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
-    let handler = LikeHandler::new(app.pool.clone(), app.runtime.clone(), remote_actors);
+    let handler = LikeHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        remote_actors,
+        NotificationSinkRegistry::new(),
+    );
 
     let activity = activity_from(json!({
         "id": "https://remote.example/activities/like-1",
@@ -508,6 +932,91 @@ async fn like_of_a_local_post_increments_count_and_is_idempotent() {
         refreshed.favourites_count, 1,
         "a duplicate Like must not double-count"
     );
+
+    app.cleanup().await;
+}
+
+/// Task 10.2, Requirements 9.1, 9.2, 10.1: an inbound `Like` of a local post
+/// emits exactly one `Favourite` `NotificationEvent` — recipient the
+/// target's local author, origin the remote actor who liked it — and a
+/// duplicate `Like` does not re-emit (mirrors
+/// `like_of_a_local_post_increments_count_and_is_idempotent`'s own
+/// `is_new`-gated counter behavior).
+#[tokio::test]
+async fn like_of_a_local_post_emits_a_favourite_notification_event_exactly_once() {
+    let app = spawn_test_app().await;
+    let local_author = app.runtime.ids.next_id();
+    let target = insert_test_status(&app, local_author, Visibility::Public, true, None).await;
+
+    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actor_id = remote_actors
+        .resolve_remote_actor(REMOTE_ALICE)
+        .await
+        .expect("resolve must succeed");
+    let (notifications, sink) = recording_notifications();
+    let handler = LikeHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        Arc::clone(&remote_actors),
+        notifications,
+    );
+
+    let activity = activity_from(json!({
+        "id": "https://remote.example/activities/like-notify-1",
+        "type": "Like",
+        "actor": REMOTE_ALICE,
+        "object": target.uri,
+    }));
+
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("must be handled");
+    handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("a duplicate Like must not error");
+
+    let events = sink.events();
+    assert_eq!(events.len(), 1, "a duplicate Like must not re-emit");
+    assert_eq!(events[0].kind, NotificationType::Favourite);
+    assert_eq!(events[0].recipient, AccountRef::Local(local_author));
+    assert_eq!(events[0].origin, AccountRef::Remote(remote_actor_id));
+    assert_eq!(events[0].target_status_id, Some(target.id));
+
+    app.cleanup().await;
+}
+
+/// Requirement 14.3 (fan-out ownership): a `Like` of a **remote**
+/// (not-locally-owned) post is not this handler's concern, and emits no
+/// `NotificationEvent`.
+#[tokio::test]
+async fn like_of_a_remote_post_is_ignored_and_emits_no_notification() {
+    let app = spawn_test_app().await;
+    let remote_author = app.runtime.ids.next_id();
+    let target = insert_test_status(&app, remote_author, Visibility::Public, false, None).await;
+
+    let (notifications, sink) = recording_notifications();
+    let handler = LikeHandler::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        notifications,
+    );
+
+    let activity = activity_from(json!({
+        "id": "https://remote.example/activities/like-2",
+        "type": "Like",
+        "actor": REMOTE_ALICE,
+        "object": target.uri,
+    }));
+
+    let outcome = handler
+        .handle(&activity, &ctx_for(REMOTE_ALICE))
+        .await
+        .expect("must not error");
+    assert_eq!(outcome, HandleOutcome::Ignored);
+    assert!(sink.events().is_empty());
 
     app.cleanup().await;
 }
@@ -695,6 +1204,7 @@ async fn undo_announce_reverts_reblog_and_decrements_count() {
         app.pool.clone(),
         app.runtime.clone(),
         Arc::clone(&remote_actors),
+        NotificationSinkRegistry::new(),
     );
     let announce = activity_from(json!({
         "id": "https://remote.example/activities/announce-undo",
@@ -748,6 +1258,7 @@ async fn undo_like_reverts_favourite_and_decrements_count() {
         app.pool.clone(),
         app.runtime.clone(),
         Arc::clone(&remote_actors),
+        NotificationSinkRegistry::new(),
     );
     let like = activity_from(json!({
         "id": "https://remote.example/activities/like-undo",

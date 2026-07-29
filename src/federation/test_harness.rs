@@ -105,6 +105,7 @@ use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::server;
 use crate::state::AppState;
+use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{self, ProdRemoteActorResolver};
 use crate::test_harness::{TestApp, TestAppParts};
 
@@ -381,6 +382,13 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         statuses_remote_actor_fetcher,
     ));
 
+    // Task 10.2: built here, before `federation::build_federation_module`
+    // runs `register_downstream_handlers`, so the exact same
+    // `NotificationSinkRegistry` instance also reaches
+    // `statuses::build_statuses_module` below — mirrors `bootstrap()`'s own
+    // identical wiring.
+    let notifications = NotificationSinkRegistry::new();
+
     // Requirement 13.1: `http_client` is the caller-supplied
     // `ReqwestFederationHttpClient::insecure_loopback()` instance (see
     // `spawn_federation_pair`), so this instance's own outbound public-key
@@ -417,7 +425,9 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         statuses::register_downstream_handlers(
             pool.clone(),
             runtime.clone(),
+            config.server.domain.clone(),
             statuses_remote_actor_resolver,
+            notifications.clone(),
         ),
     );
     federation_background.spawn();
@@ -463,6 +473,7 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         runtime.clone(),
         config.server.domain.clone(),
         Arc::clone(federation_module.delivery_service()),
+        notifications,
     );
 
     let state = AppState::new(
