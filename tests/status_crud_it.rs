@@ -20,19 +20,20 @@
 //! modules" convention (see `tasks.md`'s Implementation Notes for 3.2/task
 //! 4.1's `UndoKind`).
 //!
-//! Requirement 13.1 note: `StatusService::create_status` does not persist a
-//! caller-supplied poll at all yet (see `status_service.rs`'s own "Poll
-//! handling" doc comment and `tasks.md`'s Implementation Notes for 5.1/5.3
-//! — a documented, already-reviewed cross-task boundary decision, not a
-//! bug this task's boundary permits fixing). This file's
-//! `create_status_with_a_poll_is_rejected_and_mutual_exclusivity_with_media_holds`
-//! test documents the currently-observable contract (every poll-bearing
-//! create request is rejected 422) rather than asserting a not-yet-wired
-//! feature; poll *voting* (13.2-13.5) is fully covered in
+//! Requirement 13.1 note: `StatusService::create_status` persists a
+//! caller-supplied poll (see `status_service.rs`'s own "Poll handling" doc
+//! comment — wired by a feature-level remediation round after this spec's
+//! own tasks 5.1/5.3 had deliberately deferred it). This file's
+//! `create_status_with_a_poll_is_created_and_mutual_exclusivity_with_media_holds`
+//! test exercises real poll creation through the public HTTP API (a
+//! poll-bearing create request succeeds and the response embeds a real
+//! `poll` object), and separately confirms poll+media mutual exclusivity
+//! still 422s; poll *voting* (13.2-13.5) is fully covered in
 //! `tests/polls_it.rs` against directly-fixtured polls, the same
 //! "insert fixtures directly, bypass the creating service" pattern
 //! `poll_service.rs`'s own doc comment documents as the accepted technique
-//! while 13.1 remains unwired.
+//! for exercising voting without re-deriving a poll-bearing status through
+//! the endpoint each time.
 
 use axum::Router;
 use axum::body::Body;
@@ -464,9 +465,11 @@ async fn create_status_requires_write_statuses_scope() {
     app.cleanup().await;
 }
 
-/// See this file's own doc comment (Requirement 13.1 note).
+/// See this file's own doc comment (Requirement 13.1 note): a poll-bearing
+/// create request succeeds and the response embeds a real `poll` object
+/// with the given options; poll+media mutual exclusivity still holds.
 #[tokio::test]
-async fn create_status_with_a_poll_is_rejected_and_mutual_exclusivity_with_media_holds() {
+async fn create_status_with_a_poll_is_created_and_mutual_exclusivity_with_media_holds() {
     let app = spawn_test_app().await;
     let router = real_router(&app);
     let alice = insert_actor_fixture(&app, "alice_poll_create").await;
@@ -486,8 +489,23 @@ async fn create_status_with_a_poll_is_rejected_and_mutual_exclusivity_with_media
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "got: {body:?}");
-    assert_error_shape(&body);
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+    let poll = body
+        .get("poll")
+        .expect("a poll-bearing create response must embed a poll object");
+    assert!(!poll["id"].as_str().unwrap_or_default().is_empty());
+    assert_eq!(poll["multiple"], json!(false));
+    assert_eq!(poll["voted"], json!(false));
+    let option_titles: Vec<&str> = poll["options"]
+        .as_array()
+        .expect("poll.options must be an array")
+        .iter()
+        .map(|option| option["title"].as_str().expect("option.title"))
+        .collect();
+    assert_eq!(option_titles, vec!["a", "b"]);
+    for option in poll["options"].as_array().unwrap() {
+        assert_eq!(option["votes_count"], json!(0));
+    }
 
     let media_id = insert_owned_media(&app, alice.id).await;
     let (status, body) = send(

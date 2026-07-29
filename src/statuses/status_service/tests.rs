@@ -560,14 +560,14 @@ async fn poll_and_media_together_are_rejected() {
     app.cleanup().await;
 }
 
-/// This task's own documented boundary decision ("Poll handling"): a
-/// caller-supplied poll (without media) is rejected, not silently dropped,
-/// since real poll persistence belongs to `PollService` (task 5.3).
+/// Requirement 13.1: a caller-supplied poll (without media) is genuinely
+/// created and associated with the new post — a real `polls`/`poll_options`
+/// row exists afterward, not silently dropped and not rejected.
 #[tokio::test]
-async fn poll_without_media_is_rejected_not_silently_dropped() {
+async fn poll_without_media_is_created_and_associated_with_the_post() {
     let app = spawn_test_app().await;
     let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let (service, local_sink, http_sink) = service(&app, author, "alice", false);
 
     let mut input = create_input("pick one", Visibility::Public);
     input.poll = Some(CreateStatusPoll {
@@ -576,12 +576,90 @@ async fn poll_without_media_is_rejected_not_silently_dropped() {
         expires_at: None,
     });
 
+    let created = service
+        .create_status(author, input, None)
+        .await
+        .expect("a well-formed poll (>= 2 options, no media) must be created");
+
+    let poll_id = created
+        .poll_id
+        .expect("the created status must carry a poll_id");
+
+    let poll = crate::statuses::poll_repository::find_poll_by_id(&app.pool, poll_id)
+        .await
+        .expect("find_poll_by_id must succeed")
+        .expect("the poll row must actually exist");
+    assert_eq!(poll.status_id, created.id);
+    assert!(!poll.multiple);
+
+    let tally = crate::statuses::poll_repository::tally(&app.pool, poll_id, Some(author))
+        .await
+        .expect("tally must succeed for a freshly-created poll");
+    let titles: Vec<&str> = tally
+        .options
+        .iter()
+        .map(|option| option.title.as_str())
+        .collect();
+    assert_eq!(titles, vec!["yes", "no"]);
+    assert!(tally.options.iter().all(|option| option.votes_count == 0));
+
+    // A poll-bearing post still dispatches a normal `Create` — no separate
+    // "poll creation" Activity type exists (see this module's own doc
+    // comment, "Poll handling").
+    assert_eq!(deliveries(&local_sink, &http_sink), 1);
+
+    app.cleanup().await;
+}
+
+/// Requirement 13.1 (implied by 13.4's "範囲外の選択肢インデックス" only
+/// making sense for a poll with >= 2 options — see this module's doc
+/// comment, "Poll creation validation"): fewer than 2 options is rejected.
+#[tokio::test]
+async fn poll_with_fewer_than_two_options_is_rejected() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let (service, _local, _http) = service(&app, author, "alice", false);
+
+    let mut input = create_input("pick one", Visibility::Public);
+    input.poll = Some(CreateStatusPoll {
+        options: vec!["only one".to_string()],
+        multiple: false,
+        expires_at: None,
+    });
+
     let err = service
         .create_status(author, input, None)
         .await
-        .expect_err("a caller-supplied poll must not be silently accepted-and-dropped");
+        .expect_err("a poll with a single option must be rejected");
 
     assert_eq!(err.kind, ErrorKind::Client);
+    assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    app.cleanup().await;
+}
+
+/// A blank (whitespace-only) option title is rejected, matching the same
+/// "degenerate poll" reasoning as the too-few-options case above.
+#[tokio::test]
+async fn poll_with_a_blank_option_is_rejected() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let (service, _local, _http) = service(&app, author, "alice", false);
+
+    let mut input = create_input("pick one", Visibility::Public);
+    input.poll = Some(CreateStatusPoll {
+        options: vec!["yes".to_string(), "   ".to_string()],
+        multiple: false,
+        expires_at: None,
+    });
+
+    let err = service
+        .create_status(author, input, None)
+        .await
+        .expect_err("a blank poll option must be rejected");
+
+    assert_eq!(err.kind, ErrorKind::Client);
+    assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
     app.cleanup().await;
 }

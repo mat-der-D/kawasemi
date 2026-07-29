@@ -16,12 +16,11 @@
 //! `CreateStatus`/`EditStatus`/`StatusContext`/`StatusSource` input/output
 //! types design.md's own excerpt does not spell out (see "Input/output
 //! shapes" below). Does not implement `InteractionService` (task 5.2) or
-//! `PollService` (task 5.3) — `create_status` only *validates* the
-//! poll/media exclusivity rule (Requirement 13.1) and otherwise leaves real
-//! poll persistence to `PollService`, per design.md's own Requirements
-//! Traceability table, which lists 13.1's owning components as
-//! "PollService, PollRepository, StatusActivityBuilder", **not**
-//! `StatusService` (see "Poll handling" below for the full reasoning). Does
+//! `PollService` (task 5.3) — `create_status` validates the poll/media
+//! exclusivity rule and a minimal poll shape (Requirement 13.1) and
+//! persists the poll itself via `PollRepository::insert_poll` (see "Poll
+//! handling" below for the full reasoning); `PollService` remains the sole
+//! owner of poll *voting* (Requirements 13.2-13.6). Does
 //! not implement the HTTP surface (`StatusEndpoints`, task 7.1) or call
 //! `serializer::status_to_json` itself — per that module's own doc comment
 //! ("mentions/tags/emojis... are all supplied as already-resolved caller
@@ -104,20 +103,54 @@
 //! via this task's own new [`crate::statuses::status_repository::replace_media`] —
 //! only the *historical* per-version media snapshot is unavailable.
 //!
-//! ## Poll handling (Requirement 13.1 — documented boundary decision)
-//! design.md's Requirements Traceability table lists 13.1's owning
-//! components as "PollService, PollRepository, StatusActivityBuilder" —
-//! `StatusService` is not among them. [`CreateStatus::poll`] is therefore
-//! validated (mutual exclusivity with `media_ids`, Requirement 13.1) but
-//! never persisted here: a caller-supplied poll causes
-//! [`StatusService::create_status`] to reject the request with a clear,
-//! non-silent `422` (never a silent drop) rather than guess at
-//! `PollRepository::insert_poll`'s call-site sequencing (poll id minting,
-//! option persistence, and how a not-yet-invented `PollService` (task 5.3)
-//! is meant to layer atop the status row this method creates) — a decision
-//! this task's own boundary instructions call out as the correct,
-//! structurally-sound interpretation when full poll wiring is out of a
-//! task's dependency set.
+//! ## Poll handling (Requirement 13.1 — wired by feature-level remediation)
+//! [`CreateStatus::poll`] is validated (mutual exclusivity with `media_ids`;
+//! at least 2 non-blank options — see "Poll creation validation" below) and
+//! then genuinely persisted: [`StatusService::create_status`] mints a poll
+//! id alongside the status id, sets it on the new [`Status::poll_id`],
+//! inserts the status row, then builds a [`Poll`]/`Vec<PollOption>` and
+//! calls [`crate::statuses::poll_repository::insert_poll`] — the same
+//! status-then-poll ordering `tests/polls_it.rs::insert_poll_status_fixture`
+//! already established (`statuses.poll_id` carries no FK, `polls.status_id`
+//! does, so the status row can safely be inserted first). This was
+//! originally deferred (task 5.1) to a not-yet-existing `PollService` task
+//! 5.3; task 5.3 itself explicitly excluded 13.1 from its own scope
+//! (`tasks.md`'s 5.3 Implementation Notes) and left `PollRepository::insert_poll`
+//! unwired "for a future task" — this module is that future task, closing a
+//! feature-level `/kiro-validate-impl` NO-GO finding. `PollService` remains
+//! the sole owner of poll *voting* (Requirements 13.2-13.6); this method
+//! only ever creates a poll with zero votes.
+//!
+//! ### Poll creation validation
+//! Requirement 13.1's own text ("選択肢・締切・単一/複数選択") does not spell
+//! out a minimum option count, but Requirement 13.4's voting-side rejection
+//! of an "範囲外の選択肢インデックス" (out-of-range option index) only makes
+//! sense for a poll that already has at least 2 selectable options — a
+//! 0- or 1-option poll has no meaningful index range to vote among. This
+//! method therefore rejects (`422`) a poll with fewer than 2 options, or
+//! any blank (whitespace-only) option title, at creation time rather than
+//! silently persisting a poll no client could sensibly render or vote on.
+//! No upper bound on option count is enforced — Requirement 13.1 names none,
+//! and inventing one would be scope creep beyond what this requirement (or
+//! any requirement adjacent to it) actually calls for.
+//!
+//! ### Outbound wire format: `Create(Note)` does not yet embed poll data
+//! (CONCERN, out of this remediation's scope) [`deliver_create`]
+//! ([`crate::statuses::activity_builder::StatusActivityBuilder::deliver_create`])
+//! already fires for a poll-bearing `Status` exactly as it does for any
+//! other new post — no separate "poll creation" Activity type exists,
+//! matching design.md's own "a poll-bearing Note is just a Note with poll
+//! data embedded in its JSON-LD representation" framing. However,
+//! `deliver_create`'s own `Note` object builder does not currently emit
+//! `type: "Question"`/`oneOf`/`anyOf`/`endTime`/`closed` for a status whose
+//! `poll_id` is `Some(_)` — the outbound Activity for a poll-bearing post is
+//! observably identical to a plain text post's. This is a genuine gap in
+//! the federation wire format, but a materially larger, separate change
+//! (a full `Question` JSON-LD representation, `activity_builder.rs`'s own
+//! boundary) than this remediation — which targets `StatusService::create_status`'s
+//! *domain-layer* poll persistence (Requirement 13.1's "投票を作成して投稿に
+//! 紐づけ") — is scoped to fix. Flagged here rather than silently left
+//! undiscovered or silently expanded into.
 //!
 //! ## `delete_status` rejects reblog rows (Requirement 7.x — documented
 //! boundary decision, Group 5 cross-task remediation)
@@ -251,10 +284,11 @@ use crate::runtime::RuntimeContext;
 use crate::statuses::activity_builder::{ActorHandleLookup, StatusActivityBuilder};
 use crate::statuses::addressing::{self, ActorRef, Addressing};
 use crate::statuses::idempotency::{self, IdempotencyLookup};
-use crate::statuses::model::{Status, StatusEdit, Tag};
+use crate::statuses::model::{Poll, PollOption, Status, StatusEdit, Tag};
 use crate::statuses::notification_sink::{
     NotificationEvent, NotificationSinkRegistry, NotificationType,
 };
+use crate::statuses::poll_repository;
 use crate::statuses::status_repository::{self, CountKind};
 use crate::statuses::tag_repository;
 use crate::statuses::visibility::{self, RelationshipQuery};
@@ -628,8 +662,8 @@ where
     }
 
     /// Creates a new post (Requirements 3.1-3.6, 5.1-5.3, 13.1). See this
-    /// module's doc comment ("Poll handling") for why a caller-supplied
-    /// poll is validated but rejected rather than persisted.
+    /// module's doc comment ("Poll handling") for how a caller-supplied
+    /// poll is validated and persisted alongside the post.
     pub async fn create_status(
         &self,
         actor_id: Id,
@@ -661,13 +695,27 @@ where
                 "a poll and media attachments are mutually exclusive",
             ));
         }
-        if has_poll {
-            // See this module's doc comment ("Poll handling"): real poll
-            // persistence is `PollService`'s (task 5.3) boundary, not
-            // this service's.
-            return Err(rejected(
-                "poll creation is not implemented by StatusService; it is owned by PollService",
-            ));
+        if let Some(poll_input) = &input.poll {
+            // Requirement 13.1 names "選択肢・締切・単一/複数選択" as a
+            // poll's shape but does not itself spell out a minimum option
+            // count. Requirement 13.4's voting-side "単一選択の投票へ複数
+            // 選択肢が指定された...範囲外の選択肢インデックス" rejection only
+            // makes sense for a poll that already has at least 2 selectable
+            // options (a 0- or 1-option poll has no "index range" to be out
+            // of, and nothing to meaningfully vote *among*), so this
+            // service rejects a poll with fewer than 2 options, and rejects
+            // a blank option title, at creation time rather than silently
+            // persisting a degenerate poll no client could sensibly render.
+            if poll_input.options.len() < 2 {
+                return Err(rejected("a poll must have at least 2 options"));
+            }
+            if poll_input
+                .options
+                .iter()
+                .any(|option| option.trim().is_empty())
+            {
+                return Err(rejected("a poll option must not be empty"));
+            }
         }
 
         for media_id in &input.media_ids {
@@ -704,6 +752,14 @@ where
         let id = self.runtime.ids.next_id();
         let now = self.runtime.clock.now();
         let uri = self.urls.object_url(ObjectKind::new("statuses"), id);
+        // Minted up front (never inside the `if has_poll` block below) so it
+        // can be set on `status.poll_id` *before* `status` is inserted —
+        // `statuses.poll_id` carries no FK (see `migrations/0007_statuses.sql`'s
+        // own comment: the real FK direction is `polls.status_id`), so the
+        // status row may safely reference a poll id that is only inserted
+        // immediately afterward, mirroring `tests/polls_it.rs::insert_poll_status_fixture`'s
+        // established status-then-poll insert ordering.
+        let poll_id = has_poll.then(|| self.runtime.ids.next_id());
 
         let status = Status {
             id,
@@ -717,7 +773,7 @@ where
             in_reply_to_id,
             in_reply_to_account_id,
             reblog_of_id: None,
-            poll_id: None,
+            poll_id,
             language: input.language,
             reblogs_count: 0,
             favourites_count: 0,
@@ -731,6 +787,32 @@ where
 
         if !input.media_ids.is_empty() {
             status_repository::attach_media(&self.pool, status.id, &input.media_ids).await?;
+        }
+
+        // Requirement 13.1: create the poll and associate it with the post
+        // (design.md's create-flow sequence diagram: "insert status and
+        // poll record" is a single step, status row first, poll row
+        // second). `has_poll && has_media` was already rejected above, so
+        // `input.media_ids` is always empty here when `poll_id` is `Some`.
+        if let (Some(poll_id), Some(poll_input)) = (poll_id, input.poll) {
+            let poll = Poll {
+                id: poll_id,
+                status_id: status.id,
+                expires_at: poll_input.expires_at,
+                multiple: poll_input.multiple,
+            };
+            let options: Vec<PollOption> = poll_input
+                .options
+                .iter()
+                .enumerate()
+                .map(|(idx, title)| PollOption {
+                    poll_id,
+                    idx: idx as i32,
+                    title: title.clone(),
+                    votes_count: 0,
+                })
+                .collect();
+            poll_repository::insert_poll(&self.pool, &poll, &options).await?;
         }
 
         let extracted = extract_content_tokens(&status.content);
