@@ -30,3 +30,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [dev-dependencies]
 time = { version = "0.3.53", features = ["macros"] }
 tower = { version = "0.5.3", features = ["util"] }
+
+[profile.dev.package.rsa]
+opt-level = 3
+
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
