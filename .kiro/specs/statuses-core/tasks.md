@@ -148,6 +148,38 @@
   - _Boundary: InteractionService, StatusService, PollService_
   - _Depends: 5.1, 5.2, 5.3_
 
+- [ ] 10. 既知ギャップの解消（run-level 検証での発見事項）
+- [ ] 10.1 投票の連合 wire 形式を実装する
+  - `StatusActivityBuilder::deliver_create`（4.1）が生成する Create Activity に、投票付き投稿の場合は投票データ（選択肢・締切・単一/複数選択）を連合ピアが解釈可能な形（`Question` オブジェクト、`oneOf`/`anyOf`、`endTime`、`closed`）で埋め込む
+  - 観測可能な完了: 投票付き投稿を作成・配送したとき、送出される Create Activity の JSON に選択肢・締切・単一/複数選択の別が反映されていることを配送ペイロードを検証するテストで確認する
+  - _Requirements: 13.7_
+  - _Boundary: StatusActivityBuilder_
+  - _Depends: 4.1, 9.1 (投票の連合ではなく本 spec の 9.1 remediation — poll 永続化)_
+- [ ] 10.2 リモート起点の interaction（favourite/reblog/mention）でも通知イベントを emit する
+  - `src/statuses/inbound_handlers.rs`（6.1）の `AnnounceHandler`/`LikeHandler`/`CreateNoteHandler` は `InteractionService`/`StatusService` を経由せずリポジトリ関数を直接呼ぶため、9.2 で追加した `NotificationEventSink` への emit が素通りされている。各ハンドラの状態遷移コミット後、9.2 と同じシンクへ同型の `NotificationEvent` を冪等に emit する
+  - 観測可能な完了: リモートアクターからの Announce/Like/メンション付き Create(Note) を受信したとき、対象がローカルアクターであればシンクへ 1 度だけイベントが渡ることをテストで確認する
+  - _Requirements: 9.1, 9.2, 10.1_
+  - _Boundary: InboundHandlers_
+  - _Depends: 6.1, 9.2_
+- [ ] 10.3 リモート Create(Note) 取り込みで添付・メンションを反映する（要件14.2の未充足解消）
+  - `CreateNoteHandler`/`StatusIngestService`（6.1, 6.2）が呼ぶ `ingest_note_object` は返信・可視性は反映するが、添付（`status_media` 永続化）とメンション（メンション永続化）を反映していない。リモートメディアの取り込み経路（media-pipeline 側との連携）とメンション永続化を追加する
+  - 観測可能な完了: 添付・メンションを含むリモート Note を受信・取り込みしたとき、ローカルの Status がそれらを反映していることをテストで確認する
+  - _Requirements: 14.2_
+  - _Boundary: InboundHandlers, StatusIngestService_
+  - _Depends: 6.1, 6.2_
+- [ ] 10.4 カスタム絵文字ショートコードを実データ化する
+  - `extract_content_tokens`（3.6, 5.1）が抽出するショートコードは現状どこにも解決されず、Status/Poll JSON の `emojis` は常に空配列。accounts-and-instance が所有する既存のカスタム絵文字ディレクトリ（`emoji_repository`/`emoji_service`）へショートコードを解決し、`emojis` フィールドへ反映する
+  - 観測可能な完了: 登録済みショートコードを含む投稿を作成したとき、レスポンス JSON の `emojis` に解決済みの絵文字情報が含まれることをテストで確認する
+  - _Requirements: 1.1, 3.6_
+  - _Boundary: StatusService, StatusSerializer_
+  - _Depends: 5.1, 3.3_
+- [ ] 10.5 未テストのエンドポイント・組み合わせ経路のテストを追加する
+  - 7.1 で指摘済みの未テストハンドラ（`edit_status`/`status_history`/`status_source`/`status_context`/`unbookmark_status`/`unpin_status`）にエンドポイントレベルの専用テストを追加する。加えて、投票を含む投稿がメンションも同時に含む場合に 9.1 remediation の poll 作成ブロックと 9.2 のメンション通知 emit ブロックが正しく共存することを直接証明する結合テスト、および `GET /accounts/:id/statuses` が `create_status` 経由で作成された投票付き投稿を正しく描画することを証明する `account_statuses_provider_it.rs` 側のテストを追加する
+  - 観測可能な完了: 上記いずれの経路も、公開 API 経由の呼び出しを含む専用テストで観測可能な形で検証されている
+  - _Requirements: 6.2, 7.3, 7.4, 8.1, 8.2, 8.3, 8.4, 8.5, 11.2, 12.1, 12.2, 13.1, 9.1, 9.2, 6.1_
+  - _Boundary: StatusEndpoints_
+  - _Depends: 7.1, 9.1, 9.2_
+
 ## Implementation Notes
 
 - 1.1/1.2: design.md 自体に自己矛盾があり、モデル抜粋（366行目）は `StatusEdit` に `id` を含めないが、Physical Data Model の SQL（716行目）は `status_edits.id BIGINT PRIMARY KEY` を含む。両タスクは design.md に忠実に実装したためこの矛盾をそのまま引き継いでいる。2.1（投稿リポジトリ、`status_edits` の永続化・履歴取得を含む）の実装者は、`StatusEdit` に `id` フィールドを追加するか `status_edits.id` を内部専用に留めるかを設計判断として解決すること。
@@ -172,3 +204,4 @@
 - 7.1: `src/statuses/endpoints.rs` に 19 本の HTTP ハンドラ（statuses CRUD/history/source/context・reblog/fav/bookmark/pin(+un-系)・bookmarks 一覧・polls 取得/投票）と `StatusesEndpointsState<A,D,L,H,R,M>`（router-local state、まだ具体型を固定していない——7.2 で `AppState` へ実結線する際に固定される）を実装。`Status -> StatusRenderInput` の組み立てグルー（account は `AccountService::show_account` 経由、media は `media_repository::find_by_id`+`to_media_attachment`、tags は `tag_repository::tags_for_status`、interactions は `interaction_repository::exists_favourite/exists_bookmark/exists_pin/find_reblog`、poll は `PollService::poll`）はこのタスクで新規に書いた（design.md/以前のタスクのいずれにも存在しなかった）。`mentions`/`emojis` は既存の構造的ギャップ（永続化テーブル/shortcode解決パイプライン無し）によりゴールデン同様に空配列のまま。`/source` は `read:statuses` スコープを要求（`src/oauth/scope.rs` 既存の確立済みスコープ文字列、新規発明ではない）。reblog のネストは 1 階層のみ（判断による制限）。削除の応答は `ON DELETE CASCADE` 後の再照会のため media/tags/interactions が空/false になる（要件 7.1 は「削除された投稿の表現」のみを求めており凍結スナップショットは求めていないため許容）。**未解決の既知ギャップ（次タスクへの申し送り、ブロッカーではない）**: レビューで、19 ハンドラ中 `edit_status`/`status_history`/`status_source`/`status_context`/`unbookmark_status`/`unpin_status` にエンドポイントレベルの専用テストが無いことが指摘された（`status_service.rs` 775-869 行の所有権チェックがテスト済みの `delete_status` と同一パターンであることをコードリーディングで確認済みのため承認はされたが、将来のタスクでこれらのハンドラの HTTP レベルテストを追加することを推奨）。`StatusesEndpointsState` を実際の `AppState`/router へ組み込む完全な結合テストは 7.2 の境界（本タスクは test-local router + test-double ports で検証）。
 - 7.2: `src/statuses.rs` に `StatusesModule`/`build_statuses_module`/`ProdRemoteActorResolver`/`register_downstream_handlers` を実装し、`src/bootstrap.rs::build_state()` の `accounts_module` 構築直後に配線、`src/state.rs`（`AppState::statuses()`）・`src/server.rs`（`statuses_router()` + `FromRef<AppState>` ブリッジ、`build_router` へ `.merge`）・`src/config.rs`（`StatusesConfig`）に実装を追加した。要件 4.3（配送手段の分岐は federation-core 側）を満たすため `src/statuses/activity_builder.rs::StatusActivityBuilder` の `delivery` フィールドを所有値 `DeliveryService<D,L,H>` から `Arc<DeliveryService<D,L,H>>` へ変更（`Deref` 経由で既存呼び出しは無変更、`FederationModule::delivery_service()` が `&Arc<...>` しか公開しないため）。要件 14.1（受信ハンドラの実配線）を満たすため `src/federation/module.rs::build_federation_module` に `register_downstream: impl FnOnce(&mut InboundActivityDispatcher)` 引数を追加（`InboxService::new` 呼び出し前の唯一の登録可能ポイント、モジュール自身の doc コメントが本タスクを呼び出し元として明示）。この方式により federation-core 側に `use crate::statuses::...` は一切追加されず依存方向を維持（`src/federation/module.rs`/`src/federation/test_harness.rs`/`src/test_harness.rs` へのパラメータ配線のみ）。6.1 で未配線のまま残っていた `RemoteActorResolver`（`Send` 境界を要求するが `RemoteAccountFetcher::fetch_and_normalize` が非 `Send` の理由で blanket impl 不可）は `ProdRemoteActorResolver`（ローカルアクターは直接解決、リモートは `tokio::spawn` + `JoinHandle` 待機で `Send` 化）として本番実装を供給した。`tests/statuses_bootstrap_wiring_it.rs`（新規）が実際の `build_state()` 経路を起動し、投稿作成→取得、fav→`LikeHandler` ディスパッチループバック、reblog の E2E を検証（RED（wiring 差し戻し時に 3 件とも 405 で失敗）→GREEN を実装者・レビュアー双方が独立に再現済み）。**非ブロッキングの既知の未消化事項（次タスクへの申し送り）**: (1) `StatusesConfig`（max_content_chars/poll_max_options/poll_min_expiration/idempotency_key_retention_days）は design.md の「運用関連設定項目を追加する」を字面通り満たすフィールドとして追加・起動時検証されるが、`status_service.rs`/`poll_repository.rs`/`idempotency` 側の実施行ロジックへはまだ未結線（5.3 の poll 作成スコープ外パターンと同型の意図的境界、struct 自身の doc コメントに明記）。(2) `register_downstream` は「起動構築時の一度きりの登録」であり将来 social-graph 等の追加受信ハンドラも同じクロージャに合成登録する必要がある（`federation/module.rs` の doc コメントに明記）。(3) `tests/statuses_bootstrap_wiring_it.rs` の reblog シナリオは `NoRelationshipQuery`（3.1 の既定・空フォロワー）により reblog 自身の配送先が空集合になるため `AnnounceHandler` のディスパッチループバックまでは未検証（favourite シナリオが `LikeHandler` 経路で要件 14.1 の実配線を実証済みのため許容、テストファイル自身の doc コメントで開示済み）。
 - 6.2: `src/statuses/ingest_service.rs` に `StatusIngestService::{ingest_url, ingest_document}` を実装。6.1 の `CreateNoteHandler::handle` から Note 正規化・永続化本体を `ingest_note_object`（`inbound_handlers.rs` に `pub(crate)` で切り出し）として抽出し、受信ディスパッチ経路（`CreateNoteHandler`）と本経路（`StatusIngestService`）の双方がこの同一関数を呼ぶことで「受信ハンドラ経路と同一結果になる」（要件 14.1-14.3）を保証（`ingest_document_matches_the_inbound_dispatch_path_for_the_same_note` で実証済み）。`ingest_document` は `Create` でラップされていない裸の `Note` オブジェクト（AP オブジェクト URL の慣例的な参照先形状）を受け取る設計判断とした（design.md に `StatusIngestService` の専用インターフェース定義が無く、Boundary Commitments の一文のみが根拠）。**セキュリティ設計上の重要な差異（レビュー1周目で指摘・2周目で修正済み）**: 本経路は HTTP Signature 検証済み signer を持たない（能動的にドキュメントを fetch するため）ため、フェッチした Note 自身の `id` のホストと `attributedTo` のホストが一致することを検証する origin/authority チェック（`host_from_url` ヘルパー、`src/federation/signatures/signer.rs`/`src/federation/outbound/worker.rs` の既存重複実装と同一ロジック）を `resolve_remote_actor` 呼び出しの前に追加した。この検証が無いと、任意のホストが実在する無関係アクターの URI を `attributedTo` に詐称し、その実在アクターに紐づく `Status` を偽造できてしまう（`RemoteAccountFetcher::fetch_and_normalize` の「fetch した URI＝解決される identity」という保証とは異なり弱いトラストモデルであるため）。**残存する軽微な非ブロッキング事項**: `id` が欠落/非文字列の場合はこの origin チェック自体がスキップされ `resolve_remote_actor` が無検証の `attributedTo` に対して先に呼ばれる（`ingest_note_object` 側の既存の `id` 欠落 422 拒否により永続化はされないため悪用不能だが、無検証 URI への解決呼び出しという副作用は残る）。`register_status_handlers` 同様、本サービスもまだどこからも呼ばれていない（将来の search `RemoteResolver` 等が呼び出し元になる想定、配線は本タスクの境界外）。
+- Group 10 追加（2026-07-29、ユーザー指示によるフィーチャー完了後の技術的負債タスク化）: run-level `kiro-validate-impl`・run-level 最終レビュー・design alignment 検証で見つかった非ブロッキングの既知ギャップ（投票の連合 wire 形式未実装、リモート起点 interaction の通知未 emit、要件14.2の一部未充足、絵文字ショートコード未解決、一部エンドポイントのテスト不足）を、記録に留めず実行可能なタスクとして 10.1-10.5 に起票した。10.1 は当初いずれの要件にも規定されていなかったため、requirements.md に新規 AC 13.7 を追加してから起票している（filler task を作らず、まず要件側のギャップを埋める `kiro-spec-tasks` の原則に従った）。あわせて design alignment 検証で判明した記載漏れ（statuses-core/design.md の Allowed Dependencies に actor-model が未記載、social-graph/design.md に本 spec 所有の `RelationshipQuery` ポートへの言及が無い）をこの run で直接修正済み。Group 10 は spec.json の `approvals.tasks.approved: true` を維持したまま追加した（ユーザーの対話的指示を承認と扱い、フィーチャー全体の再承認は求めていない）ため、実行前に spec.json の approvals 欄が Group 10 を含む前提で妥当か再確認すること。

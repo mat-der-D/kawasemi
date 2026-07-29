@@ -36,6 +36,7 @@
 - 上記 Activity の受信処理ハンドラ（`InboundActivityHandler` 実装）と、それに伴う関係状態遷移。
 - フォロー承認要否の単一判定（`FollowApprovalPolicy`）— 同一サーバー承認スキップ特権の唯一の定義点。
 - 関係状態 → `RelationshipView` 写像と、accounts-and-instance `RelationshipStateProvider` への本実装供給。
+- statuses-core が可視性判定（`VisibilityPolicy::is_visible`）・宛先導出（`Addressing::derive_recipients`）のために定義・所有する委譲ポート契約 `RelationshipQuery`（`src/statuses/visibility.rs`、`viewer_relation()` / `followers_of()`）への**本実装供給**。ポート契約と既定実装（`NoRelationshipQuery` — 常に関係なし・空フォロワー）は statuses-core が保持しており、本 spec は bootstrap でこれを実装差し替えする（accounts-and-instance の `AccountStatusesProvider` と対称の委譲方向。2026-07-29 run-level `kiro-validate-impl` の design alignment 検証で、このポートが当初 design.md に記載漏れだったことが判明し追記）。未配線の間 statuses-core は安全側の既定（フォロー関係なし、配送先フォロワー空集合）で単独動作する。
 - accounts-and-instance `AccountCountsProvider` のフォロワー数（`followers_count`）/ フォロー中数（`following_count`）部分を follows グラフから算出して供給する本実装（投稿数 / `last_status_at` は本 spec 範囲外で既定 0 / None）。
 - フォロー / フォローリクエストの状態遷移コミット後に notifications `NotificationEventSink` へ `follow` / `follow_request` の `NotificationEvent` を冪等に emit（既定 no-op シームに乗る）。
 - federation-core `BlockPolicy` への本実装供給（ブロック先署名拒否）。
@@ -56,6 +57,7 @@
 - api-foundation: Bearer 認証（`RequestActorContext`）/ `Scope`（`follow` / `read:follows` / `write:follows` 内包判定）/ `MastodonError` / `Pagination`（`PageParams` / `Cursor` / `build_link_header`）/ `X-RateLimit-*` レイヤー。
 - federation-core: `DeliveryService`（`DeliveryRequest` / `Recipient`）/ `InboundActivityDispatcher.register`（`InboundActivityHandler` / `InboundContext.signer` / `ParsedActivity`）/ `BlockPolicy` trait（destination-aware、`LocalRecipientContext::Actor` / `LocalRecipientContext::SharedInbox`）/ `ActorUrls`（アクター/inbox URL）/ `ActorDirectory` 経由のアクター解決。
 - accounts-and-instance: `RelationshipView` / `RelationshipSerializer.build_relationship` / `RelationshipStateProvider` trait（登録先レジストリ）/ `AccountCountsProvider` trait（登録先レジストリ、`AccountCounts { followers, following, statuses, last_status_at }`）/ ローカル・リモートアカウント解決（`AccountRef`）。
+- statuses-core: `RelationshipQuery` trait（`viewer_relation()` / `followers_of()`、契約・既定実装は statuses-core 所有）への本実装供給。
 - notifications: `NotificationEventSink` trait（`AppState` レジストリ経由、既定 `NoopSink`）/ `NotificationEvent`（`recipient` / `origin` / `kind`（`Follow` / `FollowRequest`）/ `target_status_id`（常に `None`）/ `occurred_at`）。
 - actor-model: `ActorDirectory`（ローカルアクター解決、owner 非露出）。
 - 下流仕様（タイムライン/通知のフィルタ実装・ドメインブロック）を本 spec に持ち込まない。

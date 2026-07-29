@@ -59,6 +59,7 @@
 ### Allowed Dependencies
 
 - core-runtime: `AppState` / `RuntimeContext`（`Clock` / `IdGenerator` / `Rng`）/ `PgPool` / `AppError` / 構造化ログ / マイグレーション基盤 / テストハーネス（`spawn_test_app`）/ axum・tower・tokio 基盤。加えて、共有ドメインプリミティブモジュール（core-runtime が正準所有）の `Visibility` enum と `AccountRef` を消費する（本 spec はこれらを再定義せず import する）。
+- actor-model: `ActorDirectory`（`resolve_actor_by_id` 等）/ `Handle` / `ActorType` / `NewActor` / `ResolvedActor` を消費する（`ActorHandleLookup` が投稿者・言及先・配送宛先アクターの解決に使用。accounts-and-instance / federation-core と同型の消費、実装済みだが本 spec 初版の Allowed Dependencies に記載漏れがあった — 2026-07-29 run-level `kiro-validate-impl` の design alignment 検証で判明し追記）。
 - api-foundation: Bearer 認証（`RequestActorContext` = 単一アクター + `ScopeSet`、`authenticate` / `require_scope`）/ `Scope`（`read:statuses` / `write:statuses` / `write:favourites` / `write:bookmarks` / `read:bookmarks` 等の内包判定）/ `MastodonError`（互換エラー本文・ステータス対応）/ ページネーション（`PageParams` / `Cursor` / `Page<T>` / `build_link_header`）/ `X-RateLimit-*` レイヤー / 契約ハーネス（`assert_golden` / `register_fixture`）。
 - federation-core: `DeliveryService::deliver(DeliveryRequest)`（配送共通パス）/ `InboundActivityHandler` + `InboundActivityDispatcher::register`（受信委譲）/ `ActorUrls`（オブジェクト/コレクション URL）/ `JsonLdCodec`（@context 付与・安全展開）/ `ParsedActivity` / `InboundContext`。
 - media-pipeline: MediaAttachment シリアライズと `find_owned(media_id, actor_id)`（所有スコープ取得）。
@@ -76,7 +77,7 @@
 - 正規 Activity 生成（`StatusActivityBuilder`）の Activity 形（投票の `Create{Note, name=...}` ワイヤ形を含む）・配送依頼契約の変更。
 - 受信ハンドラが処理する Activity 種別集合・状態反映規約の変更。
 - 冪等キーの一意化規約・再送応答契約の変更。
-- 上流（core-runtime / api-foundation / federation-core / media-pipeline / accounts-and-instance）の消費契約変更（上流発の再検証）。
+- 上流（core-runtime / actor-model / api-foundation / federation-core / media-pipeline / accounts-and-instance）の消費契約変更（上流発の再検証）。
 
 ## Architecture
 
