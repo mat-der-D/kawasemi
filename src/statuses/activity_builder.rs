@@ -1,16 +1,35 @@
 //! `StatusActivityBuilder` (design.md "Federation Bridge / 連合橋渡し層" ->
 //! `#### StatusActivityBuilder`, design.md lines ~485-509; Requirements 4.2,
-//! 4.3, 4.4, 7.3, 8.4, 9.2, 9.4, 10.2, 10.3, 13.6; task 4.1, `Boundary:
-//! StatusActivityBuilder`): generates the six canonical post-related
-//! Activities (`Create(Note)` / `Announce` / `Like` / `Delete` / `Update` /
-//! `Undo(Announce|Like)`), plus the vote wire form
-//! `Create{Note, name=<selected option text>}`, and hands each one — with the
-//! `Addressing`-derived recipients this task's own callers resolve — to
-//! federation-core's `DeliveryService::deliver` (Requirement 4.3's "論理的に
-//!同一の正規 Activity を生成・検証してから、配送手段のみを federation-core
-//! に分岐させる"). This module owns exactly Activity generation; every
-//! physical local-vs-remote branch is `DeliveryService`'s own job
-//! (`crate::federation::outbound::delivery`), never this module's.
+//! 4.3, 4.4, 7.3, 8.4, 9.2, 9.4, 10.2, 10.3, 13.6, 13.7; task 4.1 (+ task
+//! 10.1 for 13.7's `Question` wire form), `Boundary: StatusActivityBuilder`):
+//! generates the six canonical post-related Activities (`Create(Note)` /
+//! `Announce` / `Like` / `Delete` / `Update` / `Undo(Announce|Like)`), plus
+//! the vote wire form `Create{Note, name=<selected option text>}`, and hands
+//! each one — with the `Addressing`-derived recipients this task's own
+//! callers resolve — to federation-core's `DeliveryService::deliver`
+//! (Requirement 4.3's "論理的に同一の正規 Activity を生成・検証してから、配送
+//! 手段のみを federation-core に分岐させる"). This module owns exactly
+//! Activity generation; every physical local-vs-remote branch is
+//! `DeliveryService`'s own job (`crate::federation::outbound::delivery`),
+//! never this module's.
+//!
+//! ## Poll embedding in `Create` (Requirement 13.7, task 10.1)
+//! [`StatusActivityBuilder::deliver_create`]'s `object` is still a `Create`'s
+//! *single* object — a poll-bearing post is not a second Activity type, per
+//! design.md's own "a poll-bearing Note is just a Note with poll data
+//! embedded in its JSON-LD representation" framing (see
+//! `status_service.rs`'s "Outbound wire format" doc comment, the documented
+//! gap this task closes). When the caller passes `Some((poll, options))`,
+//! that object's `type` becomes `"Question"` and gains `oneOf`/`anyOf` +
+//! `endTime` — see [`StatusActivityBuilder::deliver_create`]'s own doc
+//! comment for the exact shape. `deliver_update` is deliberately left
+//! untouched by this task: Requirement 13.7 names only `Create`, this spec
+//! has no poll-editing feature (a poll's options/deadline/single-vs-multiple
+//! never change after creation — `CreateStatus`'s own poll field has no
+//! `edit_status` counterpart), so an `Update` Activity never has a *changed*
+//! poll shape to convey, and retrofitting the identical embedding there
+//! would be speculative scope this task's own boundary/observable-completion
+//! text does not ask for.
 //!
 //! ## Scope
 //! Owns [`StatusActivityBuilder`] and its seven `deliver_*` methods, the
@@ -206,7 +225,7 @@ use crate::federation::{
 };
 use crate::runtime::IdGenerator;
 use crate::statuses::addressing::{ActorRef, Addressing};
-use crate::statuses::model::{Poll, Status};
+use crate::statuses::model::{Poll, PollOption, Status};
 
 /// The URL path segment under which this builder mints Activity `id` URIs
 /// (`ActorUrls::object_url`). See this module's doc comment ("Activity `id`
@@ -366,19 +385,38 @@ where
             .await
     }
 
-    /// Generates and delivers a canonical `Create(Note)` Activity for
-    /// `status` (Requirements 4.2, 4.3, 4.4). `addressing`/`recipients` are
+    /// Generates and delivers a canonical `Create` Activity for `status`
+    /// (Requirements 4.2, 4.3, 4.4). `addressing`/`recipients` are
     /// `Addressing`/`derive_recipients`'s already-derived output (task 3.2);
     /// `in_reply_to_uri` is the parent post's already-resolved ActivityPub
     /// `uri` when `status.in_reply_to_id` is `Some(..)` — see this module's
     /// doc comment ("Deliberate deviations") for why this arrives
     /// pre-resolved rather than looked up here.
+    ///
+    /// `poll` is `Some((poll, options))` when `status.poll_id` is `Some(_)`
+    /// (Requirement 13.7): the caller (`StatusService::create_status`, which
+    /// already has the just-persisted [`Poll`]/`Vec<PollOption>` in hand
+    /// immediately after its own `poll_repository::insert_poll` call — see
+    /// that module's "Poll handling" doc comment) passes them straight
+    /// through, mirroring `in_reply_to_uri`'s identical "pre-resolved caller
+    /// input" convention (this DB-free builder has no `PollRepository` to
+    /// fetch them itself). When present, the emitted object's `type` becomes
+    /// `"Question"` instead of `"Note"` and gains `oneOf` (single-choice,
+    /// `poll.multiple == false`) or `anyOf` (multi-choice) holding one
+    /// `Note`-shaped option per `options` entry, plus `endTime` when
+    /// `poll.expires_at` is `Some(_)` (omitted when `None`, matching this
+    /// object's own `summary`/`inReplyTo` "omit when absent" convention).
+    /// `closed` is never emitted here: `deliver_create` fires at creation
+    /// time, when a freshly-created poll cannot yet be expired, and neither
+    /// Requirement 13.7 nor this task's observable-completion text calls for
+    /// a runtime "is it expired now" check inside Activity generation.
     pub async fn deliver_create(
         &self,
         status: &Status,
         addressing: &Addressing,
         recipients: Vec<Recipient>,
         in_reply_to_uri: Option<&str>,
+        poll: Option<(&Poll, &[PollOption])>,
     ) -> Result<(), AppError> {
         let sender = self.actor_lookup.resolve_handle(status.actor_id).await?;
         let actor_url = self.urls.actor_url(&sender);
@@ -399,6 +437,14 @@ where
         }
         if let Some(uri) = in_reply_to_uri {
             object.insert("inReplyTo".to_string(), Value::String(uri.to_string()));
+        }
+        if let Some((poll, options)) = poll {
+            object.insert("type".to_string(), Value::String("Question".to_string()));
+            let choices_key = if poll.multiple { "anyOf" } else { "oneOf" };
+            object.insert(choices_key.to_string(), poll_options_value(options));
+            if let Some(expires_at) = poll.expires_at {
+                object.insert("endTime".to_string(), Value::String(rfc3339(expires_at)));
+            }
         }
         object.insert("to".to_string(), string_array(&addressing.to));
         object.insert("cc".to_string(), string_array(&addressing.cc));
@@ -649,6 +695,40 @@ where
 /// Renders `items` as a JSON array of strings (`to`/`cc` wire shape).
 fn string_array(items: &[String]) -> Value {
     Value::Array(items.iter().cloned().map(Value::String).collect())
+}
+
+/// Renders a [`Poll`]'s `options` as the `oneOf`/`anyOf` array a `Question`
+/// object's wire form expects (Requirement 13.7): one `Note`-shaped object
+/// per option, `name` holding the option text (the same field the vote wire
+/// form's own `Create{Note, name=...}` object uses, Requirement 13.6) and a
+/// nested `replies: { type: "Collection", totalItems: <votes_count> }`, the
+/// de-facto Mastodon convention for embedding a live vote count in the
+/// create/update payload. Options are sorted by [`PollOption::idx`] (the
+/// caller's own ordering, `poll_repository::insert_poll`'s insertion order)
+/// rather than trusted to already arrive in that order.
+fn poll_options_value(options: &[PollOption]) -> Value {
+    let mut sorted: Vec<&PollOption> = options.iter().collect();
+    sorted.sort_by_key(|option| option.idx);
+
+    Value::Array(
+        sorted
+            .into_iter()
+            .map(|option| {
+                let mut replies: Map<String, Value> = Map::new();
+                replies.insert("type".to_string(), Value::String("Collection".to_string()));
+                replies.insert(
+                    "totalItems".to_string(),
+                    Value::Number(option.votes_count.into()),
+                );
+
+                let mut note: Map<String, Value> = Map::new();
+                note.insert("type".to_string(), Value::String("Note".to_string()));
+                note.insert("name".to_string(), Value::String(option.title.clone()));
+                note.insert("replies".to_string(), Value::Object(replies));
+                Value::Object(note)
+            })
+            .collect(),
+    )
 }
 
 /// Renders `when` as an RFC 3339 timestamp string, matching

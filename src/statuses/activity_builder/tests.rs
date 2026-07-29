@@ -259,7 +259,7 @@ async fn deliver_create_builds_canonical_create_note_with_addressing_and_reaches
     ];
 
     builder
-        .deliver_create(&status, &addressing, recipients, None)
+        .deliver_create(&status, &addressing, recipients, None, None)
         .await
         .expect("deliver_create must succeed");
 
@@ -305,6 +305,7 @@ async fn deliver_create_includes_in_reply_to_when_provided() {
             &addressing,
             vec![Recipient::Local(handle("alice"))],
             Some("https://kawasemi.example/statuses/1"),
+            None,
         )
         .await
         .expect("deliver_create must succeed");
@@ -330,6 +331,7 @@ async fn deliver_create_includes_summary_only_when_spoiler_text_present() {
             &addressing,
             vec![Recipient::Local(handle("alice"))],
             None,
+            None,
         )
         .await
         .expect("deliver_create must succeed");
@@ -350,6 +352,7 @@ async fn deliver_create_mints_distinct_activity_ids_across_calls() {
             &addressing,
             vec![Recipient::Local(handle("alice"))],
             None,
+            None,
         )
         .await
         .expect("first deliver_create must succeed");
@@ -358,6 +361,7 @@ async fn deliver_create_mints_distinct_activity_ids_across_calls() {
             &sample_status(2, 10),
             &addressing,
             vec![Recipient::Local(handle("alice"))],
+            None,
             None,
         )
         .await
@@ -385,6 +389,7 @@ async fn deliver_create_fails_when_sender_actor_is_unknown() {
             &addressing,
             vec![Recipient::Local(handle("alice"))],
             None,
+            None,
         )
         .await
         .expect_err("unknown sender actor must fail");
@@ -396,6 +401,164 @@ async fn deliver_create_fails_when_sender_actor_is_unknown() {
         "no sink runs before sender resolves"
     );
     assert_eq!(http_sink.calls().len(), 0);
+}
+
+// -- deliver_create: poll embedding (Requirement 13.7, task 10.1) ----------
+
+#[tokio::test]
+async fn deliver_create_embeds_single_choice_poll_as_question_with_one_of_and_end_time() {
+    let (builder, local_sink, _http_sink) = builder(&[(10, "alice")], &["alice"]);
+    let mut status = sample_status(20, 10);
+    let poll_id = Id::from_i64(500);
+    status.poll_id = Some(poll_id);
+    let addressing = sample_addressing();
+    let poll = Poll {
+        id: poll_id,
+        status_id: status.id,
+        expires_at: Some(datetime!(2026-08-01 00:00:00 UTC)),
+        multiple: false,
+    };
+    let options = vec![
+        PollOption {
+            poll_id,
+            idx: 0,
+            title: "Cats".to_string(),
+            votes_count: 3,
+        },
+        PollOption {
+            poll_id,
+            idx: 1,
+            title: "Dogs".to_string(),
+            votes_count: 5,
+        },
+    ];
+
+    builder
+        .deliver_create(
+            &status,
+            &addressing,
+            vec![Recipient::Local(handle("alice"))],
+            None,
+            Some((&poll, &options)),
+        )
+        .await
+        .expect("deliver_create must succeed");
+
+    let calls = local_sink.calls();
+    let object = calls[0].1.as_value().get("object").unwrap();
+    assert_eq!(
+        value_str(object, "type"),
+        "Question",
+        "a poll-bearing Create's object must be a Question, not a plain Note"
+    );
+    assert!(
+        object.get("anyOf").is_none(),
+        "single-choice poll must not use anyOf"
+    );
+    let one_of = object
+        .get("oneOf")
+        .and_then(|v| v.as_array())
+        .expect("oneOf present for a single-choice poll");
+    assert_eq!(one_of.len(), 2);
+    assert_eq!(value_str(&one_of[0], "type"), "Note");
+    assert_eq!(value_str(&one_of[0], "name"), "Cats");
+    let replies0 = one_of[0].get("replies").expect("replies present");
+    assert_eq!(value_str(replies0, "type"), "Collection");
+    assert_eq!(replies0.get("totalItems").and_then(|v| v.as_i64()), Some(3));
+    assert_eq!(value_str(&one_of[1], "name"), "Dogs");
+    assert_eq!(
+        one_of[1]
+            .get("replies")
+            .and_then(|r| r.get("totalItems"))
+            .and_then(|v| v.as_i64()),
+        Some(5)
+    );
+    assert!(
+        value_str(object, "endTime").starts_with("2026-08-01"),
+        "endTime must reflect Poll::expires_at"
+    );
+}
+
+#[tokio::test]
+async fn deliver_create_embeds_multiple_choice_poll_under_any_of() {
+    let (builder, local_sink, _http_sink) = builder(&[(10, "alice")], &["alice"]);
+    let mut status = sample_status(21, 10);
+    let poll_id = Id::from_i64(501);
+    status.poll_id = Some(poll_id);
+    let addressing = sample_addressing();
+    let poll = Poll {
+        id: poll_id,
+        status_id: status.id,
+        expires_at: None,
+        multiple: true,
+    };
+    let options = vec![
+        PollOption {
+            poll_id,
+            idx: 0,
+            title: "Tabs".to_string(),
+            votes_count: 0,
+        },
+        PollOption {
+            poll_id,
+            idx: 1,
+            title: "Spaces".to_string(),
+            votes_count: 0,
+        },
+    ];
+
+    builder
+        .deliver_create(
+            &status,
+            &addressing,
+            vec![Recipient::Local(handle("alice"))],
+            None,
+            Some((&poll, &options)),
+        )
+        .await
+        .expect("deliver_create must succeed");
+
+    let calls = local_sink.calls();
+    let object = calls[0].1.as_value().get("object").unwrap();
+    assert_eq!(value_str(object, "type"), "Question");
+    assert!(
+        object.get("oneOf").is_none(),
+        "multi-choice poll must not use oneOf"
+    );
+    let any_of = object
+        .get("anyOf")
+        .and_then(|v| v.as_array())
+        .expect("anyOf present for a multi-choice poll");
+    assert_eq!(any_of.len(), 2);
+    assert!(
+        object.get("endTime").is_none(),
+        "endTime must be omitted when Poll::expires_at is None"
+    );
+}
+
+#[tokio::test]
+async fn deliver_create_without_poll_still_emits_a_plain_note() {
+    let (builder, local_sink, _http_sink) = builder(&[(10, "alice")], &["alice"]);
+    let status = sample_status(22, 10);
+    let addressing = sample_addressing();
+
+    builder
+        .deliver_create(
+            &status,
+            &addressing,
+            vec![Recipient::Local(handle("alice"))],
+            None,
+            None,
+        )
+        .await
+        .expect("deliver_create must succeed");
+
+    let calls = local_sink.calls();
+    let object = calls[0].1.as_value().get("object").unwrap();
+    assert_eq!(value_str(object, "type"), "Note");
+    assert!(object.get("oneOf").is_none());
+    assert!(object.get("anyOf").is_none());
+    assert!(object.get("endTime").is_none());
 }
 
 // -- deliver_announce --------------------------------------------------------

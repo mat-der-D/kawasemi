@@ -119,7 +119,10 @@
 //! unwired "for a future task" — this module is that future task, closing a
 //! feature-level `/kiro-validate-impl` NO-GO finding. `PollService` remains
 //! the sole owner of poll *voting* (Requirements 13.2-13.6); this method
-//! only ever creates a poll with zero votes.
+//! only ever creates a poll with zero votes. The persisted `(Poll,
+//! Vec<PollOption>)` is kept in hand and threaded through to
+//! `deliver_create`'s `poll` parameter (Requirement 13.7, task 10.1) so the
+//! outbound `Create` Activity embeds it — see "Outbound wire format" below.
 //!
 //! ### Poll creation validation
 //! Requirement 13.1's own text ("選択肢・締切・単一/複数選択") does not spell
@@ -134,23 +137,21 @@
 //! and inventing one would be scope creep beyond what this requirement (or
 //! any requirement adjacent to it) actually calls for.
 //!
-//! ### Outbound wire format: `Create(Note)` does not yet embed poll data
-//! (CONCERN, out of this remediation's scope) [`deliver_create`]
+//! ### Outbound wire format: `Create` embeds poll data (Requirement 13.7,
+//! task 10.1 — closed; previously a documented gap here)
+//! [`deliver_create`]
 //! ([`crate::statuses::activity_builder::StatusActivityBuilder::deliver_create`])
-//! already fires for a poll-bearing `Status` exactly as it does for any
-//! other new post — no separate "poll creation" Activity type exists,
-//! matching design.md's own "a poll-bearing Note is just a Note with poll
-//! data embedded in its JSON-LD representation" framing. However,
-//! `deliver_create`'s own `Note` object builder does not currently emit
-//! `type: "Question"`/`oneOf`/`anyOf`/`endTime`/`closed` for a status whose
-//! `poll_id` is `Some(_)` — the outbound Activity for a poll-bearing post is
-//! observably identical to a plain text post's. This is a genuine gap in
-//! the federation wire format, but a materially larger, separate change
-//! (a full `Question` JSON-LD representation, `activity_builder.rs`'s own
-//! boundary) than this remediation — which targets `StatusService::create_status`'s
-//! *domain-layer* poll persistence (Requirement 13.1's "投票を作成して投稿に
-//! 紐づけ") — is scoped to fix. Flagged here rather than silently left
-//! undiscovered or silently expanded into.
+//! fires for a poll-bearing `Status` exactly as it does for any other new
+//! post — no separate "poll creation" Activity type exists, matching
+//! design.md's own "a poll-bearing Note is just a Note with poll data
+//! embedded in its JSON-LD representation" framing. This method passes its
+//! own just-persisted `poll`/`options` (see "Poll handling" above) straight
+//! through to `deliver_create`'s `poll` parameter, so `deliver_create`'s own
+//! object builder now emits `type: "Question"`/`oneOf`/`anyOf`/`endTime` for
+//! a status whose `poll_id` is `Some(_)` — see
+//! `StatusActivityBuilder::deliver_create`'s own doc comment ("Poll embedding
+//! in `Create`") for the exact shape and for why `deliver_update` is left
+//! unchanged.
 //!
 //! ## `delete_status` rejects reblog rows (Requirement 7.x — documented
 //! boundary decision, Group 5 cross-task remediation)
@@ -794,26 +795,34 @@ where
         // poll record" is a single step, status row first, poll row
         // second). `has_poll && has_media` was already rejected above, so
         // `input.media_ids` is always empty here when `poll_id` is `Some`.
-        if let (Some(poll_id), Some(poll_input)) = (poll_id, input.poll) {
-            let poll = Poll {
-                id: poll_id,
-                status_id: status.id,
-                expires_at: poll_input.expires_at,
-                multiple: poll_input.multiple,
+        // The persisted `(Poll, Vec<PollOption>)` is kept in hand (not
+        // dropped at the end of this block) so it can be passed straight
+        // through to `deliver_create` below (Requirement 13.7) without a
+        // redundant `PollRepository` re-fetch.
+        let poll_payload: Option<(Poll, Vec<PollOption>)> =
+            if let (Some(poll_id), Some(poll_input)) = (poll_id, input.poll) {
+                let poll = Poll {
+                    id: poll_id,
+                    status_id: status.id,
+                    expires_at: poll_input.expires_at,
+                    multiple: poll_input.multiple,
+                };
+                let options: Vec<PollOption> = poll_input
+                    .options
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, title)| PollOption {
+                        poll_id,
+                        idx: idx as i32,
+                        title: title.clone(),
+                        votes_count: 0,
+                    })
+                    .collect();
+                poll_repository::insert_poll(&self.pool, &poll, &options).await?;
+                Some((poll, options))
+            } else {
+                None
             };
-            let options: Vec<PollOption> = poll_input
-                .options
-                .iter()
-                .enumerate()
-                .map(|(idx, title)| PollOption {
-                    poll_id,
-                    idx: idx as i32,
-                    title: title.clone(),
-                    votes_count: 0,
-                })
-                .collect();
-            poll_repository::insert_poll(&self.pool, &poll, &options).await?;
-        }
 
         let extracted = extract_content_tokens(&status.content);
         self.persist_tags(status.id, &extracted.hashtags, now)
@@ -826,7 +835,15 @@ where
         let (addressing, recipients, mentioned_ids) =
             self.build_addressing(&status, &extracted.mentions).await?;
         self.activity_builder
-            .deliver_create(&status, &addressing, recipients, in_reply_to_uri.as_deref())
+            .deliver_create(
+                &status,
+                &addressing,
+                recipients,
+                in_reply_to_uri.as_deref(),
+                poll_payload
+                    .as_ref()
+                    .map(|(poll, options)| (poll, options.as_slice())),
+            )
             .await?;
 
         // Task 9.2: emit one `Mention` NotificationEvent per resolved local
