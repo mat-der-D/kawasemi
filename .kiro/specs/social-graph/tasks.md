@@ -7,7 +7,7 @@
   - _Requirements: 8.1_
   - _Boundary: RelationshipRepository_
 
-- [ ] 1.2 ソーシャルグラフのドメイン型
+- [x] 1.2 ソーシャルグラフのドメイン型
   - フォロー・フォローリクエスト（送信中/受信保留の方向）・ミュート（通知/期限）・ブロックの型と、フォロー/ミュートの操作オプションを定義する。アカウント識別（ローカル/リモート）の `AccountRef` は再定義せず core-runtime の domain-primitives（正準所有）から import する
   - フォロー/ブロックが Undo 用の送信 Activity id を保持し、ミュートが任意の有効期限を保持する型としてコンパイルが通る状態
   - _Requirements: 1.5, 2.1, 4.2, 4.3, 5.1, 8.1_
@@ -147,3 +147,4 @@
 ## Implementation Notes
 
 - タスク 1.1: `tasks.md`/`design.md` が指定するマイグレーション番号 `0006` は実際には `migrations/0006_accounts.sql`（accounts-and-instance）で既に使用済みであり、`0007`（statuses-core）・`0011`（status_mentions_and_remote_attachments）も既に埋まっていた。次の空き番号 `migrations/0012_social_graph.sql` を採用した（0008-0010 は他 spec 予約と推定し使用せず）。番号以外は design.md の Physical Data Model ブロックと完全一致。今後 social-graph 内で新規マイグレーションが必要になった場合は 0013 以降を使うこと。
+- タスク 1.2: 単体テストの配置規約について — `model.rs` のような純粋データ型ファイルは、`accounts/model.rs` / `statuses/model.rs` / `media/model.rs` / `actor/model.rs` / `oauth/model.rs` / `domain/primitives.rs`（6/6 例外なし）に倣い、ファイル末尾のインライン `#[cfg(test)] mod tests { use super::*; ... }` を使うこと。別ファイル `xxx/tests.rs` サブモジュール規約（`.kiro/steering/structure.md`）は `*_service.rs` / `*_repository.rs` / `endpoints.rs` 等の振る舞いを持つファイル向けであり、`model.rs` には適用しない。本タスクでは一度別ファイルで実装しレビューで指摘され、インラインへ移設して承認された。

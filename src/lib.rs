@@ -32,6 +32,7 @@ pub mod migrate;
 pub mod oauth;
 pub mod runtime;
 pub mod server;
+pub mod social_graph;
 pub mod state;
 pub mod statuses;
 pub mod telemetry;
