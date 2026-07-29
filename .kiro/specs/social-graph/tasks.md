@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. 基盤: スキーマ・ドメイン型・リポジトリ
-- [ ] 1.1 関係状態スキーマのマイグレーション（0006）
+- [x] 1.1 関係状態スキーマのマイグレーション（0006）
   - `migrations/0006_social_graph.sql` に `follows` / `follow_requests` / `mutes` / `blocks` を定義し、各関係の一意制約と逆引きインデックス（followee / target+direction / blocked）を付与する
   - 先行 spec（0001-0005 / 0007）と番号衝突がなく、起動時の自動マイグレーションが成功する状態
   - _Requirements: 8.1_
@@ -143,3 +143,7 @@
   - ローカル配送と HTTP 配送で関係状態が一致し、往復シナリオが成立することをテストで確認できる状態
   - _Requirements: 1.2, 1.3, 10.3_
   - _Depends: 6.1, 6.2_
+
+## Implementation Notes
+
+- タスク 1.1: `tasks.md`/`design.md` が指定するマイグレーション番号 `0006` は実際には `migrations/0006_accounts.sql`（accounts-and-instance）で既に使用済みであり、`0007`（statuses-core）・`0011`（status_mentions_and_remote_attachments）も既に埋まっていた。次の空き番号 `migrations/0012_social_graph.sql` を採用した（0008-0010 は他 spec 予約と推定し使用せず）。番号以外は design.md の Physical Data Model ブロックと完全一致。今後 social-graph 内で新規マイグレーションが必要になった場合は 0013 以降を使うこと。
