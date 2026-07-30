@@ -29,23 +29,31 @@
 //!   commit — see [`transitions`]. `RelationshipRepository` ([`repository`])
 //!   gained two small, additive extensions this same task needed (see that
 //!   module's doc comment, "Task 2.2 additions").
+//! - Task 2.3 (`Boundary: ActivityBuilder`): the Follow/Accept/Reject/Block
+//!   /Undo canonical Activity generators
+//!   ([`activity_builder::ActivityBuilder`]) and the two narrow, DB-free
+//!   actor-URI resolution ports they depend on
+//!   ([`activity_builder::LocalActorLookup`]/
+//!   [`activity_builder::RemoteActorLookup`]) — see [`activity_builder`].
 //!
-//! No Activity generation (`ActivityBuilder`), no relationship -> contract
-//! mapping (`RelationshipMapper`), no business services (`FollowService` /
-//! `FollowRequestService` / `MuteService` / `BlockService`), no inbound
-//! Activity handlers, no delegation-port implementations
-//! (`BlockPolicyImpl` / `RelProviderImpl` / `AccountCountsProviderImpl` /
-//! `FilterQuery`), and no HTTP surface (`SocialGraphEndpoints`) live here —
-//! those consume the types/policy/transitions defined in this module but are
-//! out of scope for tasks 1.1-2.2. This module is not yet declared on any
+//! No relationship -> contract mapping (`RelationshipMapper`), no business
+//! services (`FollowService` / `FollowRequestService` / `MuteService` /
+//! `BlockService`), no inbound Activity handlers, no delegation-port
+//! implementations (`BlockPolicyImpl` / `RelProviderImpl` /
+//! `AccountCountsProviderImpl` / `FilterQuery`), and no HTTP surface
+//! (`SocialGraphEndpoints`) live here — those consume the types/policy/
+//! transitions/Activity-builder defined in this module but are out of scope
+//! for tasks 1.1-2.3. This module is not yet declared on any
 //! router/`AppState`/bootstrap wiring point — that remains a later task's
 //! boundary (`SocialGraphModule` wiring, design.md's File Structure Plan).
 
+pub mod activity_builder;
 pub mod approval_policy;
 pub mod model;
 pub mod repository;
 pub mod transitions;
 
+pub use activity_builder::{ActivityBuilder, LocalActorLookup, RemoteActorLookup};
 pub use approval_policy::{FollowApprovalPolicy, FollowDecision};
 pub use model::{
     Block, Follow, FollowOptions, FollowRequest, FollowRequestDirection, Mute, MuteOptions,

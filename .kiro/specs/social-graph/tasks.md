@@ -37,7 +37,7 @@
   - _Boundary: Transitions, RelationshipRepository_
   - _Depends: 1.3_
 
-- [ ] 2.3 (P) 連合 Activity ビルダ
+- [x] 2.3 (P) 連合 Activity ビルダ
   - Follow / Accept / Reject / Block / Undo の正規 ActivityPub 表現を生成し、Undo には関係行が保持する元 Activity id を、Accept/Reject には受信 Follow の id を埋め込む
   - ローカル宛・リモート宛で同一の論理 Activity が生成され、Undo が元 Activity を参照することを単体テストで確認できる状態
   - _Requirements: 1.2, 1.3, 1.4, 2.3, 2.4, 5.3, 5.4_
@@ -154,3 +154,4 @@
 - タスク 2.2: `upsert_follow` / `upsert_request` は戻り値を `Result<(), AppError>` から `Result<bool, AppError>` へ変更した（`ON CONFLICT DO UPDATE` のため `rows_affected()` では新規/更新を判別できず、Postgres の `RETURNING (xmax = 0) AS inserted` イディオムで判別。`establish_follow`/`record_pending` の冪等 emit 判定に使用）。`delete_follow` / `delete_request` / `upsert_block` は `pool: &PgPool` から `executor: E where E: sqlx::PgExecutor<'e>` へジェネリック化した（`apply_block`/`mark_blocked_by` が単一 `sqlx::Transaction` 上でこれらを駆動するため。既存呼び出し側は `&PgPool` のまま無変更で動作）。新規 `take_request`（`DELETE ... RETURNING`）を追加し、`promote_pending` が送信中リクエストの `activity_id` を race なく回収できるようにした。今後 repository 系タスクもこの規約（bool 返却での新規/更新判別、Transaction 越しの呼び出しにはジェネリック executor）に従うこと。
   - `promote_pending`（Accept 受領）で確立するフォローは、`FollowRequest`（task 1.2 承認済み・境界外）が `FollowOptions` を保持しないため、Mastodon 既定値（`reblogs: true, notify: false, languages: []`）で確立する。元のフォロー要求時のオプションは保持されない。オプション保持が必要になった場合は `FollowRequest` への options フィールド追加を検討すること（`model.rs` 側のタスクとして）。
   - `mark_blocked_by`（受信 Block による被ブロック記録）が作成する `Block` 行の `activity_id` は空文字列である（design.md のシグネチャがこの経路に `activity_id` を渡さず、本インスタンスはこの関係の送信元ではないため Undo(Block) を自ら送ることがなく、値が下流で意味を持って参照されることはない）。`Block.activity_id` を `Option<String>` にする方がクリーンだが `model.rs`（task 1.2 境界外）の変更を要するため見送った。
+- タスク 2.3: `ActivityBuilder` の全 `build_*` メソッドは design.md のシグネチャ（同期・infallible）から逸脱し、`pub async fn ... -> Result<_, AppError>` とした（`AccountRef::Local`/`Remote` いずれも actor URI 解決が非同期 DB アクセス（`ActorDirectory::resolve_actor_by_id` / `remote_repository::find_remote_by_id`）を要するため。`statuses::activity_builder::ActorHandleLookup` の前例をローカル・リモート両方に拡張）。呼び出し側（task 3.x の FollowService/BlockService、task 4.x の InboundHandler）はこれを `.await` すること。解決には新設の `LocalActorLookup`/`RemoteActorLookup` ポート（本 spec 内で自己完結、`statuses` 側の型は再利用しない）を経由し、`PgRemoteActorLookup` が実 DB 実装を提供する。Accept/Reject の `object` は元 Follow を `{id, type: "Follow", actor, object}` 形で埋め込む（裸の id 文字列ではない）。Undo は呼び出し側が再構築した `wrapped` の `id` を `wrapped_activity_id` で強制上書きしてから埋め込む（`Follow`/`Block` 行は `activity_id` 文字列のみ永続化し元 JSON を保持しないため、再構築後の `wrapped` は新しい id を持ってしまう）。
