@@ -21,24 +21,33 @@
 //!   judgment point ([`approval_policy::FollowApprovalPolicy::requires_approval`])
 //!   and the sole definition site of the same-server ("both local")
 //!   admin-privilege branch — see [`approval_policy`].
+//! - Task 2.2 (`Boundary: Transitions, RelationshipRepository`): the common
+//!   relationship state-transition functions the API path and the inbound
+//!   Activity path both converge on ([`transitions::Transitions`]), plus the
+//!   sole point (`establish_follow`/`record_pending`) that emits
+//!   notifications' `follow`/`follow_request` `NotificationEvent` after
+//!   commit — see [`transitions`]. `RelationshipRepository` ([`repository`])
+//!   gained two small, additive extensions this same task needed (see that
+//!   module's doc comment, "Task 2.2 additions").
 //!
-//! No Activity generation (`ActivityBuilder`), no state-transition functions
-//! (`Transitions`), no relationship -> contract mapping
-//! (`RelationshipMapper`), no business services (`FollowService` /
+//! No Activity generation (`ActivityBuilder`), no relationship -> contract
+//! mapping (`RelationshipMapper`), no business services (`FollowService` /
 //! `FollowRequestService` / `MuteService` / `BlockService`), no inbound
 //! Activity handlers, no delegation-port implementations
 //! (`BlockPolicyImpl` / `RelProviderImpl` / `AccountCountsProviderImpl` /
 //! `FilterQuery`), and no HTTP surface (`SocialGraphEndpoints`) live here —
-//! those consume the types/policy defined in this module but are out of
-//! scope for tasks 1.1-2.1. This module is not yet declared on any
+//! those consume the types/policy/transitions defined in this module but are
+//! out of scope for tasks 1.1-2.2. This module is not yet declared on any
 //! router/`AppState`/bootstrap wiring point — that remains a later task's
 //! boundary (`SocialGraphModule` wiring, design.md's File Structure Plan).
 
 pub mod approval_policy;
 pub mod model;
 pub mod repository;
+pub mod transitions;
 
 pub use approval_policy::{FollowApprovalPolicy, FollowDecision};
 pub use model::{
     Block, Follow, FollowOptions, FollowRequest, FollowRequestDirection, Mute, MuteOptions,
 };
+pub use transitions::Transitions;

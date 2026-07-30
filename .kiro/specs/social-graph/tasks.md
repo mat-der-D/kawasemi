@@ -29,7 +29,7 @@
   - _Boundary: FollowApprovalPolicy_
   - _Depends: 1.2_
 
-- [ ] 2.2 (P) 関係状態遷移の共通関数と通知イベント emit
+- [x] 2.2 (P) 関係状態遷移の共通関数と通知イベント emit
   - フォロー確立/解消・保留記録/昇格(Accept)/破棄(Reject)・ブロック適用（双方向フォローと両方向保留を単一トランザクションで解消してから確定）/解除・被ブロック設定/解除を、API 経路と受信経路が共有する冪等な遷移関数として実装する
   - フォロー確立（establish_follow）と受信保留記録（record_pending, direction=Inbound）のコミット後、この単一の合流点でのみ notifications の `NotificationEventSink`（既定 no-op）へ `follow` / `follow_request` の `NotificationEvent` を冪等に emit する（イベント型/シンク契約は notifications 所有で再定義しない）。呼び出し元（API 経路の FollowService/FollowRequestService、受信経路の InboundHandler）はいずれも emit ロジックを持たず、この関数を呼ぶだけで良い
   - ブロック適用で双方向フォロー・両方向保留が消え、同一遷移の二重適用が状態を壊さないこと、およびフォロー確立・受信保留記録のコミット後にシンクへ 1 度だけイベントが渡り既定 no-op のため notifications 未配線でも成功することを単体テストで確認できる状態
@@ -151,3 +151,6 @@
 - タスク 1.3: design.md の `RelationshipRepository` Service Interface は `&self` メソッドのスケッチだが、本リポジトリの `*_repository.rs`（12ファイル全数確認）は例外なく `pool: &PgPool` を明示的に取る自由関数スタイルであり、本タスクもそれに追従した（design.md 側の記法上の慣習であり齟齬ではない、と判断してレビュー承認済み）。今後の repository 系タスクも同様に自由関数スタイルに従うこと。
   - `RelationshipState`（`RelationshipMapper` が消費する viewer×target 1件分の関係状態）は design.md の File Structure Plan では `model.rs` 記載だが、task 1.2 の `tasks.md` 記述にはこの型は現れず、task 1.2 の境界（クローズ済みレビュー範囲）を侵さないため `src/social_graph/repository.rs` 側に定義した。task 2.4（RelationshipMapper）実装時はこの型を `repository.rs` から import すること（`model.rs` には存在しない）。
   - `upsert_follow` / `upsert_request` / `upsert_mute` / `upsert_block` は design.md のシグネチャに無い先頭 `id: Id` 引数を追加している（各テーブルの主キーに DB 側デフォルトがなく、ドメイン型も `id` を持たないため。`interaction_repository.rs::add_bookmark` の既存前例に追従）。呼び出し側（task 3.x のサービス層）はこの `id` を `RuntimeContext` の `IdGenerator` から採番して渡すこと。
+- タスク 2.2: `upsert_follow` / `upsert_request` は戻り値を `Result<(), AppError>` から `Result<bool, AppError>` へ変更した（`ON CONFLICT DO UPDATE` のため `rows_affected()` では新規/更新を判別できず、Postgres の `RETURNING (xmax = 0) AS inserted` イディオムで判別。`establish_follow`/`record_pending` の冪等 emit 判定に使用）。`delete_follow` / `delete_request` / `upsert_block` は `pool: &PgPool` から `executor: E where E: sqlx::PgExecutor<'e>` へジェネリック化した（`apply_block`/`mark_blocked_by` が単一 `sqlx::Transaction` 上でこれらを駆動するため。既存呼び出し側は `&PgPool` のまま無変更で動作）。新規 `take_request`（`DELETE ... RETURNING`）を追加し、`promote_pending` が送信中リクエストの `activity_id` を race なく回収できるようにした。今後 repository 系タスクもこの規約（bool 返却での新規/更新判別、Transaction 越しの呼び出しにはジェネリック executor）に従うこと。
+  - `promote_pending`（Accept 受領）で確立するフォローは、`FollowRequest`（task 1.2 承認済み・境界外）が `FollowOptions` を保持しないため、Mastodon 既定値（`reblogs: true, notify: false, languages: []`）で確立する。元のフォロー要求時のオプションは保持されない。オプション保持が必要になった場合は `FollowRequest` への options フィールド追加を検討すること（`model.rs` 側のタスクとして）。
+  - `mark_blocked_by`（受信 Block による被ブロック記録）が作成する `Block` 行の `activity_id` は空文字列である（design.md のシグネチャがこの経路に `activity_id` を渡さず、本インスタンスはこの関係の送信元ではないため Undo(Block) を自ら送ることがなく、値が下流で意味を持って参照されることはない）。`Block.activity_id` を `Option<String>` にする方がクリーンだが `model.rs`（task 1.2 境界外）の変更を要するため見送った。

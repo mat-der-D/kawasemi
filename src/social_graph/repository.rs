@@ -1,9 +1,9 @@
 //! `RelationshipRepository` (design.md "Data / データ層" ->
 //! `RelationshipRepository`; Requirements 1.6, 2.2, 4.3, 8.1, 8.4, 9.1, 9.2,
-//! 9.3; task 1.3, `Boundary: RelationshipRepository`): persistence access
-//! for `follows` / `follow_requests` / `mutes` / `blocks`
-//! (`migrations/0012_social_graph.sql`, task 1.1, already applied,
-//! unmodified by this task) — upsert / delete / existence, the inbound
+//! 9.3; task 1.3, `Boundary: RelationshipRepository`, minimally extended by
+//! task 2.2, same boundary): persistence access for `follows` /
+//! `follow_requests` / `mutes` / `blocks` (`migrations/0012_social_graph.sql`,
+//! task 1.1, unmodified) — upsert / delete / existence, the inbound
 //! pending-request page, viewer+target-group batched reverse lookup for
 //! relationship-flag derivation, and the block/blocked-by/mute(expiry-aware)
 //! /follow filter sets Requirement 9 exposes to timelines/notifications.
@@ -14,8 +14,10 @@
 //! [`delete_request`], [`list_inbound_requests`], [`upsert_mute`],
 //! [`delete_mute`], [`upsert_block`], [`delete_block`], [`load_states`],
 //! [`blocked_targets`], [`blocked_by`], [`muted_targets`],
-//! [`following_targets`], [`count_followers`], [`count_following`]. No
-//! `FollowApprovalPolicy`, `Transitions`, `ActivityBuilder`,
+//! [`following_targets`], [`count_followers`], [`count_following`], plus
+//! [`take_request`] (task 2.2's minimal, additive extension — see this
+//! module's doc comment, "Task 2.2 additions"). No `FollowApprovalPolicy`,
+//! `ActivityBuilder`,
 //! `RelationshipMapper`, business service, inbound Activity handler, or HTTP
 //! surface lives here — those consume this module but are out of scope for
 //! task 1.3 (`Boundary: RelationshipRepository`).
@@ -125,6 +127,74 @@
 //! `expires_at IS NULL OR expires_at > $now` in SQL, using the caller's
 //! injected `now: OffsetDateTime` parameter — never `OffsetDateTime::now_utc()`
 //! called inside this module (steering's determinism rule).
+//!
+//! ## Task 2.2 additions (`Boundary: Transitions, RelationshipRepository` —
+//! this task's own boundary explicitly includes `RelationshipRepository`,
+//! not just `Transitions`)
+//! Two small, additive extensions `transitions.rs` (task 2.2) needs, neither
+//! changing an existing call site's behavior for its already-passing
+//! callers:
+//!
+//! - **[`upsert_follow`] / [`upsert_request`] now report "was this call the
+//!   one that actually inserted a new row?"** (`Result<bool, AppError>`
+//!   instead of `Result<(), AppError>`). `transitions.rs::establish_follow`/
+//!   `record_pending` must emit their `notifications::NotificationEvent`
+//!   exactly once *per newly-established relationship*, never on a repeat/
+//!   idempotent re-application (design.md's "`Transitions` ... 通知イベント
+//!   emit" — "同一遷移の二重適用が...二重に生成しない"). Because both
+//!   functions must use `ON CONFLICT ... DO UPDATE` rather than `DO NOTHING`
+//!   (this module's own "Idempotent upsert" doc section above — a repeat
+//!   call must still refresh options), `sqlx::query(...).execute(pool)`'s
+//!   `rows_affected() > 0` cannot distinguish a fresh `INSERT` from a
+//!   conflict-triggered `UPDATE` (both affect exactly one row). Both
+//!   functions instead append `RETURNING (xmax = 0) AS inserted` — Postgres's
+//!   standard idiom for "was this specific row version just created by this
+//!   statement's `INSERT` branch, or did it already exist" (`xmax` is unset,
+//!   i.e. `0`, only for a row a transaction has not yet marked as
+//!   superseded) — and `fetch_one` that single boolean column instead of
+//!   discarding `execute`'s row count. Mirrors
+//!   `interaction_service.rs::favourite`'s identical established
+//!   precedent/rationale for `interaction_repository::add_favourite`'s own
+//!   `is_new: bool` return (that function gets away with a plain
+//!   `rows_affected() > 0` only because it uses `DO NOTHING`, not `DO
+//!   UPDATE` — the two are genuinely different situations, not an
+//!   inconsistency). Existing callers that ignore the return value (every
+//!   current call in `repository/tests.rs`) are unaffected: a discarded
+//!   `bool` compiles exactly like a discarded `()`.
+//! - **[`delete_follow`] / [`delete_request`] / [`upsert_block`] now take a
+//!   generic `executor: E where E: sqlx::PgExecutor<'e>` instead of a
+//!   concrete `pool: &PgPool`.** `transitions.rs::apply_block`/
+//!   `mark_blocked_by` must remove both-direction follows, both-direction
+//!   pending requests, *and* commit the block row as one atomic transaction
+//!   (design.md, "`apply_block` は単一トランザクションで...解消してから確
+//!   定"; Requirement 5.2) — a genuine cross-statement atomicity need this
+//!   module's existing single-statement functions cannot serve while pinned
+//!   to a concrete `&PgPool` (a `PgPool` reference cannot join an
+//!   already-open `sqlx::Transaction`). Mirrors
+//!   `status_repository.rs::fetch_raw`'s identical established
+//!   `<'e, E: sqlx::PgExecutor<'e>>` idiom precedent — callers unaware of
+//!   any transaction keep passing a bare `&PgPool` exactly as before (a
+//!   `&PgPool` itself satisfies `PgExecutor<'_>`, so every existing
+//!   `repository/tests.rs` call site is source-compatible unchanged); only
+//!   `transitions.rs`'s new transaction-bound call sites pass `&mut *tx`
+//!   instead. The other upsert/delete functions ([`upsert_follow`],
+//!   [`upsert_request`], [`upsert_mute`], [`delete_mute`], [`delete_block`])
+//!   are left as concrete `&PgPool` takers: no `transitions.rs` function
+//!   needs them inside a shared transaction (each of `establish_follow`,
+//!   `record_pending`, `promote_pending`, `drop_pending`, `clear_block`,
+//!   `clear_blocked_by` performs exactly one relationship-table write, which
+//!   is already atomic as a single statement without an explicit
+//!   transaction).
+//! - **[`take_request`] is new**: `transitions.rs::promote_pending` (Accept
+//!   received, Requirement 2.5) needs the original outbound
+//!   [`FollowRequest`]'s `activity_id` (the Follow Activity id the newly-
+//!   established [`Follow`]'s eventual Undo(Follow) must reference) at the
+//!   exact moment it consumes (deletes) that pending row — a separate
+//!   "check if it exists" query followed by [`delete_request`] would leave a
+//!   check-then-delete race window under concurrent access. A single
+//!   `DELETE ... RETURNING` statement fetches and removes the row
+//!   atomically, reusing [`row_to_request_pair`]'s existing row-to-domain-type
+//!   mapping.
 
 #[cfg(test)]
 mod tests;
@@ -244,8 +314,15 @@ fn languages_from_json(value: &serde_json::Value) -> Vec<String> {
 /// repeat call refreshes `show_reblogs`/`notify`/`languages`/`activity_id`
 /// on the existing row (this module's doc comment, "Idempotent upsert")
 /// rather than creating a duplicate or silently ignoring changed options.
-pub async fn upsert_follow(pool: &PgPool, id: Id, f: &Follow) -> Result<(), AppError> {
-    sqlx::query(
+/// Returns `Ok(true)` when this call's `INSERT` branch actually fired (a
+/// genuinely new follow), `Ok(false)` when it instead hit the `DO UPDATE`
+/// conflict branch (an already-established follow, options refreshed) —
+/// see this module's doc comment ("Task 2.2 additions") for why a plain
+/// `rows_affected()` count cannot make this distinction under `DO UPDATE`.
+/// `transitions.rs::establish_follow` (task 2.2) uses this to decide whether
+/// to emit a `follow` notification.
+pub async fn upsert_follow(pool: &PgPool, id: Id, f: &Follow) -> Result<bool, AppError> {
+    let (inserted,): (bool,) = sqlx::query_as(
         "INSERT INTO follows \
              (id, follower_id, follower_kind, followee_id, followee_kind, show_reblogs, notify, \
               languages, activity_id, created_at) \
@@ -254,7 +331,8 @@ pub async fn upsert_follow(pool: &PgPool, id: Id, f: &Follow) -> Result<(), AppE
              show_reblogs = EXCLUDED.show_reblogs, \
              notify = EXCLUDED.notify, \
              languages = EXCLUDED.languages, \
-             activity_id = EXCLUDED.activity_id",
+             activity_id = EXCLUDED.activity_id \
+         RETURNING (xmax = 0) AS inserted",
     )
     .bind(id.as_i64())
     .bind(account_id(&f.follower))
@@ -266,23 +344,29 @@ pub async fn upsert_follow(pool: &PgPool, id: Id, f: &Follow) -> Result<(), AppE
     .bind(languages_to_json(&f.languages))
     .bind(&f.activity_id)
     .bind(f.created_at)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(map_server_error)?;
 
-    Ok(())
+    Ok(inserted)
 }
 
 /// Deletes the `follower` -> `followee` follow, if any. Returns `Ok(true)`
 /// when a row was actually deleted, `Ok(false)` when no such follow existed
 /// — an idempotent no-op success, mirroring this crate's established
 /// `remove_favourite`-style convention (absence is not an error at this
-/// layer).
-pub async fn delete_follow(
-    pool: &PgPool,
+/// layer). Generic over `executor` (this module's doc comment, "Task 2.2
+/// additions") so `transitions.rs::apply_block`/`mark_blocked_by` can drive
+/// it against an open `sqlx::Transaction` (`&mut *tx`), while every
+/// pre-existing caller keeps passing a bare `&PgPool` unchanged.
+pub async fn delete_follow<'e, E>(
+    executor: E,
     follower: &AccountRef,
     followee: &AccountRef,
-) -> Result<bool, AppError> {
+) -> Result<bool, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let result = sqlx::query(
         "DELETE FROM follows WHERE follower_kind = $1 AND follower_id = $2 \
              AND followee_kind = $3 AND followee_id = $4",
@@ -291,7 +375,7 @@ pub async fn delete_follow(
     .bind(account_id(follower))
     .bind(account_kind(followee))
     .bind(account_id(followee))
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(map_server_error)?;
 
@@ -307,14 +391,21 @@ pub async fn delete_follow(
 /// target, so an outbound and an inbound row for the same
 /// `(requester, target)` pair coexist without colliding
 /// (`migrations/0012_social_graph.sql`'s own doc comment).
-pub async fn upsert_request(pool: &PgPool, id: Id, r: &FollowRequest) -> Result<(), AppError> {
-    sqlx::query(
+/// Returns `Ok(true)` when this call's `INSERT` branch actually fired (a
+/// genuinely new pending request), `Ok(false)` when it instead hit the
+/// `DO UPDATE` conflict branch (already pending, `activity_id` refreshed) —
+/// same `xmax`-based technique as [`upsert_follow`] (this module's doc
+/// comment, "Task 2.2 additions"). `transitions.rs::record_pending` (task
+/// 2.2) uses this to decide whether to emit a `follow_request` notification.
+pub async fn upsert_request(pool: &PgPool, id: Id, r: &FollowRequest) -> Result<bool, AppError> {
+    let (inserted,): (bool,) = sqlx::query_as(
         "INSERT INTO follow_requests \
              (id, requester_id, requester_kind, target_id, target_kind, direction, activity_id, \
               created_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
          ON CONFLICT (requester_kind, requester_id, target_kind, target_id, direction) \
-             DO UPDATE SET activity_id = EXCLUDED.activity_id",
+             DO UPDATE SET activity_id = EXCLUDED.activity_id \
+         RETURNING (xmax = 0) AS inserted",
     )
     .bind(id.as_i64())
     .bind(account_id(&r.requester))
@@ -324,23 +415,29 @@ pub async fn upsert_request(pool: &PgPool, id: Id, r: &FollowRequest) -> Result<
     .bind(direction_as_str(r.direction))
     .bind(&r.activity_id)
     .bind(r.created_at)
-    .execute(pool)
+    .fetch_one(pool)
     .await
     .map_err(map_server_error)?;
 
-    Ok(())
+    Ok(inserted)
 }
 
 /// Deletes the pending `requester` -> `target` request in direction `dir`,
 /// if any. Returns `Ok(true)` when a row was actually deleted, `Ok(false)`
 /// when no such pending request existed — idempotent no-op success, same
-/// convention as [`delete_follow`].
-pub async fn delete_request(
-    pool: &PgPool,
+/// convention as [`delete_follow`]. Generic over `executor` for the same
+/// reason as [`delete_follow`] (this module's doc comment, "Task 2.2
+/// additions") — `transitions.rs::apply_block`/`mark_blocked_by` drive this
+/// against an open transaction.
+pub async fn delete_request<'e, E>(
+    executor: E,
     requester: &AccountRef,
     target: &AccountRef,
     dir: FollowRequestDirection,
-) -> Result<bool, AppError> {
+) -> Result<bool, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let result = sqlx::query(
         "DELETE FROM follow_requests WHERE requester_kind = $1 AND requester_id = $2 \
              AND target_kind = $3 AND target_id = $4 AND direction = $5",
@@ -350,11 +447,44 @@ pub async fn delete_request(
     .bind(account_kind(target))
     .bind(account_id(target))
     .bind(direction_as_str(dir))
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(map_server_error)?;
 
     Ok(result.rows_affected() > 0)
+}
+
+/// Atomically removes and returns the pending `requester` -> `target`
+/// request in direction `dir`, if any — a combined `DELETE ... RETURNING`
+/// rather than a separate existence check followed by [`delete_request`]
+/// (this module's doc comment, "Task 2.2 additions": avoids a
+/// check-then-delete race). `transitions.rs::promote_pending` (Accept
+/// received, Requirement 2.5) uses this to recover the original outbound
+/// request's `activity_id` (the Follow Activity id the newly-established
+/// [`Follow`]'s eventual Undo(Follow) must reference) in the same step that
+/// consumes the pending row.
+pub async fn take_request(
+    pool: &PgPool,
+    requester: &AccountRef,
+    target: &AccountRef,
+    dir: FollowRequestDirection,
+) -> Result<Option<FollowRequest>, AppError> {
+    let row: Option<FollowRequestRow> = sqlx::query_as(
+        "DELETE FROM follow_requests WHERE requester_kind = $1 AND requester_id = $2 \
+             AND target_kind = $3 AND target_id = $4 AND direction = $5 \
+         RETURNING id, requester_id, requester_kind, target_id, target_kind, direction, \
+             activity_id, created_at",
+    )
+    .bind(account_kind(requester))
+    .bind(account_id(requester))
+    .bind(account_kind(target))
+    .bind(account_id(target))
+    .bind(direction_as_str(dir))
+    .fetch_optional(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    Ok(row.map(|r| row_to_request_pair(r).1))
 }
 
 /// [`Cursor`] over `follow_requests.id` — the pending-request row's own
@@ -513,7 +643,14 @@ pub async fn delete_mute(
 /// to blocks): a first call for `(b.blocker, b.blocked)` inserts a new row
 /// under caller-minted `id`; a repeat call refreshes `activity_id` on the
 /// existing row rather than duplicating it.
-pub async fn upsert_block(pool: &PgPool, id: Id, b: &Block) -> Result<(), AppError> {
+/// Generic over `executor` (this module's doc comment, "Task 2.2
+/// additions") — `transitions.rs::apply_block`/`mark_blocked_by` commit this
+/// as the final step of the single transaction that also clears
+/// both-direction follows/pending requests (Requirement 5.2).
+pub async fn upsert_block<'e, E>(executor: E, id: Id, b: &Block) -> Result<(), AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     sqlx::query(
         "INSERT INTO blocks (id, blocker_id, blocker_kind, blocked_id, blocked_kind, \
              activity_id, created_at) \
@@ -528,7 +665,7 @@ pub async fn upsert_block(pool: &PgPool, id: Id, b: &Block) -> Result<(), AppErr
     .bind(account_kind(&b.blocked))
     .bind(&b.activity_id)
     .bind(b.created_at)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(map_server_error)?;
 
