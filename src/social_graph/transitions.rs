@@ -203,6 +203,37 @@
 //! value atomically. Every existing caller in `transitions/tests.rs` merely
 //! `.expect(...)`s the `Result` without inspecting the `Ok` payload's type, so
 //! this change is source-compatible with every test written before this task.
+//!
+//! ## Task 3.4 addition (`BlockService`, `Boundary: BlockService` — the same
+//! recurring situation as "Task 3.2 additions" above, for `Block` instead of
+//! `FollowRequest`)
+//! [`Transitions::clear_block`] originally returned `Result<(), AppError>`
+//! (design.md's literal signature). `BlockService.unblock` (Requirement 5.4)
+//! must build an `Undo(Block)` Activity via `ActivityBuilder::build_undo`,
+//! which requires the *original* outbound Block's own Activity id
+//! (`wrapped_activity_id`) as a parameter. Unlike the `follow`/`unfollow`
+//! case — where `RelationshipState::follow: Option<Follow>` already embeds
+//! the full `Follow` row (`activity_id` included), letting `FollowService::
+//! unfollow` simply read `state.follow.as_ref().unwrap().activity_id` before
+//! calling `remove_follow` — `RelationshipState::blocking` is a bare `bool`
+//! with no `activity_id` to read; the only place that id still lives is the
+//! `blocks` row itself, about to be deleted. `clear_block` therefore now
+//! returns `Result<Option<String>, AppError>`: `Some(original_block_activity_id)`
+//! when a block actually existed and was removed, `None` on the
+//! already-not-blocking idempotent no-op path — the exact same minimal,
+//! additive widening [`Self::promote_pending`]/[`Self::drop_pending`] already
+//! established for the analogous `FollowRequest` situation. Its
+//! implementation switches from [`repository::delete_block`] to the new
+//! [`repository::take_block`] (a combined `DELETE ... RETURNING`, added
+//! alongside this change since no existing `repository.rs` function recovered
+//! a deleted block row) to recover this value atomically.
+//! [`Transitions::clear_blocked_by`] (Requirement 7.6, the inbound-Undo(Block)
+//! receiver path) is deliberately left untouched: this instance never sends
+//! its own Undo(Block) for a block *against* it, so it has no Activity id to
+//! recover and still calls [`repository::delete_block`] unchanged. Every
+//! existing `clear_block` caller in `transitions/tests.rs` merely
+//! `.expect(...)`s the `Result` without inspecting the `Ok` payload, so this
+//! change is source-compatible with every test written before this task.
 
 #[cfg(test)]
 mod tests;
@@ -470,13 +501,22 @@ impl Transitions {
     /// restore any follow/pending-request state the original block may have
     /// cleared — unblocking never implicitly re-establishes a relationship.
     /// No notification is emitted.
+    ///
+    /// Returns `Ok(Some(original_block_activity_id))` when a block actually
+    /// existed and was removed — the *original* outbound Block Activity id
+    /// this instance sent (the same string [`Self::apply_block`] persisted),
+    /// needed by `BlockService::unblock` (task 3.4) to build the
+    /// `Undo(Block)` it delivers — or `Ok(None)` on the idempotent no-op
+    /// path. See this module's doc comment ("Task 3.4 addition") for why
+    /// this widened return type was needed, mirroring [`Self::promote_pending`]/
+    /// [`Self::drop_pending`]'s identical precedent ("Task 3.2 additions").
     pub async fn clear_block(
         &self,
         blocker: &AccountRef,
         blocked: &AccountRef,
-    ) -> Result<(), AppError> {
-        repository::delete_block(&self.pool, blocker, blocked).await?;
-        Ok(())
+    ) -> Result<Option<String>, AppError> {
+        let taken = repository::take_block(&self.pool, blocker, blocked).await?;
+        Ok(taken.map(|block| block.activity_id))
     }
 
     /// Records that `target` (this instance's own local actor) is blocked by

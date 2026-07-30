@@ -53,18 +53,26 @@
 //!   ([`mute_service::MuteService`]) — a DB-state-only update with no
 //!   federation Activity/delivery involved (Requirement 4.5) — see
 //!   [`mute_service`].
+//! - Task 3.4 (`Boundary: BlockService`): the block/unblock business
+//!   aggregate ([`block_service::BlockService`]) — unconditional
+//!   relationship-clearing block/unblock with Block/Undo(Block) delivery —
+//!   see [`block_service`]. This task also widened
+//!   [`transitions::Transitions::clear_block`]'s return type and added
+//!   [`repository::take_block`] (see those modules' own doc comments, "Task
+//!   3.4 addition").
 //!
-//! No `BlockService`, no inbound Activity handlers, no delegation-port
-//! implementations (`BlockPolicyImpl` / `RelProviderImpl` /
-//! `AccountCountsProviderImpl` / `FilterQuery`), and no HTTP surface
-//! (`SocialGraphEndpoints`) live here yet — those consume the types/policy/
-//! transitions/Activity-builder/mapper/services defined in this module but
-//! are out of scope through task 3.3. This module is not yet declared on any
-//! router/`AppState`/bootstrap wiring point — that remains a later task's
-//! boundary (`SocialGraphModule` wiring, design.md's File Structure Plan).
+//! No inbound Activity handlers, no delegation-port implementations
+//! (`BlockPolicyImpl` / `RelProviderImpl` / `AccountCountsProviderImpl` /
+//! `FilterQuery`), and no HTTP surface (`SocialGraphEndpoints`) live here
+//! yet — those consume the types/policy/transitions/Activity-builder/mapper/
+//! services defined in this module but are out of scope through task 3.4.
+//! This module is not yet declared on any router/`AppState`/bootstrap wiring
+//! point — that remains a later task's boundary (`SocialGraphModule`
+//! wiring, design.md's File Structure Plan).
 
 pub mod activity_builder;
 pub mod approval_policy;
+pub mod block_service;
 pub mod follow_request_service;
 pub mod follow_service;
 pub mod model;
@@ -75,6 +83,7 @@ pub mod transitions;
 
 pub use activity_builder::{ActivityBuilder, LocalActorLookup, RemoteActorLookup};
 pub use approval_policy::{FollowApprovalPolicy, FollowDecision};
+pub use block_service::BlockService;
 pub use follow_request_service::FollowRequestService;
 pub use follow_service::FollowService;
 pub use model::{

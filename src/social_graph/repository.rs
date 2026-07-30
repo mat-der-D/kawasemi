@@ -674,7 +674,12 @@ where
 
 /// Deletes the `blocker` -> `blocked` block, if any. Returns `Ok(true)` when
 /// a row was actually deleted, `Ok(false)` when no such block existed —
-/// idempotent no-op success.
+/// idempotent no-op success. Still used by `transitions.rs::clear_blocked_by`
+/// (Requirement 7.6, receipt of an Undo(Block) naming this instance's own
+/// local actor as the original target), which never needs the removed row's
+/// `activity_id` back — this instance never sent its own Undo(Block) for a
+/// block *against* it, so there is nothing for it to reference. See
+/// [`take_block`] for the sibling case that does need it.
 pub async fn delete_block(
     pool: &PgPool,
     blocker: &AccountRef,
@@ -693,6 +698,63 @@ pub async fn delete_block(
     .map_err(map_server_error)?;
 
     Ok(result.rows_affected() > 0)
+}
+
+/// Atomically removes and returns the `blocker` -> `blocked` block row, if
+/// any — a combined `DELETE ... RETURNING`, mirroring [`take_request`]'s
+/// identical pattern (this module's doc comment, "Task 2.2 additions": avoids
+/// a check-then-delete race). `transitions.rs::clear_block` (task 3.4,
+/// `BlockService::unblock`, Requirement 5.4) uses this to recover the removed
+/// block's own outbound `activity_id` — the original Block Activity id an
+/// eventual Undo(Block) must reference — in the same atomic step that
+/// consumes the row. This is the exact same "the state read doesn't carry the
+/// referenced Activity id, so the consuming transition function must
+/// surface it instead" situation task 3.2's own `promote_pending`/
+/// `drop_pending` widening (this module's doc comment, "Task 2.2 additions")
+/// already solved for pending follow requests, recurring here for `Block`:
+/// unlike [`RelationshipState::follow`] (which embeds the full [`Follow`]
+/// row, `activity_id` included), [`RelationshipState::blocking`] is a bare
+/// `bool` with nowhere to carry an `activity_id` — so `BlockService::unblock`
+/// cannot recover it from a preceding `load_states` read the way
+/// `FollowService::unfollow` recovers `state.follow`'s `activity_id`.
+pub async fn take_block(
+    pool: &PgPool,
+    blocker: &AccountRef,
+    blocked: &AccountRef,
+) -> Result<Option<Block>, AppError> {
+    let row: Option<BlockRow> = sqlx::query_as(
+        "DELETE FROM blocks WHERE blocker_kind = $1 AND blocker_id = $2 \
+             AND blocked_kind = $3 AND blocked_id = $4 \
+         RETURNING blocker_id, blocker_kind, blocked_id, blocked_kind, activity_id, created_at",
+    )
+    .bind(account_kind(blocker))
+    .bind(account_id(blocker))
+    .bind(account_kind(blocked))
+    .bind(account_id(blocked))
+    .fetch_optional(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    Ok(row.map(row_to_block))
+}
+
+#[derive(sqlx::FromRow)]
+struct BlockRow {
+    blocker_id: i64,
+    blocker_kind: String,
+    blocked_id: i64,
+    blocked_kind: String,
+    activity_id: String,
+    created_at: OffsetDateTime,
+}
+
+fn row_to_block(row: BlockRow) -> Block {
+    Block {
+        blocker: account_ref_from(&row.blocker_kind, row.blocker_id),
+        blocked: account_ref_from(&row.blocked_kind, row.blocked_id),
+        activity_id: row.activity_id,
+        created_at: row.created_at,
+    }
 }
 
 // -- RelationshipState / load_states (Requirement 8.4) ---------------------
