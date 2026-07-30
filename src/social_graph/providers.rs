@@ -1,26 +1,35 @@
-//! `BlockPolicyImpl` (design.md "Port Impl / 委譲実装層" ->
-//! `#### BlockPolicyImpl / RelProviderImpl / AccountCountsProviderImpl /
-//! FilterQuery`, design.md lines ~544-574; Requirements 6.1, 6.2, 6.3, 6.4;
-//! task 4.2, `Boundary: BlockPolicyImpl`): supplies federation-core's
+//! `BlockPolicyImpl` / `RelProviderImpl` / `FilterQuery` (design.md "Port
+//! Impl / 委譲実装層" -> `#### BlockPolicyImpl / RelProviderImpl /
+//! AccountCountsProviderImpl / FilterQuery`, design.md lines ~544-574;
+//! Requirements 6.1, 6.2, 6.3, 6.4 (task 4.2, `Boundary: BlockPolicyImpl`)
+//! and 8.2, 8.3, 8.4, 9.1, 9.2, 9.3, 9.4 (task 4.3, `Boundary:
+//! RelProviderImpl, FilterQuery`)): supplies federation-core's
 //! destination-aware `BlockPolicy` delegation boundary
 //! (`crate::federation::inbound::block_policy::BlockPolicy`) with a real,
 //! `blocks`-table-backed judgment, replacing that module's own always-`false`
-//! `NoopBlockPolicy` default.
+//! `NoopBlockPolicy` default ([`BlockPolicyImpl`]); supplies
+//! accounts-and-instance's `RelationshipStateProvider` delegation boundary
+//! with a real, this spec's own relationship-tables-backed implementation,
+//! replacing `NoRelationshipProvider` ([`RelProviderImpl`]); and exposes a
+//! query-only façade over the same tables' filter sets for timelines/
+//! notifications ([`FilterQuery`]).
 //!
 //! ## Scope
-//! Owns exactly [`BlockPolicyImpl`] and the narrow local-actor resolution it
-//! needs for the destination side of a judgment (see "Resolving the
-//! destination" below). Per design.md's File Structure Plan this file is
-//! also the intended home for `RelProviderImpl`/`AccountCountsProviderImpl`/
-//! `FilterQuery` (tasks 4.3/4.4, out of this task's `Boundary:
-//! BlockPolicyImpl` scope) — this task adds no placeholder/stub for any of
-//! those three, only [`BlockPolicyImpl`] itself. Does not touch
-//! `src/social_graph/inbound.rs` (out of this task's boundary), does not
-//! register [`BlockPolicyImpl`] against federation-core's actual `BlockPolicy`
-//! registry/bootstrap (task 5.2's `SocialGraphModule` wiring boundary), and
-//! does not touch `src/social_graph/repository.rs` beyond the one minimal,
-//! additive `repository::is_blocked` existence query this task's own
-//! persistence-layer counterpart needs (see that function's own doc comment).
+//! Task 4.2 (already committed) owns exactly [`BlockPolicyImpl`] and the
+//! narrow local-actor resolution it needs for the destination side of a
+//! judgment (see "Resolving the destination" below). Task 4.3 (this task)
+//! additively owns exactly [`RelProviderImpl`] and [`FilterQuery`] (see this
+//! module's doc comment, "RelProviderImpl / FilterQuery", further down) —
+//! per design.md's File Structure Plan this file is also the intended home
+//! for `AccountCountsProviderImpl` (task 4.4, still out of scope; no
+//! placeholder/stub added for it here). Neither task touches
+//! `src/social_graph/inbound.rs` (out of boundary), registers any of these
+//! three implementations against their real registry/bootstrap (task 5.2's
+//! `SocialGraphModule` wiring boundary), or touches
+//! `src/social_graph/repository.rs` beyond the minimal, additive
+//! `repository::is_blocked` (task 4.2) / `repository::reblogs_hidden_targets`
+//! (task 4.3) queries each task's own persistence-layer counterpart needs
+//! (see those functions' own doc comments).
 //!
 //! ## Resolving the signer: reuses `inbound.rs`'s `ActorUriResolver` port
 //! [`BlockPolicyImpl`] is generic over `AU: ActorUriResolver` (task 4.1,
@@ -112,15 +121,21 @@
 #[cfg(test)]
 mod tests;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use sqlx::PgPool;
 
+use crate::accounts::model::RelationshipView;
+use crate::accounts::ports::RelationshipStateProvider;
 use crate::actor::{ActorDirectory, Handle};
-use crate::domain::AccountRef;
+use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
 use crate::federation::inbound::block_policy::{BlockPolicy, LocalRecipientContext};
+use crate::runtime::RuntimeContext;
 use crate::social_graph::inbound::ActorUriResolver;
+use crate::social_graph::relationship_mapper::RelationshipMapper;
 use crate::social_graph::repository;
 
 /// federation-core's `BlockPolicy` delegation boundary, backed by this
@@ -227,5 +242,153 @@ where
         let signer = self.actor_uris.resolve_account_ref(actor_uri).await?;
 
         repository::is_blocked(&self.pool, &destination, &signer).await
+    }
+}
+
+// -- RelProviderImpl / FilterQuery (design.md same heading; Requirements ---
+// -- 8.2, 8.3, 8.4, 9.1, 9.2, 9.3, 9.4; task 4.3, `Boundary: RelProviderImpl,
+// -- FilterQuery`) -------------------------------------------------------
+//
+// `RelProviderImpl` supplies accounts-and-instance's `RelationshipStateProvider`
+// delegation boundary (`crate::accounts::ports::RelationshipStateProvider`)
+// with a real implementation backed by this spec's own relationship tables,
+// replacing that module's always-"no relationship" `NoRelationshipProvider`
+// default. `viewer: Id` (the trait's own parameter shape) is always this
+// instance's own authenticated local actor -- `crate::accounts::ports`'s own
+// doc comment names this boundary "閲覧者アクター", and every existing
+// caller in this crate that populates an analogous `viewer_id: Id` for a
+// social-graph-owned operation (`FollowService`/`MuteService`/`BlockService`,
+// tasks 3.1/3.3/3.4) always wraps it as `AccountRef::Local(viewer_id)`, never
+// `Remote` -- so `RelProviderImpl::relationships` does the same rather than
+// accepting an `AccountRef` directly (matching the trait's actual, already-
+// fixed signature, which is out of this task's boundary to change).
+//
+// `FilterQuery` is a thin, query-only façade over `RelationshipRepository`'s
+// already-implemented (task 1.3) filter-set queries
+// (`blocked_targets`/`blocked_by`/`muted_targets`/`following_targets`) plus
+// this task's own minimal, additive `repository::reblogs_hidden_targets`
+// extension (see that function's own doc comment) -- for timelines/
+// notifications to consume (Requirements 9.1, 9.2, 9.3). It implements no
+// filter-*application* logic of its own (Requirement 9.4: "フィルタ適用処
+// 理そのものは実装せず") -- every method here only reads and returns
+// account-reference lists/sets, never drops/keeps a caller's own items.
+
+/// Supplies accounts-and-instance's [`RelationshipStateProvider`] delegation
+/// boundary with a real implementation (Requirements 8.2, 8.3, 8.4). See
+/// this module's doc comment ("RelProviderImpl / FilterQuery") for the
+/// `viewer: Id` -> `AccountRef::Local` assumption this relies on.
+#[derive(Clone)]
+pub struct RelProviderImpl {
+    pool: PgPool,
+    runtime: RuntimeContext,
+}
+
+impl RelProviderImpl {
+    /// Builds a `RelProviderImpl` bound to `pool` (this spec's own
+    /// relationship tables, via `RelationshipRepository::load_states`) and
+    /// `runtime` (`Clock` injection for `load_states`'s expiry-aware `now`
+    /// -- never a direct wall-clock read, this crate's determinism rule).
+    pub fn new(pool: PgPool, runtime: RuntimeContext) -> Self {
+        Self { pool, runtime }
+    }
+}
+
+impl RelationshipStateProvider for RelProviderImpl {
+    /// Requirements 8.2, 8.3, 8.4: resolves `viewer` to
+    /// `AccountRef::Local(viewer)`, batch-loads every target's relationship
+    /// state via `RelationshipRepository::load_states` (already expiry-aware
+    /// for mutes, and already returns one state per `targets` entry in
+    /// `targets`' own order -- see that function's own doc comment), and
+    /// maps each state through the already-implemented (task 2.4)
+    /// `RelationshipMapper::to_view`. The output's order therefore matches
+    /// `targets`' order by construction, with no re-sorting/re-association
+    /// needed on this method's own part.
+    fn relationships<'a>(
+        &'a self,
+        viewer: Id,
+        targets: &'a [AccountRef],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<RelationshipView>, AppError>> + Send + 'a>> {
+        Box::pin(async move {
+            let viewer_ref = AccountRef::Local(viewer);
+            let now = self.runtime.clock.now();
+            let states = repository::load_states(&self.pool, &viewer_ref, targets, now).await?;
+            Ok(states
+                .iter()
+                .map(|state| RelationshipMapper.to_view(state))
+                .collect())
+        })
+    }
+}
+
+/// The block/blocked-by/mute(expiry-aware)/notification-mute sets a viewer
+/// currently has (Requirement 9.1) -- [`FilterQuery::blocked_set`]'s return
+/// type. Each field is a plain list of the matching accounts; no filter
+/// application (dropping/keeping a caller's own items) happens here or
+/// anywhere in this module (Requirement 9.4).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RelationshipSets {
+    /// Accounts `viewer` has blocked.
+    pub blocked: Vec<AccountRef>,
+    /// Accounts that have blocked `viewer`.
+    pub blocked_by: Vec<AccountRef>,
+    /// Accounts `viewer` currently mutes (expired mutes already excluded,
+    /// Requirement 9.3).
+    pub muted: Vec<AccountRef>,
+    /// The subset of `muted` muted with `notifications = true`.
+    pub muted_notifications: Vec<AccountRef>,
+}
+
+/// A thin, query-only façade over `RelationshipRepository`'s filter-set
+/// queries, for timelines/notifications to consume (Requirements 9.1, 9.2,
+/// 9.3). See this module's doc comment ("RelProviderImpl / FilterQuery")
+/// for why this implements no filter-application logic of its own
+/// (Requirement 9.4).
+#[derive(Clone)]
+pub struct FilterQuery {
+    pool: PgPool,
+    runtime: RuntimeContext,
+}
+
+impl FilterQuery {
+    /// Builds a `FilterQuery` bound to `pool` (this spec's own relationship
+    /// tables) and `runtime` (`Clock` injection for the mute-expiry-aware
+    /// `now` `blocked_set` needs).
+    pub fn new(pool: PgPool, runtime: RuntimeContext) -> Self {
+        Self { pool, runtime }
+    }
+
+    /// Blocked / blocked-by / muted / muted-with-notifications sets for
+    /// `viewer` (Requirement 9.1). `muted`/`muted_notifications` already
+    /// exclude expired mutes, per `RelationshipRepository::muted_targets`'s
+    /// own `now`-driven filter (Requirement 9.3) -- this method performs no
+    /// expiry check of its own, it only supplies the current `now`.
+    pub async fn blocked_set(&self, viewer: &AccountRef) -> Result<RelationshipSets, AppError> {
+        let now = self.runtime.clock.now();
+        let blocked = repository::blocked_targets(&self.pool, viewer).await?;
+        let blocked_by = repository::blocked_by(&self.pool, viewer).await?;
+        let muted = repository::muted_targets(&self.pool, viewer, now, false).await?;
+        let muted_notifications = repository::muted_targets(&self.pool, viewer, now, true).await?;
+        Ok(RelationshipSets {
+            blocked,
+            blocked_by,
+            muted,
+            muted_notifications,
+        })
+    }
+
+    /// `viewer`'s established follow-target set (Requirement 9.2), for home
+    /// timeline construction.
+    pub async fn following_set(&self, viewer: &AccountRef) -> Result<Vec<AccountRef>, AppError> {
+        repository::following_targets(&self.pool, viewer).await
+    }
+
+    /// `viewer`'s follow targets with reblog display disabled
+    /// (`show_reblogs = false`) -- task 4.3's own `reblogs_hidden` filter
+    /// set, for boost-display suppression in home timeline construction.
+    pub async fn reblogs_hidden_set(
+        &self,
+        viewer: &AccountRef,
+    ) -> Result<Vec<AccountRef>, AppError> {
+        repository::reblogs_hidden_targets(&self.pool, viewer).await
     }
 }

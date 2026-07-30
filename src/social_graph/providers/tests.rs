@@ -359,3 +359,245 @@ async fn actor_context_reports_true_for_a_blocked_local_signer() {
 
     app.cleanup().await;
 }
+
+// -- RelProviderImpl / FilterQuery (task 4.3, Requirements 8.2, 8.3, 8.4, ---
+// -- 9.1, 9.2, 9.3, 9.4) -----------------------------------------------
+
+use time::Duration;
+
+use crate::accounts::ports::RelationshipStateProvider;
+use crate::social_graph::model::{Follow, Mute};
+
+async fn upsert_follow(app: &TestApp, follower: AccountRef, followee: AccountRef, reblogs: bool) {
+    sg_repository::upsert_follow(
+        &app.pool,
+        app.runtime.ids.next_id(),
+        &Follow {
+            follower,
+            followee,
+            reblogs,
+            notify: false,
+            languages: Vec::new(),
+            activity_id: "https://example.test/activities/follow-1".to_string(),
+            created_at: app.runtime.clock.now(),
+        },
+    )
+    .await
+    .expect("upsert_follow must succeed");
+}
+
+async fn upsert_mute(
+    app: &TestApp,
+    muter: AccountRef,
+    muted: AccountRef,
+    notifications: bool,
+    expires_at: Option<time::OffsetDateTime>,
+) {
+    sg_repository::upsert_mute(
+        &app.pool,
+        app.runtime.ids.next_id(),
+        &Mute {
+            muter,
+            muted,
+            notifications,
+            expires_at,
+            created_at: app.runtime.clock.now(),
+        },
+    )
+    .await
+    .expect("upsert_mute must succeed");
+}
+
+/// Requirements 8.2, 8.3, 8.4: `RelProviderImpl::relationships` must return
+/// one `RelationshipView` per target, in the same order as `targets`, with
+/// each view's flags derived from that target's real relationship state
+/// (not `NoRelationshipProvider`'s always-false defaults).
+#[tokio::test]
+async fn rel_provider_returns_real_flags_in_target_order() {
+    let app = spawn_test_app().await;
+    let viewer_id = app.runtime.ids.next_id();
+    let viewer = AccountRef::Local(viewer_id);
+    let followed = AccountRef::Remote(app.runtime.ids.next_id());
+    let blocker = AccountRef::Remote(app.runtime.ids.next_id());
+
+    upsert_follow(&app, viewer, followed, true).await;
+    upsert_block(&app, blocker, viewer).await;
+
+    let provider = RelProviderImpl::new(app.pool.clone(), app.runtime.clone());
+
+    // Deliberately ordered [blocker, followed] -- the reverse of insertion
+    // order -- to prove the output follows the *targets* slice's order, not
+    // insertion or id order.
+    let targets = vec![blocker, followed];
+    let views = provider
+        .relationships(viewer_id, &targets)
+        .await
+        .expect("relationships must succeed");
+
+    assert_eq!(views.len(), 2);
+    let blocker_id = match blocker {
+        AccountRef::Remote(id) => id,
+        AccountRef::Local(id) => id,
+    };
+    let followed_id = match followed {
+        AccountRef::Remote(id) => id,
+        AccountRef::Local(id) => id,
+    };
+    assert_eq!(
+        views[0].id, blocker_id,
+        "output order must match targets order"
+    );
+    assert!(
+        views[0].blocked_by,
+        "blocker must be reported as blocked_by"
+    );
+    assert!(!views[0].following);
+
+    assert_eq!(views[1].id, followed_id);
+    assert!(
+        views[1].following,
+        "followed target must be reported as following"
+    );
+    assert!(views[1].showing_reblogs);
+    assert!(!views[1].blocked_by);
+
+    app.cleanup().await;
+}
+
+/// Requirements 8.4, 9.3: an expired mute must surface as `muting: false`
+/// through `RelProviderImpl`, exactly as `RelationshipMapper`/`load_states`
+/// already guarantee (task 2.4/1.3) -- this only proves the provider wires
+/// those already-correct pieces together without re-introducing the
+/// expired mute.
+#[tokio::test]
+async fn rel_provider_excludes_an_expired_mute() {
+    let app = spawn_test_app().await;
+    let viewer_id = app.runtime.ids.next_id();
+    let viewer = AccountRef::Local(viewer_id);
+    let muted = AccountRef::Remote(app.runtime.ids.next_id());
+    let now = app.runtime.clock.now();
+
+    upsert_mute(&app, viewer, muted, true, Some(now - Duration::seconds(1))).await;
+
+    let provider = RelProviderImpl::new(app.pool.clone(), app.runtime.clone());
+    let views = provider
+        .relationships(viewer_id, &[muted])
+        .await
+        .expect("relationships must succeed");
+
+    assert!(
+        !views[0].muting,
+        "an expired mute must not be reported as an active mute"
+    );
+    assert!(!views[0].muting_notifications);
+
+    app.cleanup().await;
+}
+
+/// Requirement 9.1: `FilterQuery::blocked_set` must report blocked/
+/// blocked-by/muted/muted-notifications sets from real relationship state.
+#[tokio::test]
+async fn filter_query_blocked_set_reports_real_sets() {
+    let app = spawn_test_app().await;
+    let viewer = AccountRef::Local(app.runtime.ids.next_id());
+    let blocked = AccountRef::Remote(app.runtime.ids.next_id());
+    let blocked_by_account = AccountRef::Remote(app.runtime.ids.next_id());
+    let muted_notif = AccountRef::Remote(app.runtime.ids.next_id());
+    let muted_plain = AccountRef::Remote(app.runtime.ids.next_id());
+
+    upsert_block(&app, viewer, blocked).await;
+    upsert_block(&app, blocked_by_account, viewer).await;
+    upsert_mute(&app, viewer, muted_notif, true, None).await;
+    upsert_mute(&app, viewer, muted_plain, false, None).await;
+
+    let query = FilterQuery::new(app.pool.clone(), app.runtime.clone());
+    let sets = query
+        .blocked_set(&viewer)
+        .await
+        .expect("blocked_set must succeed");
+
+    assert_eq!(sets.blocked, vec![blocked]);
+    assert_eq!(sets.blocked_by, vec![blocked_by_account]);
+    assert_eq!(sets.muted_notifications, vec![muted_notif]);
+    let mut muted = sets.muted.clone();
+    muted.sort_by_key(|a| match a {
+        AccountRef::Local(id) | AccountRef::Remote(id) => id.as_i64(),
+    });
+    let mut expected = vec![muted_notif, muted_plain];
+    expected.sort_by_key(|a| match a {
+        AccountRef::Local(id) | AccountRef::Remote(id) => id.as_i64(),
+    });
+    assert_eq!(muted, expected);
+
+    app.cleanup().await;
+}
+
+/// Requirement 9.3: an expired mute must not appear in
+/// `FilterQuery::blocked_set`'s `muted`/`muted_notifications` sets.
+#[tokio::test]
+async fn filter_query_blocked_set_excludes_expired_mutes() {
+    let app = spawn_test_app().await;
+    let viewer = AccountRef::Local(app.runtime.ids.next_id());
+    let muted = AccountRef::Remote(app.runtime.ids.next_id());
+    let now = app.runtime.clock.now();
+
+    upsert_mute(&app, viewer, muted, true, Some(now - Duration::seconds(1))).await;
+
+    let query = FilterQuery::new(app.pool.clone(), app.runtime.clone());
+    let sets = query
+        .blocked_set(&viewer)
+        .await
+        .expect("blocked_set must succeed");
+
+    assert!(sets.muted.is_empty());
+    assert!(sets.muted_notifications.is_empty());
+
+    app.cleanup().await;
+}
+
+/// Requirement 9.2: `FilterQuery::following_set` must report the viewer's
+/// established follow targets.
+#[tokio::test]
+async fn filter_query_following_set_reports_follow_targets() {
+    let app = spawn_test_app().await;
+    let viewer = AccountRef::Local(app.runtime.ids.next_id());
+    let followed = AccountRef::Remote(app.runtime.ids.next_id());
+    let not_followed = AccountRef::Remote(app.runtime.ids.next_id());
+    let _ = not_followed;
+
+    upsert_follow(&app, viewer, followed, true).await;
+
+    let query = FilterQuery::new(app.pool.clone(), app.runtime.clone());
+    let following = query
+        .following_set(&viewer)
+        .await
+        .expect("following_set must succeed");
+
+    assert_eq!(following, vec![followed]);
+
+    app.cleanup().await;
+}
+
+/// Task 4.3's own acceptance text: `reblogs_hidden` must return the
+/// `show_reblogs = false` subset of the viewer's follow targets, excluding
+/// follows with reblogs shown.
+#[tokio::test]
+async fn filter_query_reblogs_hidden_set_returns_only_show_reblogs_false_targets() {
+    let app = spawn_test_app().await;
+    let viewer = AccountRef::Local(app.runtime.ids.next_id());
+    let hidden = AccountRef::Remote(app.runtime.ids.next_id());
+    let shown = AccountRef::Remote(app.runtime.ids.next_id());
+
+    upsert_follow(&app, viewer, hidden, false).await;
+    upsert_follow(&app, viewer, shown, true).await;
+
+    let query = FilterQuery::new(app.pool.clone(), app.runtime.clone());
+    let reblogs_hidden = query
+        .reblogs_hidden_set(&viewer)
+        .await
+        .expect("reblogs_hidden_set must succeed");
+
+    assert_eq!(reblogs_hidden, vec![hidden]);
+
+    app.cleanup().await;
+}

@@ -16,9 +16,10 @@
 //! [`blocked_targets`], [`blocked_by`], [`muted_targets`],
 //! [`following_targets`], [`count_followers`], [`count_following`], plus
 //! [`take_request`] (task 2.2's minimal, additive extension — see this
-//! module's doc comment, "Task 2.2 additions") and [`is_blocked`] (task
+//! module's doc comment, "Task 2.2 additions"), [`is_blocked`] (task
 //! 4.2's minimal, additive extension — see that function's own doc
-//! comment). No `FollowApprovalPolicy`,
+//! comment), and [`reblogs_hidden_targets`] (task 4.3's minimal, additive
+//! extension — see that function's own doc comment). No `FollowApprovalPolicy`,
 //! `ActivityBuilder`,
 //! `RelationshipMapper`, business service, inbound Activity handler, or HTTP
 //! surface lives here — those consume this module but are out of scope for
@@ -1146,6 +1147,35 @@ pub async fn following_targets(
     let rows: Vec<AccountKeyRow> = sqlx::query_as(
         "SELECT followee_kind AS kind, followee_id AS id FROM follows \
          WHERE follower_kind = $1 AND follower_id = $2",
+    )
+    .bind(account_kind(viewer))
+    .bind(account_id(viewer))
+    .fetch_all(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| account_ref_from(&r.kind, r.id))
+        .collect())
+}
+
+/// Accounts `viewer` follows with reblog display disabled (`show_reblogs =
+/// false`) -- task 4.3's `reblogs_hidden` filter set (Requirement 9's boost-
+/// display-suppression subset of the follow-target set `following_targets`
+/// already returns unfiltered). Minimal, additive extension of this
+/// module's Requirement 9 filter-set group -- see this module's doc
+/// comment ("Task 2.2 additions" / `is_blocked`'s own doc comment) for the
+/// established precedent of a later task adding one narrowly-scoped query
+/// to this already-implemented (task 1.3) file rather than duplicating
+/// persistence logic in its own caller.
+pub async fn reblogs_hidden_targets(
+    pool: &PgPool,
+    viewer: &AccountRef,
+) -> Result<Vec<AccountRef>, AppError> {
+    let rows: Vec<AccountKeyRow> = sqlx::query_as(
+        "SELECT followee_kind AS kind, followee_id AS id FROM follows \
+         WHERE follower_kind = $1 AND follower_id = $2 AND show_reblogs = FALSE",
     )
     .bind(account_kind(viewer))
     .bind(account_id(viewer))
