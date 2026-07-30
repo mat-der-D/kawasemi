@@ -16,7 +16,9 @@
 //! [`blocked_targets`], [`blocked_by`], [`muted_targets`],
 //! [`following_targets`], [`count_followers`], [`count_following`], plus
 //! [`take_request`] (task 2.2's minimal, additive extension — see this
-//! module's doc comment, "Task 2.2 additions"). No `FollowApprovalPolicy`,
+//! module's doc comment, "Task 2.2 additions") and [`is_blocked`] (task
+//! 4.2's minimal, additive extension — see that function's own doc
+//! comment). No `FollowApprovalPolicy`,
 //! `ActivityBuilder`,
 //! `RelationshipMapper`, business service, inbound Activity handler, or HTTP
 //! surface lives here — those consume this module but are out of scope for
@@ -736,6 +738,38 @@ pub async fn take_block(
     .map_err(map_server_error)?;
 
     Ok(row.map(row_to_block))
+}
+
+/// Reports whether a `blocks` row exists for `blocker -> blocked`
+/// (task 4.2, `Boundary: BlockPolicyImpl`, Requirements 6.1, 6.2, 6.3, 6.4):
+/// the narrow existence check `providers.rs::BlockPolicyImpl::is_blocked`
+/// needs, distinct from [`blocked_targets`]/[`blocked_by`] (which each
+/// return `viewer`'s *entire* block set — the wrong shape and an unneeded
+/// full-table-for-viewer scan for a single-pair yes/no judgment made on
+/// every signed inbound request). Live DB read each call, no caching: a
+/// deleted block row is reflected on the very next call (Requirement 6.4),
+/// exactly like every other query in this module. Mirrors
+/// `interaction_repository.rs::exists_favourite`'s identical
+/// `SELECT EXISTS(...)` idiom.
+pub async fn is_blocked(
+    pool: &PgPool,
+    blocker: &AccountRef,
+    blocked: &AccountRef,
+) -> Result<bool, AppError> {
+    let (exists,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM blocks \
+             WHERE blocker_kind = $1 AND blocker_id = $2 \
+                 AND blocked_kind = $3 AND blocked_id = $4)",
+    )
+    .bind(account_kind(blocker))
+    .bind(account_id(blocker))
+    .bind(account_kind(blocked))
+    .bind(account_id(blocked))
+    .fetch_one(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    Ok(exists)
 }
 
 #[derive(sqlx::FromRow)]

@@ -74,16 +74,25 @@
 //!   `InboundActivityHandler` contract; source-compatible with every
 //!   existing `async fn`-bodied implementation (`ActivityBuilder`'s own
 //!   `ActorDirectory`/`PgRemoteActorLookup` impls, and every test double).
+//! - Task 4.2 (`Boundary: BlockPolicyImpl`): federation-core's `BlockPolicy`
+//!   delegation-boundary implementation ([`providers::BlockPolicyImpl`]),
+//!   backed by this spec's own `blocks` table (reusing task 4.1's
+//!   [`inbound::ActorUriResolver`] port for signer resolution) -- see
+//!   [`providers`]. This task also added [`repository::is_blocked`] (a
+//!   minimal, additive existence-query extension -- see that function's own
+//!   doc comment).
 //!
-//! No delegation-port implementations (`BlockPolicyImpl` / `RelProviderImpl`
-//! / `AccountCountsProviderImpl` / `FilterQuery`), and no HTTP surface
-//! (`SocialGraphEndpoints`) live here yet — those consume the types/policy/
+//! No `RelProviderImpl`/`AccountCountsProviderImpl`/`FilterQuery` (tasks
+//! 4.3/4.4), and no HTTP surface (`SocialGraphEndpoints`) live here yet —
+//! those consume the types/policy/
 //! transitions/Activity-builder/mapper/services/inbound-handler defined in
-//! this module but are out of scope through task 4.1. This module is not yet
-//! declared on any router/`AppState`/bootstrap wiring point, and
-//! [`inbound::SocialGraphInboundHandler`] is not yet registered against a
-//! live `InboundActivityDispatcher` — that remains a later task's boundary
-//! (`SocialGraphModule` wiring, design.md's File Structure Plan, task 5.2).
+//! this module but are out of scope through task 4.2. This module is not yet
+//! declared on any router/`AppState`/bootstrap wiring point, [`inbound::
+//! SocialGraphInboundHandler`] is not yet registered against a live
+//! `InboundActivityDispatcher`, and [`providers::BlockPolicyImpl`] is not yet
+//! registered against federation-core's actual `BlockPolicy` registry —
+//! that remains a later task's boundary (`SocialGraphModule` wiring,
+//! design.md's File Structure Plan, task 5.2).
 
 pub mod activity_builder;
 pub mod approval_policy;
@@ -93,6 +102,7 @@ pub mod follow_service;
 pub mod inbound;
 pub mod model;
 pub mod mute_service;
+pub mod providers;
 pub mod relationship_mapper;
 pub mod repository;
 pub mod transitions;
@@ -107,5 +117,6 @@ pub use model::{
     Block, Follow, FollowOptions, FollowRequest, FollowRequestDirection, Mute, MuteOptions,
 };
 pub use mute_service::MuteService;
+pub use providers::BlockPolicyImpl;
 pub use relationship_mapper::RelationshipMapper;
 pub use transitions::Transitions;
