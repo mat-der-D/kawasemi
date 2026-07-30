@@ -35,21 +35,25 @@
 //!   actor-URI resolution ports they depend on
 //!   ([`activity_builder::LocalActorLookup`]/
 //!   [`activity_builder::RemoteActorLookup`]) — see [`activity_builder`].
+//! - Task 2.4 (`Boundary: RelationshipMapper`): the single relationship-state
+//!   -> accounts-and-instance `RelationshipView` mapping point
+//!   ([`relationship_mapper::RelationshipMapper::to_view`]) — see
+//!   [`relationship_mapper`].
 //!
-//! No relationship -> contract mapping (`RelationshipMapper`), no business
-//! services (`FollowService` / `FollowRequestService` / `MuteService` /
-//! `BlockService`), no inbound Activity handlers, no delegation-port
-//! implementations (`BlockPolicyImpl` / `RelProviderImpl` /
+//! No business services (`FollowService` / `FollowRequestService` /
+//! `MuteService` / `BlockService`), no inbound Activity handlers, no
+//! delegation-port implementations (`BlockPolicyImpl` / `RelProviderImpl` /
 //! `AccountCountsProviderImpl` / `FilterQuery`), and no HTTP surface
 //! (`SocialGraphEndpoints`) live here — those consume the types/policy/
-//! transitions/Activity-builder defined in this module but are out of scope
-//! for tasks 1.1-2.3. This module is not yet declared on any
+//! transitions/Activity-builder/mapper defined in this module but are out of
+//! scope for tasks 1.1-2.4. This module is not yet declared on any
 //! router/`AppState`/bootstrap wiring point — that remains a later task's
 //! boundary (`SocialGraphModule` wiring, design.md's File Structure Plan).
 
 pub mod activity_builder;
 pub mod approval_policy;
 pub mod model;
+pub mod relationship_mapper;
 pub mod repository;
 pub mod transitions;
 
@@ -58,4 +62,5 @@ pub use approval_policy::{FollowApprovalPolicy, FollowDecision};
 pub use model::{
     Block, Follow, FollowOptions, FollowRequest, FollowRequestDirection, Mute, MuteOptions,
 };
+pub use relationship_mapper::RelationshipMapper;
 pub use transitions::Transitions;

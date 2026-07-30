@@ -44,7 +44,7 @@
   - _Boundary: ActivityBuilder_
   - _Depends: 1.2_
 
-- [ ] 2.4 (P) 関係状態から Relationship 契約への写像
+- [x] 2.4 (P) 関係状態から Relationship 契約への写像
   - 本 spec の関係状態を accounts-and-instance の RelationshipView へ写像し、全関係フラグを決定論的に導出する。期限切れミュートは muting を偽、domain_blocking は常に偽として扱う
   - 関係なしで全フラグ既定、フォロー/ミュート/ブロックの組合せが正しいフラグになり、Relationship 契約を再定義していないことを単体テストで確認できる状態
   - _Requirements: 4.3, 8.3, 8.4, 8.5_
