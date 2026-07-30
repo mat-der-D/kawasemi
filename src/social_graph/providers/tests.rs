@@ -601,3 +601,56 @@ async fn filter_query_reblogs_hidden_set_returns_only_show_reblogs_false_targets
 
     app.cleanup().await;
 }
+
+// -- AccountCountsProviderImpl (task 4.4, Requirement 8.2) -----------------
+
+use crate::accounts::ports::AccountCountsProvider;
+
+/// Boundary Commitments / task 4.4's own acceptance text: `counts` must
+/// report real `followers`/`following` values derived from the `follows`
+/// table, while leaving `statuses`/`last_status_at` at accounts-and-
+/// instance's own zero/`None` defaults (this spec does not own those
+/// counts).
+#[tokio::test]
+async fn account_counts_provider_reports_real_followers_and_following() {
+    let app = spawn_test_app().await;
+    let target = AccountRef::Local(app.runtime.ids.next_id());
+    let follower_a = AccountRef::Remote(app.runtime.ids.next_id());
+    let follower_b = AccountRef::Remote(app.runtime.ids.next_id());
+    let followee = AccountRef::Remote(app.runtime.ids.next_id());
+
+    // Two accounts follow `target` (followers = 2).
+    upsert_follow(&app, follower_a, target, true).await;
+    upsert_follow(&app, follower_b, target, true).await;
+    // `target` follows one account (following = 1).
+    upsert_follow(&app, target, followee, true).await;
+
+    let provider = AccountCountsProviderImpl::new(app.pool.clone());
+    let counts = provider.counts(&target).await.expect("counts must succeed");
+
+    assert_eq!(counts.followers, 2);
+    assert_eq!(counts.following, 1);
+    assert_eq!(counts.statuses, 0, "statuses is out of this spec's scope");
+    assert_eq!(
+        counts.last_status_at, None,
+        "last_status_at is out of this spec's scope"
+    );
+
+    app.cleanup().await;
+}
+
+/// `counts` for an account nobody follows and who follows nobody must
+/// report all-zero followers/following, not error.
+#[tokio::test]
+async fn account_counts_provider_reports_zero_for_an_unconnected_account() {
+    let app = spawn_test_app().await;
+    let target = AccountRef::Local(app.runtime.ids.next_id());
+
+    let provider = AccountCountsProviderImpl::new(app.pool.clone());
+    let counts = provider.counts(&target).await.expect("counts must succeed");
+
+    assert_eq!(counts.followers, 0);
+    assert_eq!(counts.following, 0);
+
+    app.cleanup().await;
+}

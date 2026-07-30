@@ -10,26 +10,33 @@
 //! `NoopBlockPolicy` default ([`BlockPolicyImpl`]); supplies
 //! accounts-and-instance's `RelationshipStateProvider` delegation boundary
 //! with a real, this spec's own relationship-tables-backed implementation,
-//! replacing `NoRelationshipProvider` ([`RelProviderImpl`]); and exposes a
+//! replacing `NoRelationshipProvider` ([`RelProviderImpl`]); exposes a
 //! query-only façade over the same tables' filter sets for timelines/
-//! notifications ([`FilterQuery`]).
+//! notifications ([`FilterQuery`]); and supplies accounts-and-instance's
+//! `AccountCountsProvider` delegation boundary with a real,
+//! `follows`-table-backed implementation of the `followers`/`following`
+//! fields, replacing `ZeroCountsProvider`'s always-zero default for those
+//! two fields ([`AccountCountsProviderImpl`]).
 //!
 //! ## Scope
 //! Task 4.2 (already committed) owns exactly [`BlockPolicyImpl`] and the
 //! narrow local-actor resolution it needs for the destination side of a
-//! judgment (see "Resolving the destination" below). Task 4.3 (this task)
-//! additively owns exactly [`RelProviderImpl`] and [`FilterQuery`] (see this
-//! module's doc comment, "RelProviderImpl / FilterQuery", further down) —
-//! per design.md's File Structure Plan this file is also the intended home
-//! for `AccountCountsProviderImpl` (task 4.4, still out of scope; no
-//! placeholder/stub added for it here). Neither task touches
-//! `src/social_graph/inbound.rs` (out of boundary), registers any of these
-//! three implementations against their real registry/bootstrap (task 5.2's
-//! `SocialGraphModule` wiring boundary), or touches
-//! `src/social_graph/repository.rs` beyond the minimal, additive
+//! judgment (see "Resolving the destination" below). Task 4.3 (already
+//! committed) additively owns exactly [`RelProviderImpl`] and [`FilterQuery`]
+//! (see this module's doc comment, "RelProviderImpl / FilterQuery", further
+//! down). Task 4.4 (this task) additively owns exactly
+//! [`AccountCountsProviderImpl`] (see this module's doc comment,
+//! "AccountCountsProviderImpl", further down) — per design.md's File
+//! Structure Plan this file is the designated home for all four Port Impls.
+//! None of these tasks touch `src/social_graph/inbound.rs` (out of
+//! boundary), register any of these four implementations against their real
+//! registry/bootstrap (task 5.2's `SocialGraphModule` wiring boundary), or
+//! touch `src/social_graph/repository.rs` beyond the minimal, additive
 //! `repository::is_blocked` (task 4.2) / `repository::reblogs_hidden_targets`
 //! (task 4.3) queries each task's own persistence-layer counterpart needs
-//! (see those functions' own doc comments).
+//! (see those functions' own doc comments); task 4.4 needs no new
+//! repository query — `repository::count_followers`/`count_following`
+//! (task 1.3) already exist.
 //!
 //! ## Resolving the signer: reuses `inbound.rs`'s `ActorUriResolver` port
 //! [`BlockPolicyImpl`] is generic over `AU: ActorUriResolver` (task 4.1,
@@ -127,8 +134,8 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
-use crate::accounts::model::RelationshipView;
-use crate::accounts::ports::RelationshipStateProvider;
+use crate::accounts::model::{AccountCounts, RelationshipView};
+use crate::accounts::ports::{AccountCountsProvider, RelationshipStateProvider};
 use crate::actor::{ActorDirectory, Handle};
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
@@ -390,5 +397,63 @@ impl FilterQuery {
         viewer: &AccountRef,
     ) -> Result<Vec<AccountRef>, AppError> {
         repository::reblogs_hidden_targets(&self.pool, viewer).await
+    }
+}
+
+// -- AccountCountsProviderImpl (design.md same heading; Requirement 8.2; ---
+// -- task 4.4, `Boundary: AccountCountsProviderImpl`) -----------------------
+//
+// `AccountCountsProviderImpl` supplies accounts-and-instance's
+// `AccountCountsProvider` delegation boundary (`crate::accounts::ports::
+// AccountCountsProvider`) with a real, `follows`-table-backed implementation
+// for exactly the `followers`/`following` fields of `AccountCounts`,
+// replacing that module's always-zero `ZeroCountsProvider` default for those
+// two fields. `statuses`/`last_status_at` stay at `ZeroCountsProvider`'s own
+// documented zero/`None` values -- this spec does not own post counts
+// (Boundary Commitments: "投稿数 / `last_status_at` は本 spec 範囲外で既定
+// 0 / None"; that pair is statuses-core's own delegation, supplied
+// separately).
+
+/// Supplies accounts-and-instance's [`AccountCountsProvider`] delegation
+/// boundary with a real implementation of its `followers`/`following`
+/// fields (Requirement 8.2, Boundary Commitments). See this module's doc
+/// comment ("AccountCountsProviderImpl") for why `statuses`/
+/// `last_status_at` are left at their zero/`None` defaults.
+#[derive(Clone)]
+pub struct AccountCountsProviderImpl {
+    pool: PgPool,
+}
+
+impl AccountCountsProviderImpl {
+    /// Builds an `AccountCountsProviderImpl` bound to `pool` (this spec's
+    /// own `follows` table, via `repository::count_followers`/
+    /// `repository::count_following`).
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+impl AccountCountsProvider for AccountCountsProviderImpl {
+    /// Requirement 8.2, Boundary Commitments: counts `target`'s followers
+    /// (`repository::count_followers`, `target` as `followee`) and following
+    /// (`repository::count_following`, `target` as `follower`) from
+    /// established `follows` rows; `statuses`/`last_status_at` stay at
+    /// accounts-and-instance's own zero/`None` defaults, matching
+    /// `ZeroCountsProvider`'s documented shape for the fields this spec does
+    /// not own.
+    fn counts<'a>(
+        &'a self,
+        target: &'a AccountRef,
+    ) -> Pin<Box<dyn Future<Output = Result<AccountCounts, AppError>> + Send + 'a>> {
+        Box::pin(async move {
+            let followers = repository::count_followers(&self.pool, target).await?;
+            let following = repository::count_following(&self.pool, target).await?;
+            Ok(AccountCounts {
+                followers,
+                following,
+                statuses: 0,
+                last_status_at: None,
+            })
+        })
     }
 }

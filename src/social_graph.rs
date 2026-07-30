@@ -91,18 +91,26 @@
 //!   [`providers::RelationshipSets`]) -- see [`providers`]. This task also
 //!   added [`repository::reblogs_hidden_targets`] (a minimal, additive
 //!   filter-set-query extension -- see that function's own doc comment).
+//! - Task 4.4 (`Boundary: AccountCountsProviderImpl`):
+//!   accounts-and-instance's `AccountCountsProvider` delegation-boundary
+//!   implementation for the `followers`/`following` fields
+//!   ([`providers::AccountCountsProviderImpl`]), backed by the
+//!   already-implemented (task 1.3) [`repository::count_followers`]/
+//!   [`repository::count_following`] -- see [`providers`]. `statuses`/
+//!   `last_status_at` stay at accounts-and-instance's own zero/`None`
+//!   defaults (out of this spec's boundary). No new repository query was
+//!   needed for this task.
 //!
-//! No `AccountCountsProviderImpl` (task 4.4), and no HTTP surface
-//! (`SocialGraphEndpoints`) live here yet — those consume the types/policy/
-//! transitions/Activity-builder/mapper/services/inbound-handler/providers
-//! defined in this module but are out of scope through task 4.3. This
-//! module is not yet declared on any router/`AppState`/bootstrap wiring
-//! point, [`inbound::SocialGraphInboundHandler`] is not yet registered
-//! against a live `InboundActivityDispatcher`, and neither
-//! [`providers::BlockPolicyImpl`] nor [`providers::RelProviderImpl`] is yet
-//! registered against their real registries — that remains a later task's
-//! boundary (`SocialGraphModule` wiring, design.md's File Structure Plan,
-//! task 5.2).
+//! No HTTP surface (`SocialGraphEndpoints`) lives here yet — those consume
+//! the types/policy/transitions/Activity-builder/mapper/services/
+//! inbound-handler/providers defined in this module but are out of scope
+//! through task 4.4. This module is not yet declared on any router/
+//! `AppState`/bootstrap wiring point, [`inbound::SocialGraphInboundHandler`]
+//! is not yet registered against a live `InboundActivityDispatcher`, and
+//! none of [`providers::BlockPolicyImpl`] / [`providers::RelProviderImpl`] /
+//! [`providers::AccountCountsProviderImpl`] is yet registered against their
+//! real registries — that remains a later task's boundary
+//! (`SocialGraphModule` wiring, design.md's File Structure Plan, task 5.2).
 
 pub mod activity_builder;
 pub mod approval_policy;
@@ -127,6 +135,8 @@ pub use model::{
     Block, Follow, FollowOptions, FollowRequest, FollowRequestDirection, Mute, MuteOptions,
 };
 pub use mute_service::MuteService;
-pub use providers::{BlockPolicyImpl, FilterQuery, RelProviderImpl, RelationshipSets};
+pub use providers::{
+    AccountCountsProviderImpl, BlockPolicyImpl, FilterQuery, RelProviderImpl, RelationshipSets,
+};
 pub use relationship_mapper::RelationshipMapper;
 pub use transitions::Transitions;
