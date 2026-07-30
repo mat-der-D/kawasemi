@@ -66,7 +66,7 @@
   - _Boundary: FollowRequestService_
   - _Depends: 2.2, 2.3, 2.4_
 
-- [ ] 3.3 (P) ミュート / アンミュートサービス
+- [x] 3.3 (P) ミュート / アンミュートサービス
   - ミュート/アンミュートを連合 Activity を伴わない DB 状態更新として実装し、通知ミュートと有効期限を反映する
   - ミュートで muting が真、通知ミュート指定で muting_notifications が真、期限指定が記録され、連合配送が発生しない状態
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5_

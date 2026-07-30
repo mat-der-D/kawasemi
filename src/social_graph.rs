@@ -49,13 +49,17 @@
 //!   [`transitions::Transitions::promote_pending`]/
 //!   [`transitions::Transitions::drop_pending`]'s return type (see that
 //!   module's doc comment, "Task 3.2 additions").
+//! - Task 3.3 (`Boundary: MuteService`): the mute/unmute business aggregate
+//!   ([`mute_service::MuteService`]) — a DB-state-only update with no
+//!   federation Activity/delivery involved (Requirement 4.5) — see
+//!   [`mute_service`].
 //!
-//! No `MuteService` / `BlockService`, no inbound Activity handlers, no
-//! delegation-port implementations (`BlockPolicyImpl` / `RelProviderImpl` /
+//! No `BlockService`, no inbound Activity handlers, no delegation-port
+//! implementations (`BlockPolicyImpl` / `RelProviderImpl` /
 //! `AccountCountsProviderImpl` / `FilterQuery`), and no HTTP surface
 //! (`SocialGraphEndpoints`) live here yet — those consume the types/policy/
 //! transitions/Activity-builder/mapper/services defined in this module but
-//! are out of scope through task 3.2. This module is not yet declared on any
+//! are out of scope through task 3.3. This module is not yet declared on any
 //! router/`AppState`/bootstrap wiring point — that remains a later task's
 //! boundary (`SocialGraphModule` wiring, design.md's File Structure Plan).
 
@@ -64,6 +68,7 @@ pub mod approval_policy;
 pub mod follow_request_service;
 pub mod follow_service;
 pub mod model;
+pub mod mute_service;
 pub mod relationship_mapper;
 pub mod repository;
 pub mod transitions;
@@ -75,5 +80,6 @@ pub use follow_service::FollowService;
 pub use model::{
     Block, Follow, FollowOptions, FollowRequest, FollowRequestDirection, Mute, MuteOptions,
 };
+pub use mute_service::MuteService;
 pub use relationship_mapper::RelationshipMapper;
 pub use transitions::Transitions;
