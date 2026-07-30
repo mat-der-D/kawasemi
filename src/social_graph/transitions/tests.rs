@@ -425,6 +425,92 @@ async fn promote_pending_is_idempotent_noop_when_no_pending_request_exists() {
 }
 
 #[tokio::test]
+async fn promote_pending_establishes_follow_from_existing_inbound_request_and_preserves_activity_id()
+ {
+    // Regression test: `requester` is `AccountRef::Remote` here (they sent
+    // us the original Follow), so the pending row was recorded `Inbound`
+    // (`record_pending`'s/`model.rs`'s own convention) -- this is the
+    // `FollowRequestService.authorize_request` case (Requirement 2.3), not
+    // the `InboundHandler` Accept-received case. Previously
+    // `promote_pending` hardcoded `Outbound` and silently found nothing,
+    // never establishing the follow.
+    let app = spawn_test_app().await;
+    let requester = AccountRef::Remote(app.runtime.ids.next_id());
+    let target = AccountRef::Local(app.runtime.ids.next_id());
+    let transitions = Transitions::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        NotificationSinkRegistry::new(),
+    );
+
+    let req = FollowRequest {
+        requester,
+        target,
+        direction: FollowRequestDirection::Inbound,
+        activity_id: "https://remote.test/acts/follow-5".to_string(),
+        created_at: app.runtime.clock.now(),
+    };
+    transitions
+        .record_pending(&req)
+        .await
+        .expect("record_pending must succeed");
+
+    transitions
+        .promote_pending(&requester, &target)
+        .await
+        .expect("promote_pending must succeed");
+
+    let states = repository::load_states(
+        &app.pool,
+        &requester,
+        std::slice::from_ref(&target),
+        app.runtime.clock.now(),
+    )
+    .await
+    .expect("load_states must succeed");
+    let follow = states[0]
+        .follow
+        .as_ref()
+        .expect("promote_pending must establish a follow from an inbound pending request");
+    assert_eq!(follow.activity_id, "https://remote.test/acts/follow-5");
+
+    // The consumed row was recorded `Inbound` from `target`'s own
+    // perspective (`requester`'s inbound request to `target`) -- so load
+    // `target`'s states with `requester` as the lookup target to observe
+    // `requested_by`, mirroring `load_states`'s own (viewer, targets)
+    // convention (`requested`/`requested_by` are viewer-relative flags, not
+    // symmetric).
+    let target_states = repository::load_states(
+        &app.pool,
+        &target,
+        std::slice::from_ref(&requester),
+        app.runtime.clock.now(),
+    )
+    .await
+    .expect("load_states must succeed");
+    assert!(
+        !target_states[0].requested_by,
+        "the inbound pending request must be consumed"
+    );
+
+    // Idempotent repeat: no pending request left, must not error or corrupt
+    // the already-established follow.
+    transitions
+        .promote_pending(&requester, &target)
+        .await
+        .expect("repeat promote_pending must be a no-op success");
+    let states_again = repository::load_states(
+        &app.pool,
+        &requester,
+        std::slice::from_ref(&target),
+        app.runtime.clock.now(),
+    )
+    .await
+    .expect("load_states must succeed");
+    assert!(states_again[0].follow.is_some());
+}
+
+#[tokio::test]
 async fn drop_pending_deletes_outbound_request_and_is_idempotent() {
     let app = spawn_test_app().await;
     let requester = AccountRef::Local(app.runtime.ids.next_id());
@@ -463,6 +549,74 @@ async fn drop_pending_deletes_outbound_request_and_is_idempotent() {
     assert!(!states[0].requested, "the pending request must be gone");
     assert!(
         states[0].follow.is_none(),
+        "drop_pending must never establish a follow"
+    );
+
+    transitions
+        .drop_pending(&requester, &target)
+        .await
+        .expect("repeat drop_pending must still succeed");
+}
+
+#[tokio::test]
+async fn drop_pending_deletes_inbound_request_and_is_idempotent() {
+    // Regression test: `requester` is `AccountRef::Remote` here, so the
+    // pending row was recorded `Inbound` (`FollowRequestService.reject_request`
+    // case, Requirement 2.4). Previously `drop_pending` hardcoded `Outbound`
+    // and silently deleted nothing, leaving the inbound pending row behind.
+    let app = spawn_test_app().await;
+    let requester = AccountRef::Remote(app.runtime.ids.next_id());
+    let target = AccountRef::Local(app.runtime.ids.next_id());
+    let transitions = Transitions::new(
+        app.pool.clone(),
+        app.runtime.clone(),
+        NotificationSinkRegistry::new(),
+    );
+
+    let req = FollowRequest {
+        requester,
+        target,
+        direction: FollowRequestDirection::Inbound,
+        activity_id: "https://remote.test/acts/follow-6".to_string(),
+        created_at: app.runtime.clock.now(),
+    };
+    transitions
+        .record_pending(&req)
+        .await
+        .expect("record_pending must succeed");
+
+    transitions
+        .drop_pending(&requester, &target)
+        .await
+        .expect("drop_pending must succeed");
+
+    // `requested`/`requested_by` are viewer-relative (see the analogous
+    // comment in `promote_pending_establishes_follow_from_existing_inbound_
+    // request_and_preserves_activity_id`): load `target`'s states with
+    // `requester` as the lookup target to observe `requested_by`.
+    let target_states = repository::load_states(
+        &app.pool,
+        &target,
+        std::slice::from_ref(&requester),
+        app.runtime.clock.now(),
+    )
+    .await
+    .expect("load_states must succeed");
+    assert!(
+        !target_states[0].requested_by,
+        "the inbound pending request must be gone"
+    );
+
+    let requester_states = repository::load_states(
+        &app.pool,
+        &requester,
+        std::slice::from_ref(&target),
+        app.runtime.clock.now(),
+    )
+    .await
+    .expect("load_states must succeed");
+    assert!(
+        requester_states[0].follow.is_none(),
         "drop_pending must never establish a follow"
     );
 

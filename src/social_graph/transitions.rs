@@ -192,6 +192,25 @@ fn map_tx_error(source: sqlx::Error) -> AppError {
     AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
 }
 
+/// Derives the [`FollowRequestDirection`] a pending request between
+/// `requester` and some target must have been recorded under, from
+/// `requester`'s own [`AccountRef`] variant — mirrors
+/// `FollowApprovalPolicy::requires_approval`'s established idiom (task 2.1)
+/// of deriving same-server-ness by matching `AccountRef` variants directly,
+/// rather than accepting a precomputed value from the caller. Matches
+/// `record_pending`'s/`model.rs`'s own documented convention: a request
+/// `requester` sent (`AccountRef::Local`, this instance's own outbound
+/// Follow) is always recorded `Outbound`; a request `requester` sent to us
+/// (`AccountRef::Remote`) is always recorded `Inbound`. [`Self::promote_pending`]
+/// and [`Self::drop_pending`] both use this to look up the correct pending
+/// row regardless of which side originated the request.
+fn pending_direction_for(requester: &AccountRef) -> FollowRequestDirection {
+    match requester {
+        AccountRef::Local(_) => FollowRequestDirection::Outbound,
+        AccountRef::Remote(_) => FollowRequestDirection::Inbound,
+    }
+}
+
 /// The common relationship state-transition functions (design.md's exact
 /// `Transitions`). See this module's doc comment for the full rationale
 /// behind its shape, collaborators, and the notification-emit convergence
@@ -305,10 +324,20 @@ impl Transitions {
         Ok(())
     }
 
-    /// Promotes `requester`'s outbound pending follow request to `target`
-    /// into an established [`Follow`], on receipt of that target's
-    /// Accept(Follow) (Requirement 2.5). If no such pending request exists
-    /// (already promoted by an earlier call, or never requested), this is an
+    /// Promotes `requester`'s pending follow request to `target` into an
+    /// established [`Follow`], on receipt of an Accept(Follow) (Requirement
+    /// 2.5, and — via `FollowRequestService.authorize_request`, task 3.2 —
+    /// Requirement 2.3). The pending row this consumes may be either
+    /// direction depending on who called this function: `requester` being
+    /// [`AccountRef::Local`] means *we* sent the original outbound Follow
+    /// (Requirement 2.5's `InboundHandler` case, row recorded `Outbound`);
+    /// `requester` being [`AccountRef::Remote`] means they sent us an inbound
+    /// Follow our local owner is now authorizing (Requirement 2.3's
+    /// `FollowRequestService.authorize_request` case, row recorded
+    /// `Inbound`) — see [`pending_direction_for`], which derives this from
+    /// `requester`'s own `AccountRef` variant rather than accepting a
+    /// precomputed direction. If no such pending request exists (already
+    /// promoted by an earlier call, or never requested), this is an
     /// idempotent no-op success. See this module's doc comment
     /// ("`promote_pending`'s follow options") for the behavior-option
     /// default this uses and why. No notification is emitted.
@@ -321,7 +350,7 @@ impl Transitions {
             &self.pool,
             requester,
             target,
-            FollowRequestDirection::Outbound,
+            pending_direction_for(requester),
         )
         .await?
         else {
@@ -344,10 +373,13 @@ impl Transitions {
         Ok(())
     }
 
-    /// Drops `requester`'s outbound pending follow request to `target`, on
-    /// receipt of that target's Reject(Follow) (Requirement 2.6). Idempotent:
-    /// a repeat call (or no such pending request) is a no-op success. No
-    /// notification is emitted.
+    /// Drops `requester`'s pending follow request to `target`, on receipt of
+    /// a Reject(Follow) (Requirement 2.6, and — via
+    /// `FollowRequestService.reject_request`, task 3.2 — Requirement 2.4).
+    /// As with [`Self::promote_pending`], the pending row this deletes may be
+    /// either direction depending on `requester`'s own [`AccountRef`] variant
+    /// — see [`pending_direction_for`]. Idempotent: a repeat call (or no such
+    /// pending request) is a no-op success. No notification is emitted.
     pub async fn drop_pending(
         &self,
         requester: &AccountRef,
@@ -357,7 +389,7 @@ impl Transitions {
             &self.pool,
             requester,
             target,
-            FollowRequestDirection::Outbound,
+            pending_direction_for(requester),
         )
         .await?;
         Ok(())
