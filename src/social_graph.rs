@@ -60,21 +60,37 @@
 //!   [`transitions::Transitions::clear_block`]'s return type and added
 //!   [`repository::take_block`] (see those modules' own doc comments, "Task
 //!   3.4 addition").
+//! - Task 4.1 (`Boundary: InboundHandler, Transitions, ActivityBuilder`):
+//!   federation-core's `InboundActivityHandler` implementation for received
+//!   Follow / Accept / Reject / Block / Undo(Follow|Block)
+//!   ([`inbound::SocialGraphInboundHandler`]), converging onto the same
+//!   `FollowApprovalPolicy`/`Transitions` the API path uses — see
+//!   [`inbound`]. This task also widened
+//!   [`activity_builder::LocalActorLookup::resolve_handle`]/
+//!   [`activity_builder::RemoteActorLookup::resolve_actor_uri`] to declare
+//!   `-> impl Future<..> + Send` (see those methods' own doc comments, and
+//!   [`inbound`]'s own doc comment, "`deliver: BoxedDeliver`") — required for
+//!   `SocialGraphInboundHandler::handle`'s `Send`-boxed
+//!   `InboundActivityHandler` contract; source-compatible with every
+//!   existing `async fn`-bodied implementation (`ActivityBuilder`'s own
+//!   `ActorDirectory`/`PgRemoteActorLookup` impls, and every test double).
 //!
-//! No inbound Activity handlers, no delegation-port implementations
-//! (`BlockPolicyImpl` / `RelProviderImpl` / `AccountCountsProviderImpl` /
-//! `FilterQuery`), and no HTTP surface (`SocialGraphEndpoints`) live here
-//! yet — those consume the types/policy/transitions/Activity-builder/mapper/
-//! services defined in this module but are out of scope through task 3.4.
-//! This module is not yet declared on any router/`AppState`/bootstrap wiring
-//! point — that remains a later task's boundary (`SocialGraphModule`
-//! wiring, design.md's File Structure Plan).
+//! No delegation-port implementations (`BlockPolicyImpl` / `RelProviderImpl`
+//! / `AccountCountsProviderImpl` / `FilterQuery`), and no HTTP surface
+//! (`SocialGraphEndpoints`) live here yet — those consume the types/policy/
+//! transitions/Activity-builder/mapper/services/inbound-handler defined in
+//! this module but are out of scope through task 4.1. This module is not yet
+//! declared on any router/`AppState`/bootstrap wiring point, and
+//! [`inbound::SocialGraphInboundHandler`] is not yet registered against a
+//! live `InboundActivityDispatcher` — that remains a later task's boundary
+//! (`SocialGraphModule` wiring, design.md's File Structure Plan, task 5.2).
 
 pub mod activity_builder;
 pub mod approval_policy;
 pub mod block_service;
 pub mod follow_request_service;
 pub mod follow_service;
+pub mod inbound;
 pub mod model;
 pub mod mute_service;
 pub mod relationship_mapper;
@@ -86,6 +102,7 @@ pub use approval_policy::{FollowApprovalPolicy, FollowDecision};
 pub use block_service::BlockService;
 pub use follow_request_service::FollowRequestService;
 pub use follow_service::FollowService;
+pub use inbound::{ActorUriResolver, ProdActorUriResolver, SocialGraphInboundHandler};
 pub use model::{
     Block, Follow, FollowOptions, FollowRequest, FollowRequestDirection, Mute, MuteOptions,
 };

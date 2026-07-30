@@ -20,6 +20,35 @@
 //! recipient derivation is federation-core's `DeliveryService`/`Recipient`
 //! concern, never this module's).
 //!
+//! ## Task 4.1 addition (`InboundHandler`, `Boundary: InboundHandler,
+//! Transitions, ActivityBuilder`): `LocalActorLookup`/`RemoteActorLookup`
+//! widened to `-> impl Future<..> + Send`
+//! [`LocalActorLookup::resolve_handle`]/[`RemoteActorLookup::
+//! resolve_actor_uri`] originally declared plain `async fn` (this task's own
+//! doc comment, below). Task 4.1's `SocialGraphInboundHandler::handle`
+//! (`crate::social_graph::inbound`) implements federation-core's
+//! `InboundActivityHandler::handle`, which must return `Pin<Box<dyn
+//! Future<..> + Send + 'a>>` — and every generic caller nested inside that
+//! box (including this module's own `build_*` methods, which the inbound
+//! handler calls to build `Accept(Follow)`) needs `AL`/`AR`'s trait methods
+//! to *declare* `Send`, not merely happen to produce a Send future for
+//! whichever concrete type a given caller uses (Rust's `async fn`-in-trait
+//! auto-trait leakage rule). Both trait methods therefore now read `fn
+//! resolve_handle(&self, id: Id) -> impl Future<Output = ..> + Send` /
+//! `fn resolve_actor_uri(&self, id: Id) -> impl Future<Output = ..> + Send`
+//! — a minimal, additive signature widening; every existing `async fn`-bodied
+//! implementation ([`ActorDirectory`]'s own [`LocalActorLookup`] impl,
+//! [`PgRemoteActorLookup`]'s own [`RemoteActorLookup`] impl, and every test
+//! double in `activity_builder/tests.rs`/`follow_service/tests.rs`/etc.)
+//! satisfies the widened signature unchanged (an `async fn` impl body needs
+//! no edit to satisfy an `-> impl Future<..> + Send`-declared trait method).
+//! See `crate::social_graph::inbound`'s own doc comment ("`deliver:
+//! BoxedDeliver`") for the fuller architecture discussion, including why the
+//! *other* two trait boundaries `SocialGraphInboundHandler` depends on
+//! (`crate::federation::LocalActorLookup`/`DeliverySink`) could not receive
+//! the same treatment (out of this task's boundary — federation-core, not
+//! `ActivityBuilder`).
+//!
 //! ## Deliberate deviation from design.md's literal Service Interface: `async fn ... -> Result<_, AppError>`, not sync/infallible
 //! design.md's sketch (lines 458-464) writes every method as a plain
 //! synchronous, infallible function:
@@ -142,6 +171,7 @@
 #[cfg(test)]
 mod tests;
 
+use std::future::Future;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -165,11 +195,29 @@ const ACTIVITY_OBJECT_KIND: ObjectKind = ObjectKind::new("activities");
 /// [`AccountRef::Local`] to its actor URL. See this module's doc comment
 /// ("`LocalActorLookup` / `RemoteActorLookup`") for why this exists rather
 /// than this builder holding `ActorDirectory` directly.
+///
+/// Declared as `-> impl Future<..> + Send` rather than a plain `async fn`
+/// (task 4.1, `Boundary: InboundHandler` — a minimal, additive widening of
+/// this already-implemented task 2.3 signature, the exact same situation
+/// tasks.md's own Implementation Notes already document for
+/// `Transitions::promote_pending`/`drop_pending`/`clear_block`): task 4.1's
+/// `SocialGraphInboundHandler::handle` must return `Pin<Box<dyn Future<..> +
+/// Send + 'a>>` (`InboundActivityHandler`'s own dyn-compatible contract,
+/// federation-core), and every generic caller nested inside that boxed
+/// future — including `ActivityBuilder<AL, AR>`'s own `build_*` methods,
+/// which this trait backs — needs `AL::resolve_handle`'s future to be
+/// unconditionally `Send`, not merely Send-for-the-concrete-types-a-given-
+/// caller-happens-to-use (Rust's `async fn`-in-trait auto-trait leakage: a
+/// generic caller may only assume what the trait signature itself
+/// guarantees, regardless of what any particular impl's body would actually
+/// support). `ActorDirectory`'s [`resolve_handle`](Self::resolve_handle) impl
+/// body is unchanged — `async fn` impls satisfy an `-> impl Future<..> +
+/// Send`-declared trait method without modification.
 #[allow(async_fn_in_trait)]
 pub trait LocalActorLookup: Send + Sync {
     /// Resolves `id` to its [`Handle`], failing with a `404`-shaped
     /// [`AppError`] if `id` no longer resolves to an existing local actor.
-    async fn resolve_handle(&self, id: Id) -> Result<Handle, AppError>;
+    fn resolve_handle(&self, id: Id) -> impl Future<Output = Result<Handle, AppError>> + Send;
 }
 
 impl LocalActorLookup for ActorDirectory {
@@ -190,11 +238,15 @@ impl LocalActorLookup for ActorDirectory {
 /// [`AccountRef::Remote`] to its actor URI. See this module's doc comment
 /// ("`LocalActorLookup` / `RemoteActorLookup`") for why this exists rather
 /// than this builder issuing raw SQL itself.
+///
+/// Declared as `-> impl Future<..> + Send` for the exact same reason (task
+/// 4.1's `Send`-boxed `InboundActivityHandler::handle` contract) documented
+/// on [`LocalActorLookup`]'s own doc comment, above.
 #[allow(async_fn_in_trait)]
 pub trait RemoteActorLookup: Send + Sync {
     /// Resolves `id` to its cached `actor_uri`, failing with a `404`-shaped
     /// [`AppError`] if `id` no longer resolves to a known remote account.
-    async fn resolve_actor_uri(&self, id: Id) -> Result<String, AppError>;
+    fn resolve_actor_uri(&self, id: Id) -> impl Future<Output = Result<String, AppError>> + Send;
 }
 
 /// The real, Postgres-backed [`RemoteActorLookup`] — a minimal newtype
