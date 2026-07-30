@@ -52,6 +52,7 @@
 
 pub mod activity_builder;
 pub mod approval_policy;
+pub mod follow_service;
 pub mod model;
 pub mod relationship_mapper;
 pub mod repository;
@@ -59,6 +60,7 @@ pub mod transitions;
 
 pub use activity_builder::{ActivityBuilder, LocalActorLookup, RemoteActorLookup};
 pub use approval_policy::{FollowApprovalPolicy, FollowDecision};
+pub use follow_service::FollowService;
 pub use model::{
     Block, Follow, FollowOptions, FollowRequest, FollowRequestDirection, Mute, MuteOptions,
 };
