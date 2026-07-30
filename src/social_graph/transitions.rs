@@ -170,6 +170,39 @@
 //! already sent) via [`crate::social_graph::repository::take_request`], so
 //! the newly-established follow's eventual Undo(Follow) still references
 //! the correct Activity.
+//!
+//! ## Task 3.2 additions (`FollowRequestService`, `Boundary:
+//! FollowRequestService` — this task's own boundary does not literally name
+//! `Transitions`, but the same situation tasks.md's own Implementation Notes
+//! already document once for this exact pair of functions — the
+//! direction-derivation fix — recurs here for a second, narrower reason)
+//! [`Transitions::promote_pending`]/[`Transitions::drop_pending`] originally
+//! returned `Result<(), AppError>`. `FollowRequestService.authorize_request`/
+//! `.reject_request` (Requirements 2.3, 2.4) must build an `Accept(Follow)`/
+//! `Reject(Follow)` Activity via `ActivityBuilder::build_accept`/
+//! `build_reject`, both of which require the *original received* Follow's own
+//! Activity id (`follow_activity_id`) as a parameter — the exact string
+//! [`repository::take_request`] recovers from the consumed pending row
+//! internally, but which neither function surfaced to its own caller. A
+//! separate "peek the pending row's `activity_id` first, then call
+//! `promote_pending`/`drop_pending`" step is not a safe substitute: it would
+//! either race (a plain read followed by a separate consuming call) or — for
+//! `promote_pending` specifically — attempt to consume the same row twice
+//! (the first, separate consuming read would leave nothing for
+//! `promote_pending`'s own internal `take_request` to find, silently
+//! degrading it to its idempotent-no-op path and never establishing the
+//! follow). Both functions therefore now return
+//! `Result<Option<String>, AppError>`: `Some(original_follow_activity_id)`
+//! when a pending request actually existed and was consumed, `None` on the
+//! already-established idempotent no-op path — a minimal, additive
+//! widening of the return type only, with no change to either function's
+//! parameters or its underlying state-transition behavior.
+//! [`Transitions::drop_pending`]'s implementation switches from
+//! [`repository::delete_request`] to [`repository::take_request`] (already
+//! implemented by task 2.2, no `repository.rs` change needed) to recover this
+//! value atomically. Every existing caller in `transitions/tests.rs` merely
+//! `.expect(...)`s the `Result` without inspecting the `Ok` payload's type, so
+//! this change is source-compatible with every test written before this task.
 
 #[cfg(test)]
 mod tests;
@@ -341,11 +374,19 @@ impl Transitions {
     /// idempotent no-op success. See this module's doc comment
     /// ("`promote_pending`'s follow options") for the behavior-option
     /// default this uses and why. No notification is emitted.
+    ///
+    /// Returns `Ok(Some(original_follow_activity_id))` when a pending
+    /// request actually existed and was promoted — the *original* inbound
+    /// Follow's own Activity id (the same string this call also stamps onto
+    /// the newly-established [`Follow`] row's own `activity_id`, so both
+    /// values are always identical) — or `Ok(None)` on the idempotent no-op
+    /// path (see this module's doc comment, "Task 3.2 additions", for why
+    /// this widened return type was needed, and by whom).
     pub async fn promote_pending(
         &self,
         requester: &AccountRef,
         target: &AccountRef,
-    ) -> Result<(), AppError> {
+    ) -> Result<Option<String>, AppError> {
         let Some(existing) = repository::take_request(
             &self.pool,
             requester,
@@ -354,11 +395,12 @@ impl Transitions {
         )
         .await?
         else {
-            return Ok(());
+            return Ok(None);
         };
 
         let now = self.runtime.clock.now();
         let id = self.runtime.ids.next_id();
+        let original_activity_id = existing.activity_id.clone();
         let follow = Follow {
             follower: *requester,
             followee: *target,
@@ -370,7 +412,7 @@ impl Transitions {
         };
         repository::upsert_follow(&self.pool, id, &follow).await?;
 
-        Ok(())
+        Ok(Some(original_activity_id))
     }
 
     /// Drops `requester`'s pending follow request to `target`, on receipt of
@@ -380,19 +422,30 @@ impl Transitions {
     /// either direction depending on `requester`'s own [`AccountRef`] variant
     /// — see [`pending_direction_for`]. Idempotent: a repeat call (or no such
     /// pending request) is a no-op success. No notification is emitted.
+    ///
+    /// Returns `Ok(Some(original_follow_activity_id))` when a pending
+    /// request actually existed and was dropped (the original inbound
+    /// Follow's own Activity id, needed by `FollowRequestService.
+    /// reject_request` to build the `Reject(Follow)` it sends — see this
+    /// module's doc comment, "Task 3.2 additions"), or `Ok(None)` on the
+    /// idempotent no-op path. Uses [`repository::take_request`] (a combined
+    /// `DELETE ... RETURNING`) rather than [`repository::delete_request`]
+    /// precisely to recover this value in the same atomic step that consumes
+    /// the row.
     pub async fn drop_pending(
         &self,
         requester: &AccountRef,
         target: &AccountRef,
-    ) -> Result<(), AppError> {
-        repository::delete_request(
+    ) -> Result<Option<String>, AppError> {
+        let taken = repository::take_request(
             &self.pool,
             requester,
             target,
             pending_direction_for(requester),
         )
         .await?;
-        Ok(())
+
+        Ok(taken.map(|req| req.activity_id))
     }
 
     /// Applies `blocker`'s block of `blocked` (Requirements 5.1, 5.2):

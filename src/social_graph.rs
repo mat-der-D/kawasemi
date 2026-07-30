@@ -39,19 +39,29 @@
 //!   -> accounts-and-instance `RelationshipView` mapping point
 //!   ([`relationship_mapper::RelationshipMapper::to_view`]) — see
 //!   [`relationship_mapper`].
+//! - Task 3.1 (`Boundary: FollowService`): the follow/unfollow business
+//!   aggregate ([`follow_service::FollowService`]) — see [`follow_service`].
+//! - Task 3.2 (`Boundary: FollowRequestService`): the inbound
+//!   pending-follow-request aggregate — paginated listing, authorize
+//!   (promote + Accept delivery), reject (drop + Reject delivery)
+//!   ([`follow_request_service::FollowRequestService`]) — see
+//!   [`follow_request_service`]. This task also widened
+//!   [`transitions::Transitions::promote_pending`]/
+//!   [`transitions::Transitions::drop_pending`]'s return type (see that
+//!   module's doc comment, "Task 3.2 additions").
 //!
-//! No business services (`FollowService` / `FollowRequestService` /
-//! `MuteService` / `BlockService`), no inbound Activity handlers, no
+//! No `MuteService` / `BlockService`, no inbound Activity handlers, no
 //! delegation-port implementations (`BlockPolicyImpl` / `RelProviderImpl` /
 //! `AccountCountsProviderImpl` / `FilterQuery`), and no HTTP surface
-//! (`SocialGraphEndpoints`) live here — those consume the types/policy/
-//! transitions/Activity-builder/mapper defined in this module but are out of
-//! scope for tasks 1.1-2.4. This module is not yet declared on any
+//! (`SocialGraphEndpoints`) live here yet — those consume the types/policy/
+//! transitions/Activity-builder/mapper/services defined in this module but
+//! are out of scope through task 3.2. This module is not yet declared on any
 //! router/`AppState`/bootstrap wiring point — that remains a later task's
 //! boundary (`SocialGraphModule` wiring, design.md's File Structure Plan).
 
 pub mod activity_builder;
 pub mod approval_policy;
+pub mod follow_request_service;
 pub mod follow_service;
 pub mod model;
 pub mod relationship_mapper;
@@ -60,6 +70,7 @@ pub mod transitions;
 
 pub use activity_builder::{ActivityBuilder, LocalActorLookup, RemoteActorLookup};
 pub use approval_policy::{FollowApprovalPolicy, FollowDecision};
+pub use follow_request_service::FollowRequestService;
 pub use follow_service::FollowService;
 pub use model::{
     Block, Follow, FollowOptions, FollowRequest, FollowRequestDirection, Mute, MuteOptions,
