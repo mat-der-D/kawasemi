@@ -13,7 +13,7 @@
   - _Boundary: TimelineKindRules_
 
 - [ ] 2. データ層（候補取得）
-- [ ] 2.1 候補リポジトリを read-only で実装する
+- [x] 2.1 候補リポジトリを read-only で実装する
   - 種別条件をカーソル範囲（投稿 id・新しい順）の SQL に変換し、statuses-core の `statuses` / `status_media` / ハッシュタグ関連を read-only 照会して候補を取得する（home=following∪self、public=public非ブースト、local=加えてローカル、tag=正規化タグ照合 any/all/none）。`local`/`remote`/`only_media` を WHERE で絞り、フィルタ後充填のため `limit` より多めのバッチ取得に対応する
   - 観測可能な完了: 各種別で種別条件を満たす候補が id 降順で取得でき、`only_media`/`local`/`remote`/タグ条件が反映され、上流テーブルを一切書き換えない（リポジトリ統合テストがグリーン）
   - _Requirements: 1.1, 2.1, 2.3, 2.4, 2.5, 3.1, 3.4, 4.1, 4.4, 4.5, 7.1, 7.4_
@@ -77,3 +77,5 @@
 ## Implementation Notes
 
 - タスク 1.2（`TimelineKindRules`）実装時、`src/timelines/kind_rules.rs` に候補投稿を表す `pub struct TimelineCandidate { author, local, visibility, is_boost, tags }` を導入した（`model.rs` はタスク 1.1 の境界上、候補形状の型をあえて定義していない）。この型は `TimelineKindRules::matches`/`matches_home`/`matches_public`/`matches_local`/`matches_tag` の実引数型であり、`CandidateRepository`（タスク 2.1）が読み取る `statuses` 行や `TimelineMatcher`（タスク 3.2）が呼び出す形状と一致させる必要がある（「条件の二重定義禁止」）。タスク 2.1 の実装者は、実際のリポジトリ行形状から `TimelineCandidate` を構築するか、両者の候補形状を意図的にすり合わせること — 暗黙に発散させないこと。
+- タスク 2.1（`CandidateRepository`）実装時、`fetch_candidates` の SQL は `local`/`remote`/`only_media` 絞り込みを 4 種別すべて（home 含む）に一様適用した。要件 2.3-2.5/3.4/4.5 は public/local/tag のみを明示するが、`TimelineParams`（タスク 1.1 で確定済み）に種別ごとの絞り込み可否を表すフィールドが無いため、home を除外する分岐は本タスクの境界（`model.rs` 非改変）内では表現できない。現状は home 向けリクエストでこれらのフィールドを立てて呼ぶ呼び出し元が存在しないため実害はないが、`TimelineService`（タスク 4.2）・`TimelineEndpoints`（タスク 5.1）はこの前提（= home リクエストでは `local`/`remote`/`only_media` を立てて渡さない）を暗黙に守る必要がある。design.md 側でも home にこれらの絞り込みを明示的に許可/禁止する記述は無く、対称的な現状維持（=一様適用のまま）が妥当と判断した。
+- タスク 2.1 実装時、design.md の `fetch_candidates(pool, spec, batch_limit)` インターフェースには home 種別が必要とする「following ∪ self」ID 配列を渡す引数が無かった（design.md 自身が `TimelineQuerySpec` にこの一覧を含めていない）。最も保守的な解決として、`fetch_candidates` に `following_and_self: &[Id]`（home 以外では無視される）引数を追加する形で単一の呼び出し窓口を維持した（`src/timelines/candidate_repository.rs` の該当関数のドキュメントコメントに理由を記載）。`TimelineMatcher`（タスク 3.2）・`TimelineService`（タスク 4.2）はこの拡張済みシグネチャを呼び出し元として踏襲すること。

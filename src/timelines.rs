@@ -25,6 +25,19 @@
 //!   `StatusHydrator`/`TimelineService`/`TimelineEndpoints` (later tasks),
 //!   and no wiring into `crate::state`/`crate::bootstrap`/`crate::server`
 //!   (task 5.2) live here — this module is not yet mounted anywhere.
+//! - Task 2.1 (`Boundary: CandidateRepository`): the read-only candidate
+//!   fetch design.md's "Data / データ層" component names —
+//!   [`candidate_repository::fetch_candidates`] — translating a
+//!   [`model::TimelineQuerySpec`]'s per-kind condition (mirroring
+//!   [`kind_rules::TimelineKindRules`], never re-deriving it), cursor range,
+//!   and `local`/`remote`/`only_media`/tag narrowing into a read-only
+//!   `statuses`/`status_media`/`tags`/`status_tags` query — see
+//!   [`candidate_repository`].
+//!
+//!   No `TimelineFilter`/`TimelineMatcher`/`StatusHydrator`/`TimelineService`/
+//!   `TimelineEndpoints` (later tasks), and no wiring into
+//!   `crate::state`/`crate::bootstrap`/`crate::server` (task 5.2) live here.
 
+pub mod candidate_repository;
 pub mod kind_rules;
 pub mod model;
