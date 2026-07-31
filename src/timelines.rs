@@ -15,11 +15,16 @@
 //!   [`crate::domain::Id`]/`time::OffsetDateTime` and api-foundation's
 //!   [`crate::api::pagination::PageParams`], per this task's own explicit
 //!   instruction; none of these types are redefined here.
+//! - Task 1.2 (`Boundary: TimelineKindRules`): the per-kind structural
+//!   condition design.md's "model / TimelineKindRules" component names —
+//!   home = follows ∪ self, `direct` excluded, boosts included;
+//!   public/local/tag = `public`-only and boost-excluded; local = +local
+//!   author; tag = +hashtag any/all/none matching — see [`kind_rules`].
 //!
-//!   No `TimelineKindRules` (task 1.2), no `CandidateRepository`/
-//!   `TimelineFilter`/`TimelineMatcher`/`StatusHydrator`/`TimelineService`/
-//!   `TimelineEndpoints` (later tasks), and no wiring into
-//!   `crate::state`/`crate::bootstrap`/`crate::server` (task 5.2) live here —
-//!   this module is not yet mounted anywhere.
+//!   No `CandidateRepository`/`TimelineFilter`/`TimelineMatcher`/
+//!   `StatusHydrator`/`TimelineService`/`TimelineEndpoints` (later tasks),
+//!   and no wiring into `crate::state`/`crate::bootstrap`/`crate::server`
+//!   (task 5.2) live here — this module is not yet mounted anywhere.
 
+pub mod kind_rules;
 pub mod model;

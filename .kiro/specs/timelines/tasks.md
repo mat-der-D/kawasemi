@@ -6,7 +6,7 @@
   - 観測可能な完了: 各型がコンパイルでき、`TimelineKind` が 4 種、`TagFilter` が any/all/none を表現し、`FilterContext` が関係集合を保持する（型の単体テストがグリーン）
   - _Requirements: 1.1, 2.1, 3.1, 4.1, 7.1, 8.1_
   - _Boundary: model_
-- [ ] 1.2 タイムライン種別条件を定義する
+- [x] 1.2 タイムライン種別条件を定義する
   - 種別ごとの集約条件を単一点で定義する：home=投稿者がフォロー集合∪自分・`direct`除外・ブースト含む、public/local/tag=`public`限定かつブースト除外、local=ローカル投稿者限定、tag=正規化タグ名で照合（any/all/none）
   - 観測可能な完了: 各 `TimelineKind` に対し条件が一意に決まり、public/local/tag が public 限定かつ非ブースト、home のみ direct 以外とブーストを含むことが単体テストで確認できる
   - _Requirements: 1.1, 1.3, 2.1, 2.2, 3.1, 3.2, 4.1, 4.2, 4.3_
