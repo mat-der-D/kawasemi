@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. 基盤: ドメイン型と種別条件
-- [ ] 1.1 タイムラインのドメイン型を定義する
+- [x] 1.1 タイムラインのドメイン型を定義する
   - `TimelineKind`（Home/Public/Local/Tag）・`TimelineParams`（local/remote/only_media/tag/PageParams）・`TagFilter`（primary/any/all/none）・`TimelineQuerySpec`・`FilterContext`（viewer + blocked/blocked_by/muted/following/reblogs_hidden 集合 + now）を core-runtime の Id/時刻型・api-foundation `PageParams` の上に定義する
   - 観測可能な完了: 各型がコンパイルでき、`TimelineKind` が 4 種、`TagFilter` が any/all/none を表現し、`FilterContext` が関係集合を保持する（型の単体テストがグリーン）
   - _Requirements: 1.1, 2.1, 3.1, 4.1, 7.1, 8.1_
