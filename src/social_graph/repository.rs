@@ -1207,6 +1207,35 @@ pub async fn count_followers(pool: &PgPool, target: &AccountRef) -> Result<i64, 
     Ok(count)
 }
 
+// -- feature-level `kiro-validate-impl` remediation round 1 (2026-07-31): --
+// -- RelationshipQuery supply (statuses-core's `viewer_relation`/           --
+// -- `followers_of` delegation port, `src/statuses/visibility.rs`) ---------
+
+/// Accounts currently following `target` (established `follows` rows with
+/// `target` as `followee`) — the inverse of [`following_targets`], and the
+/// `crate::social_graph::providers::RelationshipQueryImpl::followers_of`
+/// supply source for statuses-core's `RelationshipQuery::followers_of`
+/// delegation port (design.md's Boundary Commitments: "宛先導出... のための
+/// 委譲ポート契約...への本実装供給"). Returns every established follower,
+/// local or remote alike — the caller (`RelationshipQueryImpl`) is
+/// responsible for turning each into a delivery `Recipient`.
+pub async fn followers_of(pool: &PgPool, target: &AccountRef) -> Result<Vec<AccountRef>, AppError> {
+    let rows: Vec<AccountKeyRow> = sqlx::query_as(
+        "SELECT follower_kind AS kind, follower_id AS id FROM follows \
+         WHERE followee_kind = $1 AND followee_id = $2",
+    )
+    .bind(account_kind(target))
+    .bind(account_id(target))
+    .fetch_all(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| account_ref_from(&r.kind, r.id))
+        .collect())
+}
+
 /// Number of accounts `target` currently follows (established `follows`
 /// rows with `target` as `follower`) — the `AccountCountsProviderImpl`
 /// supply source for `following_count`.

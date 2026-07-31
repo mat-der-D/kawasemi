@@ -1,56 +1,62 @@
-//! Integration tests for social-graph's follow-request (approval) HTTP
-//! surface (`.kiro/specs/social-graph/tasks.md`, task 6.1 "関係操作の統合
-//! テスト", `_Boundary: SocialGraphEndpoints, FollowService,
-//! FollowRequestService, BlockService, MuteService_`), driven against the
-//! real, `spawn_test_app`-booted application router.
+//! Integration tests for task 6.1's own observable completion condition
+//! (`.kiro/specs/social-graph/tasks.md`, "6.1 (P) 関係操作の統合テスト") —
+//! this file covers exactly the `follow_requests` bullet of design.md's own
+//! "Integration Tests（`spawn_test_app` 上）" Testing Strategy section:
+//! "follow_requests: ロック済み宛で保留生成、一覧のページネーション、
+//! authorize で Accept 配送 + 確立、reject で Reject 配送 + 削除（2.1, 2.2,
+//! 2.3, 2.4）" — driven through the real, mounted `GET
+//! /api/v1/follow_requests` / `POST /api/v1/follow_requests/:id/authorize` /
+//! `.../reject` handlers (`src/social_graph/endpoints.rs`, wired by
+//! `src/server.rs`'s `social_graph_router`).
 //!
-//! design.md's File Structure Plan names this exact filename
-//! (`follow_request_it.rs`: "ロック済み宛保留・一覧ページネーション・
-//! authorize/reject と Accept/Reject 配送・follow_request 通知イベント
-//! emit（統合）") and its own Testing Strategy bullet ("follow_requests:
-//! ロック済み宛で保留生成、一覧のページネーション、authorize で Accept 配送
-//! + 確立、reject で Reject 配送 + 削除（2.1, 2.2, 2.3, 2.4）").
+//! ## Why every pending row here is *seeded*, not produced by a real
+//! inbound Follow POST
+//! Requirement 3.1/3.4 (`tests/same_server_skip_it.rs`'s own boundary)
+//! establishes that two *local* actors on this same instance can never
+//! produce a genuinely pending **inbound** follow request via the public
+//! API: `FollowApprovalPolicy::requires_approval` always resolves same-
+//! server (both `AccountRef::Local`) pairs to immediate establishment
+//! regardless of lock state (design.md, "同一サーバー承認スキップ"). The
+//! only way a local actor ever actually accumulates a pending *inbound*
+//! request through this app's own real request pipeline is a genuinely
+//! signed Follow Activity POSTed to that actor's inbox by a remote peer —
+//! exercising that whole receive pipeline is `InboundHandler`'s own
+//! boundary (task 4.1) and design.md's Testing Strategy places it in a
+//! *separate* Integration Tests bullet ("受信 Activity: 受信 Follow...") from
+//! this file's own ("follow_requests: ..."), matching task 6.2's separate
+//! `_Boundary: InboundHandler, BlockPolicyImpl, RelProviderImpl_` (not named
+//! by this task's own `_Boundary: SocialGraphEndpoints, FollowService,
+//! FollowRequestService, BlockService, MuteService_`).
 //!
-//! Covers Requirements 2.1, 2.2, 2.3, 2.4 (this task's own assigned subset).
-//!
-//! ## Requirement 2.1's "pending creation" is seeded directly, not re-derived
-//! through `InboundActivityHandler`
-//! Requirement 2.1 describes a Follow arriving at a **locked local actor**
-//! becoming a pending request. On a single kawasemi instance, the *only*
-//! path that can reach this literal shape (destination-locked local actor,
-//! non-privileged source) is a **remote** requester's Follow processed
-//! through `SocialGraphInboundHandler` (task 4.1) — same-server local/local
-//! Follows always bypass approval entirely (Requirement 3.1, exercised
-//! instead by `tests/same_server_skip_it.rs`), and this HTTP surface's own
-//! `follow` endpoint can only ever act as a **local** caller (`ctx.actor_id`,
-//! see `src/social_graph/endpoints.rs`'s own doc comment), never as a
-//! simulated remote one. `InboundActivityHandler`'s own receive-path
-//! behavior is task 6.2's boundary (`_Boundary: InboundHandler,
-//! BlockPolicyImpl, RelProviderImpl_`), not this task's (`_Boundary:
-//! SocialGraphEndpoints, FollowService, FollowRequestService, BlockService,
-//! MuteService_`) — so this file does not re-derive it. Instead, this file
-//! seeds the *already-recorded* pending state an inbound Follow would have
-//! produced directly via `social_graph::repository::upsert_request`
-//! (`direction: Inbound`) — the exact row shape `SocialGraphInboundHandler::
-//! handle`'s own `record_pending` call would have persisted — then exercises
-//! this task's own boundary (`list_follow_requests`/`authorize_follow_request`/
-//! `reject_follow_request`, `FollowRequestService`) against it. This mirrors
-//! `tests/federation_bootstrap_it.rs`'s own established "seed a cached row
-//! directly to bypass an out-of-boundary upstream step" precedent
-//! (`seed_remote_public_key`).
+//! So this file seeds the pending-request *precondition* directly via
+//! [`kawasemi::social_graph::repository::upsert_request`] — the exact same
+//! `RelationshipRepository` free function `FollowRequestService` itself
+//! calls (`follow_request_service.rs`'s own `list_requests`/
+//! `authorize_request`/`reject_request` all read/consume rows this same
+//! function writes) — then exercises the actual **endpoint layer** under
+//! test (`list_follow_requests`/`authorize_follow_request`/
+//! `reject_follow_request`) against that seeded state. This mirrors this
+//! crate's own established precedent for seeding a repository-level
+//! precondition directly rather than re-deriving it through a whole
+//! upstream subsystem (e.g. `tests/federation_bootstrap_it.rs::
+//! seed_remote_public_key` seeds a cached remote public key directly rather
+//! than performing a real HTTP key fetch first).
 //!
 //! ## No HTTP client dependency: raw sockets (this crate's established
-//! per-file-duplicated convention).
+//! `tests/*_it.rs` convention; duplicated per file since each integration
+//! test is its own compiled crate).
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use serde_json::Value;
+use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use kawasemi::accounts::model::{ProfileField, RemoteAccount};
-use kawasemi::accounts::profile_repository;
+use kawasemi::accounts::model::{ProfileField, ProfilePatch, RemoteAccount};
+use kawasemi::accounts::profile_repository::upsert_profile;
 use kawasemi::accounts::remote_repository::upsert_remote;
 use kawasemi::actor::owner::create_owner;
 use kawasemi::actor::{ActorType, Handle, NewActor};
@@ -58,12 +64,11 @@ use kawasemi::domain::{AccountRef, Id};
 use kawasemi::oauth::app_repository::{self, NewApp};
 use kawasemi::oauth::model::ScopeSet as PlaceholderScopeSet;
 use kawasemi::oauth::token_repository::{self, NewAccessToken};
-use kawasemi::social_graph::model::{FollowRequest, FollowRequestDirection};
-use kawasemi::social_graph::repository;
+use kawasemi::social_graph::repository::upsert_request;
+use kawasemi::social_graph::{FollowRequest, FollowRequestDirection};
 use kawasemi::test_harness::{TestApp, spawn_test_app};
 
-// ---- raw HTTP plumbing (duplicated per-file; see this module's doc
-// comment) ----
+// ---- raw HTTP plumbing -----------------------------------------------------
 
 #[derive(Debug)]
 struct RawResponse {
@@ -72,11 +77,40 @@ struct RawResponse {
     body: String,
 }
 
+impl RawResponse {
+    /// Parses this response's `Link` header (if present) into its
+    /// `rel="next"` target URL (mirrors `tests/pagination_it.rs`'s own
+    /// `RawResponse::link_targets`, next-only since this file's own
+    /// pagination scenario only ever follows forward).
+    fn link_next(&self) -> Option<String> {
+        let raw = self.headers.get("link")?;
+        for part in raw.split(',') {
+            let part = part.trim();
+            if let Some(url_end) = part.find('>')
+                && part.contains("rel=\"next\"")
+            {
+                return Some(part[1..url_end].to_string());
+            }
+        }
+        None
+    }
+}
+
+fn path_and_query(url: &str) -> String {
+    let (_scheme, after_scheme) = url
+        .split_once("://")
+        .expect("Link target must be an absolute URL");
+    let slash = after_scheme
+        .find('/')
+        .expect("Link target must carry a path after the origin");
+    after_scheme[slash..].to_string()
+}
+
 async fn raw_request(
-    addr: std::net::SocketAddr,
+    addr: SocketAddr,
     method: &str,
     path: &str,
-    extra_headers: &[(&str, &str)],
+    headers: &[(&str, &str)],
 ) -> RawResponse {
     let mut stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
         .await
@@ -85,7 +119,7 @@ async fn raw_request(
 
     let mut request =
         format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n");
-    for (name, value) in extra_headers {
+    for (name, value) in headers {
         request.push_str(&format!("{name}: {value}\r\n"));
     }
     request.push_str("Content-Length: 0\r\n\r\n");
@@ -131,7 +165,19 @@ fn body_json(response: &RawResponse) -> Value {
         .unwrap_or_else(|e| panic!("response body must be valid JSON: {e}; body: {response:?}"))
 }
 
-// ---- fixtures ----
+fn assert_error_shape(response: &RawResponse) {
+    let body = body_json(response);
+    assert!(
+        body.get("error").and_then(Value::as_str).is_some(),
+        "expected a Mastodon-compatible {{\"error\": ...}} body, got: {body}"
+    );
+}
+
+fn bearer_header(token: &str) -> String {
+    format!("Bearer {token}")
+}
+
+// ---- fixtures ---------------------------------------------------------------
 
 async fn register_test_app(app: &TestApp) -> Id {
     let now = app.runtime.clock.now();
@@ -142,7 +188,7 @@ async fn register_test_app(app: &TestApp) -> Id {
         app.state.oauth().token_hash_key(),
         now,
         NewApp {
-            name: "Follow Request IT Client".to_string(),
+            name: "follow_request_it Client".to_string(),
             redirect_uris: vec!["https://client.example/callback".to_string()],
             scopes: PlaceholderScopeSet::new(["read", "write", "follow"]),
         },
@@ -152,7 +198,7 @@ async fn register_test_app(app: &TestApp) -> Id {
     registered.id
 }
 
-async fn create_owner_with_actor(app: &TestApp, handle: &str) -> Id {
+async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
     let now = app.runtime.clock.now();
     let owner_id = app.runtime.ids.next_id();
     create_owner(&app.pool, owner_id, now)
@@ -176,18 +222,44 @@ async fn create_owner_with_actor(app: &TestApp, handle: &str) -> Id {
 }
 
 async fn lock_actor(app: &TestApp, actor_id: Id) {
-    let now = app.runtime.clock.now();
-    profile_repository::upsert_profile(
+    upsert_profile(
         &app.pool,
         actor_id,
-        kawasemi::accounts::model::ProfilePatch {
+        ProfilePatch {
             locked: Some(true),
             ..Default::default()
         },
-        now,
+        app.runtime.clock.now(),
     )
     .await
-    .expect("locking the actor's profile must succeed");
+    .expect("locking the test actor's profile must succeed");
+}
+
+fn sample_remote_account(id: Id, actor_uri: &str, fetched_at: OffsetDateTime) -> RemoteAccount {
+    RemoteAccount {
+        id,
+        actor_uri: actor_uri.to_string(),
+        username: actor_uri.rsplit('/').next().unwrap_or("remote").to_string(),
+        domain: "remote.example".to_string(),
+        display_name: "Remote Requester".to_string(),
+        note: String::new(),
+        url: actor_uri.to_string(),
+        avatar_url: None,
+        header_url: None,
+        fields: Vec::<ProfileField>::new(),
+        bot: false,
+        locked: false,
+        fetched_at,
+    }
+}
+
+async fn create_test_remote(app: &TestApp, actor_uri: &str) -> Id {
+    let id = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+    upsert_remote(&app.pool, &sample_remote_account(id, actor_uri, now))
+        .await
+        .expect("upsert_remote must succeed");
+    id
 }
 
 async fn issue_token(app: &TestApp, oauth_app_id: Id, actor_id: Id, scopes: &[&str]) -> String {
@@ -209,40 +281,13 @@ async fn issue_token(app: &TestApp, oauth_app_id: Id, actor_id: Id, scopes: &[&s
     issued.plaintext.expose_secret().clone()
 }
 
-fn bearer_header(token: &str) -> String {
-    format!("Bearer {token}")
-}
-
-async fn create_remote_account_with_id(app: &TestApp, id: Id, actor_uri: &str, username: &str) {
-    upsert_remote(
-        &app.pool,
-        &RemoteAccount {
-            id,
-            actor_uri: actor_uri.to_string(),
-            username: username.to_string(),
-            domain: "remote.example".to_string(),
-            display_name: format!("Remote {username}"),
-            note: String::new(),
-            url: actor_uri.to_string(),
-            avatar_url: None,
-            header_url: None,
-            fields: Vec::<ProfileField>::new(),
-            bot: false,
-            locked: false,
-            fetched_at: app.runtime.clock.now(),
-        },
-    )
-    .await
-    .expect("seeding the cached remote account must succeed");
-}
-
-/// Seeds an already-recorded *inbound* pending follow request (see this
-/// module's doc comment for why this bypasses `InboundActivityHandler`
-/// itself) from `requester` (remote) to `target` (local, locked).
-async fn seed_inbound_pending_request(app: &TestApp, requester: Id, target: Id, activity_id: &str) {
-    let now = app.runtime.clock.now();
+/// Seeds a pending **inbound** follow request from `requester` (remote) to
+/// `target` (local) — see this file's own doc comment for why this is a
+/// direct repository seed rather than a real signed inbound Follow POST.
+async fn seed_pending_inbound_request(app: &TestApp, requester: Id, target: Id, activity_id: &str) {
     let id = app.runtime.ids.next_id();
-    repository::upsert_request(
+    let now = app.runtime.clock.now();
+    upsert_request(
         &app.pool,
         id,
         &FollowRequest {
@@ -254,120 +299,87 @@ async fn seed_inbound_pending_request(app: &TestApp, requester: Id, target: Id, 
         },
     )
     .await
-    .expect("seeding an inbound pending follow request must succeed");
+    .expect("seeding a pending inbound follow request must succeed");
 }
 
-async fn delivery_job_count(app: &TestApp, target_inbox: &str, activity_type: &str) -> i64 {
-    let row: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM delivery_jobs WHERE target_inbox = $1 AND activity->>'type' = $2",
+async fn follows_row_count(app: &TestApp, follower: (&str, i64), followee: (&str, i64)) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM follows \
+         WHERE follower_kind = $1 AND follower_id = $2 \
+           AND followee_kind = $3 AND followee_id = $4",
+    )
+    .bind(follower.0)
+    .bind(follower.1)
+    .bind(followee.0)
+    .bind(followee.1)
+    .fetch_one(&app.pool)
+    .await
+    .expect("counting follows rows must succeed")
+}
+
+async fn follow_requests_row_count(
+    app: &TestApp,
+    requester: (&str, i64),
+    target: (&str, i64),
+) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM follow_requests \
+         WHERE requester_kind = $1 AND requester_id = $2 \
+           AND target_kind = $3 AND target_id = $4",
+    )
+    .bind(requester.0)
+    .bind(requester.1)
+    .bind(target.0)
+    .bind(target.1)
+    .fetch_one(&app.pool)
+    .await
+    .expect("counting follow_requests rows must succeed")
+}
+
+async fn delivery_job_count_for_type(
+    app: &TestApp,
+    target_inbox: &str,
+    activity_type: &str,
+) -> i64 {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM delivery_jobs \
+         WHERE target_inbox = $1 AND activity->>'type' = $2",
     )
     .bind(target_inbox)
     .bind(activity_type)
     .fetch_one(&app.pool)
     .await
-    .expect("querying delivery_jobs must succeed");
-    row.0
+    .expect("counting delivery_jobs rows must succeed")
 }
 
-fn parse_link_header(headers: &HashMap<String, String>) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    let Some(raw) = headers.get("link") else {
-        return out;
-    };
-    for entry in raw.split(',') {
-        let entry = entry.trim();
-        let Some((url_part, rel_part)) = entry.split_once(';') else {
-            continue;
-        };
-        let url = url_part
-            .trim()
-            .trim_start_matches('<')
-            .trim_end_matches('>');
-        if let Some(rel_value) = rel_part
-            .trim()
-            .strip_prefix("rel=\"")
-            .and_then(|s| s.strip_suffix('"'))
-        {
-            out.insert(rel_value.to_string(), url.to_string());
-        }
-    }
-    out
+fn remote_inbox(actor_uri: &str) -> String {
+    format!("{actor_uri}/inbox")
 }
 
-// ==========================================================================
-// (1) Requirement 2.1 / 2.2: a pending inbound request appears in
-// list_follow_requests
-// ==========================================================================
+// ---- (1) list_follow_requests: pending inbound requesters, paginated --
 
 #[tokio::test]
-async fn pending_inbound_request_appears_in_list_follow_requests() {
+async fn list_follow_requests_returns_pending_requesters_with_pagination() {
     let app = spawn_test_app().await;
     let oauth_app_id = register_test_app(&app).await;
-    let owner_id = create_owner_with_actor(&app, "fr_list_owner").await;
+    let owner_id = create_test_actor(&app, "fr_list_owner").await;
     lock_actor(&app, owner_id).await;
-    let token = issue_token(&app, oauth_app_id, owner_id, &["follow"]).await;
 
-    let remote_id = app.runtime.ids.next_id();
-    let actor_uri = "https://remote.example/users/fr_list_requester";
-    create_remote_account_with_id(&app, remote_id, actor_uri, "fr_list_requester").await;
-    seed_inbound_pending_request(
-        &app,
-        remote_id,
-        owner_id,
-        "https://remote.example/activities/fr-list-1",
-    )
-    .await;
-
-    let response = raw_request(
-        app.address,
-        "GET",
-        "/api/v1/follow_requests",
-        &[("Authorization", &bearer_header(&token))],
-    )
-    .await;
-    assert_eq!(response.status, 200, "got: {response:?}");
-    let body = body_json(&response);
-    let items = body.as_array().expect("follow_requests must be an array");
-    assert_eq!(items.len(), 1, "got: {body}");
-    assert_eq!(
-        items[0]["id"].as_str(),
-        Some(remote_id.as_i64().to_string()).as_deref()
-    );
-
-    app.cleanup().await;
-}
-
-// ==========================================================================
-// (2) Requirement 2.2: list pagination (Link header, limit)
-// ==========================================================================
-
-#[tokio::test]
-async fn list_follow_requests_paginates_with_link_header() {
-    let app = spawn_test_app().await;
-    let oauth_app_id = register_test_app(&app).await;
-    let owner_id = create_owner_with_actor(&app, "fr_page_owner").await;
-    lock_actor(&app, owner_id).await;
-    let token = issue_token(&app, oauth_app_id, owner_id, &["follow"]).await;
-
-    for i in 0..3 {
-        let remote_id = app.runtime.ids.next_id();
-        let actor_uri = format!("https://remote.example/users/fr_page_requester_{i}");
-        create_remote_account_with_id(
+    let mut requester_ids = Vec::new();
+    for n in 0..3 {
+        let actor_uri = format!("https://remote.example/users/fr_list_requester_{n}");
+        let requester_id = create_test_remote(&app, &actor_uri).await;
+        seed_pending_inbound_request(
             &app,
-            remote_id,
-            &actor_uri,
-            &format!("fr_page_requester_{i}"),
-        )
-        .await;
-        seed_inbound_pending_request(
-            &app,
-            remote_id,
+            requester_id,
             owner_id,
-            &format!("https://remote.example/activities/fr-page-{i}"),
+            &format!("https://remote.example/activities/follow-{n}"),
         )
         .await;
+        requester_ids.push(requester_id);
     }
 
+    let token = issue_token(&app, oauth_app_id, owner_id, &["follow"]).await;
     let first_page = raw_request(
         app.address,
         "GET",
@@ -379,26 +391,16 @@ async fn list_follow_requests_paginates_with_link_header() {
     let first_body = body_json(&first_page);
     let first_items = first_body
         .as_array()
-        .expect("follow_requests must be an array");
+        .expect("follow_requests must return a JSON array");
     assert_eq!(first_items.len(), 2, "got: {first_body}");
 
-    let links = parse_link_header(&first_page.headers);
-    let next_url = links
-        .get("next")
-        .expect("a first page with more remaining items must carry a next Link relation");
-
-    // The `next` Link is an absolute URL; extract just the path+query for
-    // our raw-socket client.
-    let next_path = next_url
-        .splitn(4, '/')
-        .nth(3)
-        .map(|rest| format!("/{rest}"))
-        .expect("next Link must carry a path");
-
+    let next = first_page
+        .link_next()
+        .expect("a 3rd pending request must yield a rel=\"next\" Link header");
     let second_page = raw_request(
         app.address,
         "GET",
-        &next_path,
+        &path_and_query(&next),
         &[("Authorization", &bearer_header(&token))],
     )
     .await;
@@ -406,186 +408,292 @@ async fn list_follow_requests_paginates_with_link_header() {
     let second_body = body_json(&second_page);
     let second_items = second_body
         .as_array()
-        .expect("follow_requests must be an array");
+        .expect("follow_requests page 2 must return a JSON array");
     assert_eq!(second_items.len(), 1, "got: {second_body}");
 
-    // Every item across both pages is distinct (no duplication/omission).
-    let mut all_ids: Vec<String> = first_items
+    let mut seen_ids: Vec<i64> = first_items
         .iter()
         .chain(second_items.iter())
-        .map(|item| item["id"].as_str().unwrap().to_string())
+        .map(|item| {
+            item["id"]
+                .as_str()
+                .expect("Account JSON id must be a string")
+                .parse::<i64>()
+                .expect("Account JSON id must be numeric")
+        })
         .collect();
-    all_ids.sort();
-    all_ids.dedup();
+    seen_ids.sort_unstable();
+    let mut expected_ids: Vec<i64> = requester_ids.iter().map(Id::as_i64).collect();
+    expected_ids.sort_unstable();
     assert_eq!(
-        all_ids.len(),
-        3,
-        "expected 3 distinct requesters across pages"
+        seen_ids, expected_ids,
+        "every seeded pending requester must appear exactly once across both pages"
     );
 
     app.cleanup().await;
 }
 
-// ==========================================================================
-// (3) Requirement 2.3: authorize establishes the follow and delivers
-// Accept(Follow)
-// ==========================================================================
+// ---- (2) authorize: establishes the follow and delivers Accept --------
 
 #[tokio::test]
-async fn authorize_establishes_follow_and_delivers_accept() {
+async fn authorize_follow_request_establishes_follow_and_delivers_accept() {
     let app = spawn_test_app().await;
     let oauth_app_id = register_test_app(&app).await;
-    let owner_id = create_owner_with_actor(&app, "fr_auth_owner").await;
+    let owner_id = create_test_actor(&app, "fr_auth_owner").await;
     lock_actor(&app, owner_id).await;
-    let token = issue_token(&app, oauth_app_id, owner_id, &["follow"]).await;
-
-    let remote_id = app.runtime.ids.next_id();
     let actor_uri = "https://remote.example/users/fr_auth_requester";
-    create_remote_account_with_id(&app, remote_id, actor_uri, "fr_auth_requester").await;
-    seed_inbound_pending_request(
+    let requester_id = create_test_remote(&app, actor_uri).await;
+    seed_pending_inbound_request(
         &app,
-        remote_id,
+        requester_id,
         owner_id,
-        "https://remote.example/activities/fr-auth-1",
+        "https://remote.example/activities/follow-auth",
     )
     .await;
 
-    let path = format!("/api/v1/follow_requests/{}/authorize", remote_id.as_i64());
-    let response = raw_request(
-        app.address,
-        "POST",
-        &path,
-        &[("Authorization", &bearer_header(&token))],
-    )
-    .await;
-    assert_eq!(response.status, 200, "got: {response:?}");
-    let body = body_json(&response);
-    // owner_id's own relationship *to* the requester: the requester now
-    // follows the owner (Requirement 2.3's establishment), so from the
-    // owner's viewpoint `followed_by` is true and `requested_by` is false
-    // (no longer pending).
-    assert_eq!(body["followed_by"].as_bool(), Some(true), "got: {body}");
-    assert_eq!(body["requested_by"].as_bool(), Some(false), "got: {body}");
-
-    let inbox = format!("{actor_uri}/inbox");
-    assert_eq!(
-        delivery_job_count(&app, &inbox, "Accept").await,
-        1,
-        "authorize must deliver an Accept(Follow) Activity to the requester's inbox"
-    );
-
-    // The pending request must no longer be listed.
-    let list_response = raw_request(
-        app.address,
-        "GET",
-        "/api/v1/follow_requests",
-        &[("Authorization", &bearer_header(&token))],
-    )
-    .await;
-    let list_body = body_json(&list_response);
-    assert_eq!(
-        list_body.as_array().map(Vec::len),
-        Some(0),
-        "an authorized request must no longer be pending, got: {list_body}"
-    );
-
-    app.cleanup().await;
-}
-
-/// Authorizing a nonexistent pending request is a 404 (Requirement 10.5,
-/// exercised here as part of this task's own `authorize_request` coverage
-/// since `FollowRequestService::authorize_request`'s own 404 falls
-/// naturally out of a no-op `promote_pending`).
-#[tokio::test]
-async fn authorize_with_no_pending_request_is_404() {
-    let app = spawn_test_app().await;
-    let oauth_app_id = register_test_app(&app).await;
-    let owner_id = create_owner_with_actor(&app, "fr_auth_404_owner").await;
     let token = issue_token(&app, oauth_app_id, owner_id, &["follow"]).await;
-
-    let remote_id = app.runtime.ids.next_id();
-    create_remote_account_with_id(
-        &app,
-        remote_id,
-        "https://remote.example/users/fr_auth_404_requester",
-        "fr_auth_404_requester",
-    )
-    .await;
-
-    let path = format!("/api/v1/follow_requests/{}/authorize", remote_id.as_i64());
     let response = raw_request(
         app.address,
         "POST",
-        &path,
+        &format!(
+            "/api/v1/follow_requests/{}/authorize",
+            requester_id.as_i64()
+        ),
         &[("Authorization", &bearer_header(&token))],
     )
     .await;
-    assert_eq!(response.status, 404, "got: {response:?}");
 
-    app.cleanup().await;
-}
-
-// ==========================================================================
-// (4) Requirement 2.4: reject drops the pending request and delivers
-// Reject(Follow)
-// ==========================================================================
-
-#[tokio::test]
-async fn reject_drops_pending_request_and_delivers_reject() {
-    let app = spawn_test_app().await;
-    let oauth_app_id = register_test_app(&app).await;
-    let owner_id = create_owner_with_actor(&app, "fr_reject_owner").await;
-    lock_actor(&app, owner_id).await;
-    let token = issue_token(&app, oauth_app_id, owner_id, &["follow"]).await;
-
-    let remote_id = app.runtime.ids.next_id();
-    let actor_uri = "https://remote.example/users/fr_reject_requester";
-    create_remote_account_with_id(&app, remote_id, actor_uri, "fr_reject_requester").await;
-    seed_inbound_pending_request(
-        &app,
-        remote_id,
-        owner_id,
-        "https://remote.example/activities/fr-reject-1",
-    )
-    .await;
-
-    let path = format!("/api/v1/follow_requests/{}/reject", remote_id.as_i64());
-    let response = raw_request(
-        app.address,
-        "POST",
-        &path,
-        &[("Authorization", &bearer_header(&token))],
-    )
-    .await;
     assert_eq!(response.status, 200, "got: {response:?}");
     let body = body_json(&response);
     assert_eq!(
         body["followed_by"].as_bool(),
-        Some(false),
-        "a rejected request must never establish a follow, got: {body}"
+        Some(true),
+        "the requester must now follow the owner, got: {body}"
     );
-    assert_eq!(body["requested_by"].as_bool(), Some(false), "got: {body}");
-
-    let inbox = format!("{actor_uri}/inbox");
     assert_eq!(
-        delivery_job_count(&app, &inbox, "Reject").await,
-        1,
-        "reject must deliver a Reject(Follow) Activity to the requester's inbox"
+        body["requested_by"].as_bool(),
+        Some(false),
+        "the pending request must no longer be pending, got: {body}"
     );
 
-    let list_response = raw_request(
+    assert_eq!(
+        follows_row_count(
+            &app,
+            ("remote", requester_id.as_i64()),
+            ("local", owner_id.as_i64())
+        )
+        .await,
+        1,
+        "authorize must establish a follows row (requester -> owner)"
+    );
+    assert_eq!(
+        follow_requests_row_count(
+            &app,
+            ("remote", requester_id.as_i64()),
+            ("local", owner_id.as_i64())
+        )
+        .await,
+        0,
+        "the pending request row must be consumed"
+    );
+    assert_eq!(
+        delivery_job_count_for_type(&app, &remote_inbox(actor_uri), "Accept").await,
+        1,
+        "authorize must deliver exactly one Accept(Follow) to the requester's inbox"
+    );
+
+    app.cleanup().await;
+}
+
+// ---- (3) reject: drops the pending request and delivers Reject --------
+
+#[tokio::test]
+async fn reject_follow_request_drops_pending_and_delivers_reject() {
+    let app = spawn_test_app().await;
+    let oauth_app_id = register_test_app(&app).await;
+    let owner_id = create_test_actor(&app, "fr_reject_owner").await;
+    lock_actor(&app, owner_id).await;
+    let actor_uri = "https://remote.example/users/fr_reject_requester";
+    let requester_id = create_test_remote(&app, actor_uri).await;
+    seed_pending_inbound_request(
+        &app,
+        requester_id,
+        owner_id,
+        "https://remote.example/activities/follow-reject",
+    )
+    .await;
+
+    let token = issue_token(&app, oauth_app_id, owner_id, &["follow"]).await;
+    let response = raw_request(
         app.address,
-        "GET",
-        "/api/v1/follow_requests",
+        "POST",
+        &format!("/api/v1/follow_requests/{}/reject", requester_id.as_i64()),
         &[("Authorization", &bearer_header(&token))],
     )
     .await;
-    let list_body = body_json(&list_response);
+
+    assert_eq!(response.status, 200, "got: {response:?}");
+    let body = body_json(&response);
+    assert_eq!(body["followed_by"].as_bool(), Some(false), "got: {body}");
+    assert_eq!(body["requested_by"].as_bool(), Some(false), "got: {body}");
+
     assert_eq!(
-        list_body.as_array().map(Vec::len),
-        Some(0),
-        "a rejected request must be removed from the pending list, got: {list_body}"
+        follows_row_count(
+            &app,
+            ("remote", requester_id.as_i64()),
+            ("local", owner_id.as_i64())
+        )
+        .await,
+        0,
+        "reject must never establish a follow"
     );
+    assert_eq!(
+        follow_requests_row_count(
+            &app,
+            ("remote", requester_id.as_i64()),
+            ("local", owner_id.as_i64())
+        )
+        .await,
+        0,
+        "the pending request row must be dropped"
+    );
+    assert_eq!(
+        delivery_job_count_for_type(&app, &remote_inbox(actor_uri), "Reject").await,
+        1,
+        "reject must deliver exactly one Reject(Follow) to the requester's inbox"
+    );
+
+    // A second reject of the now-consumed request has nothing pending left
+    // to act on -- 404, per `follow_request_service.rs`'s own documented
+    // "404 for 'nothing pending'" convention.
+    let second = raw_request(
+        app.address,
+        "POST",
+        &format!("/api/v1/follow_requests/{}/reject", requester_id.as_i64()),
+        &[("Authorization", &bearer_header(&token))],
+    )
+    .await;
+    assert_eq!(second.status, 404, "got: {second:?}");
+    assert_error_shape(&second);
+
+    app.cleanup().await;
+}
+
+// ---- (4) authorize with nothing pending is a 404 -----------------------
+
+#[tokio::test]
+async fn authorize_follow_request_returns_404_when_nothing_pending() {
+    let app = spawn_test_app().await;
+    let oauth_app_id = register_test_app(&app).await;
+    let owner_id = create_test_actor(&app, "fr_404_owner").await;
+    let actor_uri = "https://remote.example/users/fr_404_requester";
+    let requester_id = create_test_remote(&app, actor_uri).await;
+
+    let token = issue_token(&app, oauth_app_id, owner_id, &["follow"]).await;
+    let response = raw_request(
+        app.address,
+        "POST",
+        &format!(
+            "/api/v1/follow_requests/{}/authorize",
+            requester_id.as_i64()
+        ),
+        &[("Authorization", &bearer_header(&token))],
+    )
+    .await;
+
+    assert_eq!(response.status, 404, "got: {response:?}");
+    assert_error_shape(&response);
+
+    app.cleanup().await;
+}
+
+// ---- (5) scope enforcement: list requires follow/read:follows, and
+// authorize/reject require exactly `follow` (Requirement 2.7, 10.1) -----
+
+#[tokio::test]
+async fn list_follow_requests_requires_follow_or_read_follows_scope() {
+    let app = spawn_test_app().await;
+    let oauth_app_id = register_test_app(&app).await;
+    let owner_id = create_test_actor(&app, "fr_scope_owner").await;
+
+    let unauthenticated = raw_request(app.address, "GET", "/api/v1/follow_requests", &[]).await;
+    assert_eq!(unauthenticated.status, 401, "got: {unauthenticated:?}");
+    assert_error_shape(&unauthenticated);
+
+    let wrong_scope_token = issue_token(&app, oauth_app_id, owner_id, &["read:accounts"]).await;
+    let forbidden = raw_request(
+        app.address,
+        "GET",
+        "/api/v1/follow_requests",
+        &[("Authorization", &bearer_header(&wrong_scope_token))],
+    )
+    .await;
+    assert_eq!(forbidden.status, 403, "got: {forbidden:?}");
+    assert_error_shape(&forbidden);
+
+    let read_follows_token = issue_token(&app, oauth_app_id, owner_id, &["read:follows"]).await;
+    let accepted = raw_request(
+        app.address,
+        "GET",
+        "/api/v1/follow_requests",
+        &[("Authorization", &bearer_header(&read_follows_token))],
+    )
+    .await;
+    assert_eq!(
+        accepted.status, 200,
+        "a read:follows-scoped token must be accepted, got: {accepted:?}"
+    );
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn authorize_follow_request_requires_exactly_follow_scope() {
+    let app = spawn_test_app().await;
+    let oauth_app_id = register_test_app(&app).await;
+    let owner_id = create_test_actor(&app, "fr_authscope_owner").await;
+    let actor_uri = "https://remote.example/users/fr_authscope_requester";
+    let requester_id = create_test_remote(&app, actor_uri).await;
+    seed_pending_inbound_request(
+        &app,
+        requester_id,
+        owner_id,
+        "https://remote.example/activities/follow-authscope",
+    )
+    .await;
+
+    // Requirement 2.7 narrows authorize/reject to `follow` alone --
+    // `read:follows` (sufficient for the list endpoint) must NOT be
+    // accepted here.
+    let read_follows_token = issue_token(&app, oauth_app_id, owner_id, &["read:follows"]).await;
+    let forbidden = raw_request(
+        app.address,
+        "POST",
+        &format!(
+            "/api/v1/follow_requests/{}/authorize",
+            requester_id.as_i64()
+        ),
+        &[("Authorization", &bearer_header(&read_follows_token))],
+    )
+    .await;
+    assert_eq!(
+        forbidden.status, 403,
+        "authorize must reject a read:follows-only token, got: {forbidden:?}"
+    );
+    assert_error_shape(&forbidden);
+
+    let follow_token = issue_token(&app, oauth_app_id, owner_id, &["follow"]).await;
+    let accepted = raw_request(
+        app.address,
+        "POST",
+        &format!(
+            "/api/v1/follow_requests/{}/authorize",
+            requester_id.as_i64()
+        ),
+        &[("Authorization", &bearer_header(&follow_token))],
+    )
+    .await;
+    assert_eq!(accepted.status, 200, "got: {accepted:?}");
 
     app.cleanup().await;
 }

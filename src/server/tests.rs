@@ -226,6 +226,7 @@ fn test_state(seed: u64) -> AppState {
         social_graph_remote_actor_fetcher,
         Arc::clone(federation_module.delivery_service()),
         federation_module.block_policy(),
+        &statuses_module.relationship_query_registry(),
         accounts_module.ports(),
         accounts_module.service(),
         NotificationSinkRegistry::new(),

@@ -780,7 +780,12 @@ pub async fn spawn_test_app() -> TestApp {
     // (`crate::statuses::register_account_ports`), so this harness's own
     // `GET /accounts/:id/statuses`/`statuses_count` integration tests
     // observe the real provider, not `accounts_module`'s built-in
-    // `EmptyStatusesProvider`/`ZeroCountsProvider` defaults.
+    // `EmptyStatusesProvider`/`ZeroCountsProvider` defaults. Also passes
+    // `statuses_module`'s own live `RelationshipQueryRegistry`
+    // (feature-level `kiro-validate-impl` remediation round 1 follow-up,
+    // 2026-07-31), so `AccountStatusesProviderImpl::visible_to` observes the
+    // exact same registry `social_graph::build_social_graph_module` below
+    // registers its real implementation into.
     statuses::register_account_ports(
         pool.clone(),
         runtime.clone(),
@@ -788,6 +793,7 @@ pub async fn spawn_test_app() -> TestApp {
         accounts_module.ports(),
         accounts_module.service(),
         media_module.store().clone(),
+        statuses_module.relationship_query_registry(),
     );
 
     // Assembles the social-graph module bundle (task 5.2) the same way
@@ -804,6 +810,7 @@ pub async fn spawn_test_app() -> TestApp {
         social_graph_remote_actor_fetcher,
         Arc::clone(federation_module.delivery_service()),
         federation_module.block_policy(),
+        &statuses_module.relationship_query_registry(),
         accounts_module.ports(),
         accounts_module.service(),
         notifications,

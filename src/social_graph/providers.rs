@@ -136,14 +136,17 @@ use sqlx::PgPool;
 
 use crate::accounts::model::{AccountCounts, RelationshipView};
 use crate::accounts::ports::{AccountCountsProvider, RelationshipStateProvider};
+use crate::accounts::remote_repository;
 use crate::actor::{ActorDirectory, Handle};
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
+use crate::federation::Recipient;
 use crate::federation::inbound::block_policy::{BlockPolicy, LocalRecipientContext};
 use crate::runtime::RuntimeContext;
 use crate::social_graph::inbound::ActorUriResolver;
 use crate::social_graph::relationship_mapper::RelationshipMapper;
 use crate::social_graph::repository;
+use crate::statuses::visibility::{RelationshipQuery, ViewerRelation};
 
 /// federation-core's `BlockPolicy` delegation boundary, backed by this
 /// spec's own `blocks` table (Requirements 6.1, 6.2, 6.3, 6.4). See this
@@ -455,5 +458,137 @@ impl AccountCountsProvider for AccountCountsProviderImpl {
                 last_status_at: None,
             })
         })
+    }
+}
+
+// -- RelationshipQueryImpl (feature-level `kiro-validate-impl` remediation -
+// -- round 1, 2026-07-31; closes design.md's Boundary Commitments gap:     -
+// -- statuses-core's `RelationshipQuery` delegation port,                  -
+// -- `src/statuses/visibility.rs`, was committed to but never actually     -
+// -- supplied a real implementation) --------------------------------------
+//
+// `RelationshipQueryImpl` supplies statuses-core's `RelationshipQuery`
+// delegation boundary (`crate::statuses::visibility::RelationshipQuery`)
+// with a real implementation backed by this spec's own `follows` table,
+// replacing that module's always-"not a follower"/always-empty-followers
+// `NoRelationshipQuery` default (via `crate::statuses::visibility::
+// RelationshipQueryRegistry::set_relationship_query`, `build_social_graph_module`'s
+// own registration point -- see this module's own doc comment for the
+// identical `BlockPolicyImpl`/`RelProviderImpl` precedent this mirrors).
+//
+// `viewer_relation` reuses `repository::load_states` (task 1.3) -- the same
+// batched reverse-lookup query `RelProviderImpl::relationships` already
+// uses -- rather than a new bespoke query: `viewer_relation`'s own contract
+// ("does viewer follow author") is exactly `RelationshipState::follow.
+// is_some()` for a single-target `load_states` call.
+//
+// `followers_of` uses this remediation's own additive `repository::
+// followers_of` query (the inverse of `following_targets`), then maps each
+// follower `AccountRef` into a `Recipient`: `AccountRef::Local` ->
+// `Recipient::Local` via `ActorDirectory::resolve_actor_by_id` (mirrors
+// `BlockPolicyImpl`'s own local-actor-resolution convention);
+// `AccountRef::Remote` -> `Recipient::Remote` via `crate::accounts::
+// remote_repository::find_remote_by_id`, reusing the exact same
+// `format!("{actor_uri}/inbox")`, `shared_inbox: None` interim convention
+// `FollowService::resolve_target` already established for the identical
+// "no persisted remote inbox field yet" gap (see that module's own doc
+// comment, "Remote delivery's `inbox`: a documented interim gap, not a
+// silent guess" -- this is the same documented gap, not a new one).
+//
+// A follower `AccountRef` that no longer resolves (a stale `follows` row
+// pointing at a since-deleted local actor, or a remote account this
+// instance no longer has cached) is silently skipped rather than failing
+// the whole `followers_of` call -- mirrors `BlockPolicyImpl::
+// resolve_local_recipient`'s own "a resolution gap is a benign miss, not an
+// error" precedent: one stale follower should not make an entire
+// followers-collection delivery fail for every *other*, still-valid
+// follower.
+
+/// Supplies statuses-core's [`RelationshipQuery`] delegation boundary with a
+/// real, `follows`-table-backed implementation (feature-level
+/// `kiro-validate-impl` remediation round 1). See this module's doc comment
+/// ("RelationshipQueryImpl") for the full contract.
+#[derive(Clone)]
+pub struct RelationshipQueryImpl {
+    pool: PgPool,
+    runtime: RuntimeContext,
+    directory: Arc<ActorDirectory>,
+}
+
+impl RelationshipQueryImpl {
+    /// Builds a `RelationshipQueryImpl` bound to `pool` (this spec's own
+    /// `follows` table, via `repository::load_states`/`repository::
+    /// followers_of`), `runtime` (`Clock` injection for `load_states`'s own
+    /// expiry-aware `now` -- never a direct wall-clock read, this crate's
+    /// determinism rule), and `directory` (local follower `AccountRef ->
+    /// Handle` resolution for `followers_of`).
+    pub fn new(pool: PgPool, runtime: RuntimeContext, directory: Arc<ActorDirectory>) -> Self {
+        Self {
+            pool,
+            runtime,
+            directory,
+        }
+    }
+}
+
+impl RelationshipQuery for RelationshipQueryImpl {
+    /// Resolves whether `viewer` currently follows `author` (design.md's
+    /// Boundary Commitments: real supply for statuses-core's `VisibilityPolicy::
+    /// is_visible` `private`-branch judgment, Requirement 8). `viewer: None`
+    /// (unauthenticated) short-circuits to "not a follower" without any
+    /// query, matching [`RelationshipQuery::viewer_relation`]'s own
+    /// contract (implementations must not error on an absent viewer) --
+    /// both `author`/`viewer` are always local `Id`s (`Status::actor_id`'s
+    /// own "logical-only reference to actor-model's `local_actors.id`"
+    /// contract; `crate::social_graph::providers`'s own established
+    /// `viewer: Id -> AccountRef::Local` convention, see this module's doc
+    /// comment on `RelProviderImpl`).
+    async fn viewer_relation(
+        &self,
+        author: Id,
+        viewer: Option<Id>,
+    ) -> Result<ViewerRelation, AppError> {
+        let Some(viewer_id) = viewer else {
+            return Ok(ViewerRelation { is_follower: false });
+        };
+        let viewer_ref = AccountRef::Local(viewer_id);
+        let targets = [AccountRef::Local(author)];
+        let now = self.runtime.clock.now();
+        let states = repository::load_states(&self.pool, &viewer_ref, &targets, now).await?;
+        let is_follower = states.first().is_some_and(|state| state.follow.is_some());
+        Ok(ViewerRelation { is_follower })
+    }
+
+    /// Resolves `author`'s established followers as delivery recipients
+    /// (design.md's Boundary Commitments: real supply for statuses-core's
+    /// `Addressing::derive_recipients`, `private`/`unlisted` followers-
+    /// collection addressing). See this module's doc comment
+    /// ("RelationshipQueryImpl") for the local/remote `Recipient` mapping
+    /// and the stale-follower "skip, don't fail" contract.
+    async fn followers_of(&self, author: Id) -> Result<Vec<Recipient>, AppError> {
+        let author_ref = AccountRef::Local(author);
+        let followers = repository::followers_of(&self.pool, &author_ref).await?;
+
+        let mut recipients = Vec::with_capacity(followers.len());
+        for follower in followers {
+            match follower {
+                AccountRef::Local(id) => {
+                    if let Some(actor) = self.directory.resolve_actor_by_id(id).await? {
+                        recipients.push(Recipient::Local(actor.handle));
+                    }
+                }
+                AccountRef::Remote(id) => {
+                    if let Some(remote) =
+                        remote_repository::find_remote_by_id(&self.pool, id).await?
+                    {
+                        recipients.push(Recipient::Remote {
+                            inbox: format!("{}/inbox", remote.actor_uri),
+                            shared_inbox: None,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(recipients)
     }
 }

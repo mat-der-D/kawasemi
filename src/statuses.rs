@@ -157,8 +157,12 @@
 //!   [`build_statuses_module`]) picks this crate's one concrete production
 //!   type per generic port (`crate::actor::ActorDirectory` for
 //!   `ActorHandleLookup`/`LocalActorLookup`/`MentionLookup`,
-//!   `crate::statuses::visibility::NoRelationshipQuery` for
-//!   `RelationshipQuery` — social-graph has not landed — and federation-core's
+//!   `crate::statuses::visibility::RelationshipQueryRegistry` for
+//!   `RelationshipQuery` — see that type's own doc comment
+//!   ("`RelationshipQueryRegistry`"); originally a bare `NoRelationshipQuery`
+//!   until a feature-level `kiro-validate-impl` remediation round (round 1,
+//!   2026-07-31) wired social-graph's real implementation in behind this
+//!   runtime-replaceable registry — and federation-core's
 //!   concrete `DeliveryService` instantiation for `StatusActivityBuilder`'s
 //!   delivery port), constructs one [`activity_builder::StatusActivityBuilder`]
 //!   per service (each sharing the same `Arc<ConcreteDeliveryService>` —
@@ -224,7 +228,7 @@ use crate::statuses::interaction_service::InteractionService;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::poll_service::PollService;
 use crate::statuses::status_service::StatusService;
-use crate::statuses::visibility::NoRelationshipQuery;
+use crate::statuses::visibility::RelationshipQueryRegistry;
 
 pub use model::{IdempotencyRecord, Poll, PollOption, PollVote, Status, StatusEdit, Tag};
 
@@ -255,14 +259,17 @@ pub type ConcreteStatusActivityBuilder =
 /// implemented on `ActorDirectory` — see `activity_builder.rs`/
 /// `status_service.rs`'s own `impl` blocks), [`ConcreteLocalSink`]/
 /// [`ConcreteHttpSink`] for `L`/`H`, and
-/// [`visibility::NoRelationshipQuery`] for `R` (social-graph has not landed
-/// — task 3.1's own safe default).
+/// [`RelationshipQueryRegistry`] for `R` — a runtime-replaceable slot
+/// defaulting to `NoRelationshipQuery`'s own safe behavior (task 3.1) until
+/// `crate::social_graph::build_social_graph_module` registers its own real
+/// implementation into it (see [`visibility::RelationshipQueryRegistry`]'s
+/// own doc comment).
 pub type ConcreteStatusService = StatusService<
     ActorDirectory,
     ActorDirectory,
     ConcreteLocalSink,
     ConcreteHttpSink,
-    NoRelationshipQuery,
+    RelationshipQueryRegistry,
     ActorDirectory,
 >;
 
@@ -275,7 +282,7 @@ pub type ConcreteInteractionService = InteractionService<
     ActorDirectory,
     ConcreteLocalSink,
     ConcreteHttpSink,
-    NoRelationshipQuery,
+    RelationshipQueryRegistry,
 >;
 
 /// The one concrete `PollService` instantiation this instance mounts — see
@@ -286,7 +293,7 @@ pub type ConcretePollService = PollService<
     ActorDirectory,
     ConcreteLocalSink,
     ConcreteHttpSink,
-    NoRelationshipQuery,
+    RelationshipQueryRegistry,
 >;
 
 /// The one concrete `StatusesEndpointsState` instantiation this instance
@@ -300,7 +307,7 @@ pub type ConcreteStatusesEndpointsState = StatusesEndpointsState<
     ActorDirectory,
     ConcreteLocalSink,
     ConcreteHttpSink,
-    NoRelationshipQuery,
+    RelationshipQueryRegistry,
     ActorDirectory,
 >;
 
@@ -433,6 +440,7 @@ pub struct StatusesModule {
     interaction_service: Arc<ConcreteInteractionService>,
     poll_service: Arc<ConcretePollService>,
     notifications: NotificationSinkRegistry,
+    relationship_query: RelationshipQueryRegistry,
 }
 
 impl StatusesModule {
@@ -461,6 +469,20 @@ impl StatusesModule {
     pub fn notification_sink_registry(&self) -> NotificationSinkRegistry {
         self.notifications.clone()
     }
+
+    /// The shared [`RelationshipQueryRegistry`] handle (feature-level
+    /// `kiro-validate-impl` remediation round 1) — cheap to clone, mirrors
+    /// [`Self::notification_sink_registry`]'s identical shape.
+    /// `crate::social_graph::build_social_graph_module` calls
+    /// `.set_relationship_query(...)` on the clone returned here to swap in
+    /// its own real, follow-graph-backed `RelationshipQuery` implementation,
+    /// reaching every `is_visible`/`derive_recipients` call site this
+    /// module's `status_service`/`interaction_service`/`poll_service`
+    /// already hold without touching any of their call sites (see
+    /// [`visibility::RelationshipQueryRegistry`]'s own doc comment).
+    pub fn relationship_query_registry(&self) -> RelationshipQueryRegistry {
+        self.relationship_query.clone()
+    }
 }
 
 /// Assembles the statuses-core module bundle (task 7.2, Requirements 4.3,
@@ -471,8 +493,12 @@ impl StatusesModule {
 /// second, divergent directory), one [`ConcreteStatusActivityBuilder`] per
 /// service (each cloning the same `delivery` `Arc` — see
 /// `activity_builder.rs`'s own doc comment on why that field is now an
-/// `Arc`), and the three services themselves, each defaulted to
-/// [`NoRelationshipQuery`] (social-graph has not landed).
+/// `Arc`), and the three services themselves, each sharing one freshly built
+/// [`RelationshipQueryRegistry`] (defaulting to [`NoRelationshipQuery`]'s
+/// own safe behavior until `crate::social_graph::build_social_graph_module`
+/// registers its own real implementation into the clone
+/// [`StatusesModule::relationship_query_registry`] returns — see that
+/// registry's own doc comment).
 ///
 /// `delivery` is `Arc<ConcreteDeliveryService>` — the exact type
 /// `crate::federation::FederationModule::delivery_service` returns a
@@ -498,6 +524,7 @@ pub fn build_statuses_module(
 ) -> StatusesModule {
     let domain = domain.into();
     let urls = ActorUrls::new(domain.clone());
+    let relationship_query = RelationshipQueryRegistry::new();
 
     let status_builder = ConcreteStatusActivityBuilder::new(
         urls.clone(),
@@ -524,7 +551,7 @@ pub fn build_statuses_module(
         domain.clone(),
         urls.clone(),
         status_builder,
-        NoRelationshipQuery,
+        relationship_query.clone(),
         ActorDirectory::new(pool.clone()),
         notifications.clone(),
     ));
@@ -535,7 +562,7 @@ pub fn build_statuses_module(
         urls.clone(),
         interaction_builder,
         ActorDirectory::new(pool.clone()),
-        NoRelationshipQuery,
+        relationship_query.clone(),
         notifications.clone(),
     ));
 
@@ -545,7 +572,7 @@ pub fn build_statuses_module(
         urls,
         poll_builder,
         ActorDirectory::new(pool),
-        NoRelationshipQuery,
+        relationship_query.clone(),
     ));
 
     StatusesModule {
@@ -553,6 +580,7 @@ pub fn build_statuses_module(
         interaction_service,
         poll_service,
         notifications,
+        relationship_query,
     }
 }
 
@@ -577,6 +605,24 @@ pub fn build_statuses_module(
 /// under construction right now" choke point exists on the accounts-and-
 /// instance side the way `InboundActivityDispatcher::register` created for
 /// `register_downstream_handlers`.
+///
+/// `relationship_query` (feature-level `kiro-validate-impl` remediation
+/// round 1 follow-up, 2026-07-31: this parameter closed the one consumer the
+/// prior round's own [`visibility::RelationshipQueryRegistry`] introduction
+/// missed — [`account_provider::AccountStatusesProviderImpl`] still
+/// constructed a bare [`visibility::NoRelationshipQuery`] directly) is
+/// `crate::statuses::build_statuses_module`'s own
+/// [`StatusesModule::relationship_query_registry`] — every caller already
+/// calls `build_statuses_module` before this function (see this doc
+/// comment's own ordering note above), so `statuses_module
+/// .relationship_query_registry()` can be passed straight in, no reordering
+/// required. `AccountStatusesProviderImpl::visible_to` then consults the
+/// exact same registry [`ConcreteStatusService`]/[`ConcreteInteractionService`]/
+/// [`ConcretePollService`] already share, so `crate::social_graph::
+/// build_social_graph_module` registering its own real implementation into
+/// it (already the case before this follow-up) now also reaches `GET
+/// /api/v1/accounts/:id/statuses`, not just the direct-status-retrieval and
+/// interaction/poll endpoints.
 pub fn register_account_ports(
     pool: PgPool,
     runtime: RuntimeContext,
@@ -584,6 +630,7 @@ pub fn register_account_ports(
     ports: AccountPortsRegistry,
     accounts: Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>>,
     media_store: LocalFsStore,
+    relationship_query: RelationshipQueryRegistry,
 ) {
     let statuses_provider = account_provider::AccountStatusesProviderImpl::new(
         pool.clone(),
@@ -591,6 +638,7 @@ pub fn register_account_ports(
         domain,
         accounts,
         media_store,
+        relationship_query,
     );
     ports.set_statuses_provider(Arc::new(statuses_provider));
     ports.set_counts_provider(Arc::new(account_provider::AccountCountsContribution::new(

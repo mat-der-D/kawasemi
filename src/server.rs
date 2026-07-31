@@ -82,7 +82,7 @@ use crate::statuses::endpoints::{
     STATUS_SOURCE_PATH, STATUS_UNBOOKMARK_PATH, STATUS_UNFAVOURITE_PATH, STATUS_UNPIN_PATH,
     STATUS_UNREBLOG_PATH, STATUSES_PATH,
 };
-use crate::statuses::visibility::NoRelationshipQuery;
+use crate::statuses::visibility::RelationshipQueryRegistry;
 use crate::statuses::{ConcreteHttpSink, ConcreteLocalSink, ConcreteStatusesEndpointsState};
 use crate::telemetry;
 
@@ -505,7 +505,7 @@ type SA = ActorDirectory;
 type SD = ActorDirectory;
 type SL = ConcreteLocalSink;
 type SH = ConcreteHttpSink;
-type SR = NoRelationshipQuery;
+type SR = RelationshipQueryRegistry;
 type SM = ActorDirectory;
 
 /// statuses-core's route group (task 7.2, `_Boundary: StatusesModule,
