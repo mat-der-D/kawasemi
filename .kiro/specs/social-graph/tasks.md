@@ -131,7 +131,7 @@
   - _Boundary: SocialGraphEndpoints, FollowService, FollowRequestService, BlockService, MuteService_
   - _Depends: 5.2_
 
-- [ ] 6.2 (P) 受信処理・署名拒否・プロバイダ統合テスト
+- [x] 6.2 (P) 受信処理・署名拒否・プロバイダ統合テスト
   - 受信 Follow/Accept/Reject/Block/Undo の状態遷移と冪等、ブロック後の連合受信拒否と解除後の復帰、関係状態プロバイダ供給後に accounts の relationships が実値を返すことを統合検証する
   - 受信往復・署名拒否・プロバイダ供給が期待どおり動作することをテストで確認できる状態
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 8.2, 8.3_
