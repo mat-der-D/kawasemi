@@ -25,7 +25,7 @@ pub mod dedup;
 pub mod dispatcher;
 pub mod service;
 
-pub use block_policy::{BlockPolicy, LocalRecipientContext, NoopBlockPolicy};
+pub use block_policy::{BlockPolicy, BlockPolicyRegistry, LocalRecipientContext, NoopBlockPolicy};
 pub use dedup::{
     DEFAULT_RECEIVED_ACTIVITY_RETENTION, DbReceivedActivityStore, ReceivedActivityStore,
 };

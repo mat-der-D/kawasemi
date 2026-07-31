@@ -97,6 +97,7 @@ use crate::config::{
     OauthConfig, OwnerConfig, Secret, ServerConfig, StatusesConfig,
 };
 use crate::db;
+use crate::federation::inbound::InboundActivityDispatcher;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{self, FederationWiringConfig};
 use crate::media;
@@ -104,6 +105,7 @@ use crate::migrate;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::server;
+use crate::social_graph;
 use crate::state::AppState;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{self, ProdRemoteActorResolver};
@@ -389,6 +391,29 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
     // identical wiring.
     let notifications = NotificationSinkRegistry::new();
 
+    // Task 5.2: assembles social-graph's own `RemoteAccountFetcher` and
+    // registration closure the same way `crate::test_harness::spawn_test_app`
+    // does — *before* `federation::build_federation_module` runs (see that
+    // function's own doc comment) — using this paired instance's own
+    // caller-supplied `http_client` (`insecure_loopback`), mirroring
+    // `statuses_remote_actor_fetcher`'s own identical reachability reasoning
+    // immediately above.
+    let social_graph_remote_actor_fetcher = Arc::new(RemoteAccountFetcher::new(
+        pool.clone(),
+        Arc::clone(&http_client),
+        runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    ));
+    let (social_graph_register_downstream, social_graph_pending_delivery) =
+        social_graph::register_downstream_handlers(
+            pool.clone(),
+            runtime.clone(),
+            config.server.domain.clone(),
+            Arc::clone(actor_module.directory()),
+            Arc::clone(&social_graph_remote_actor_fetcher),
+            notifications.clone(),
+        );
+
     // Requirement 13.1: `http_client` is the caller-supplied
     // `ReqwestFederationHttpClient::insecure_loopback()` instance (see
     // `spawn_federation_pair`), so this instance's own outbound public-key
@@ -412,25 +437,33 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
             pruning_interval: PAIR_PRUNING_INTERVAL,
         },
         Arc::clone(&http_client),
-        // statuses-core task 8.3: registers statuses-core's six post-related
-        // inbound handlers against this paired instance's own live
-        // dispatcher, exactly as `crate::test_harness::spawn_test_app`'s
+        // statuses-core task 8.3 / social-graph task 5.2: registers both
+        // specs' own inbound handlers against this paired instance's own
+        // live dispatcher, exactly as `crate::test_harness::spawn_test_app`'s
         // production-mirroring composition already does — this module's own
         // doc comment ("Why not `spawn_test_app`") is the reason this
         // harness cannot simply call `spawn_test_app` twice instead of
-        // reimplementing this same wiring, and this call site is the one
-        // this module's previous revision's own doc comment (superseded by
-        // this edit) explicitly earmarked for a later statuses-core task to
-        // extend once a genuine 2-instance statuses round trip was needed.
-        statuses::register_downstream_handlers(
-            pool.clone(),
-            runtime.clone(),
-            config.server.domain.clone(),
-            statuses_remote_actor_resolver,
-            notifications.clone(),
-        ),
+        // reimplementing this same wiring.
+        {
+            let statuses_register = statuses::register_downstream_handlers(
+                pool.clone(),
+                runtime.clone(),
+                config.server.domain.clone(),
+                statuses_remote_actor_resolver,
+                notifications.clone(),
+            );
+            move |dispatcher: &mut InboundActivityDispatcher| {
+                statuses_register(dispatcher);
+                social_graph_register_downstream(dispatcher);
+            }
+        },
     );
     federation_background.spawn();
+
+    // Task 5.2: fills in the deferred delivery cell now that a real
+    // `Arc<ConcreteDeliveryService>` finally exists — see
+    // `social_graph::PendingDeliveryService`'s own doc comment.
+    social_graph_pending_delivery.resolve(Arc::clone(federation_module.delivery_service()));
 
     // Mirrors `crate::test_harness::spawn_test_app`'s own media-pipeline
     // wiring (task 5.2): builds the module the same way, and starts its
@@ -473,6 +506,24 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         runtime.clone(),
         config.server.domain.clone(),
         Arc::clone(federation_module.delivery_service()),
+        notifications.clone(),
+    );
+
+    // Task 5.2: assembles the social-graph module bundle the same way
+    // `crate::test_harness::spawn_test_app` does
+    // (`crate::social_graph::build_social_graph_module`), reusing this
+    // paired instance's own `social_graph_remote_actor_fetcher`/
+    // `notifications` built above.
+    let social_graph_module = social_graph::build_social_graph_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        social_graph_remote_actor_fetcher,
+        Arc::clone(federation_module.delivery_service()),
+        federation_module.block_policy(),
+        accounts_module.ports(),
+        accounts_module.service(),
         notifications,
     );
 
@@ -486,6 +537,7 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         media_module,
         accounts_module,
         statuses_module,
+        social_graph_module,
     );
     let router = server::build_router(state.clone());
 

@@ -38,6 +38,7 @@ use crate::federation::FederationModule;
 use crate::media::MediaModule;
 use crate::oauth::OauthModule;
 use crate::runtime::RuntimeContext;
+use crate::social_graph::SocialGraphModule;
 use crate::statuses::StatusesModule;
 
 /// The data `AppState` bundles, held behind a single `Arc` so cloning the
@@ -72,6 +73,14 @@ struct AppStateInner {
     /// bridge derives every mounted statuses/polls/bookmarks endpoint's own
     /// state from — see `crate::statuses::StatusesModule`'s own doc comment.
     statuses: StatusesModule,
+    /// social-graph's module bundle (task 5.2, Requirements 6.1, 7.1, 8.2,
+    /// 10.1): the shared `FollowService`/`FollowRequestService`/
+    /// `MuteService`/`BlockService` handles `src/server.rs`'s
+    /// `FromRef<AppState> for ConcreteSocialGraphEndpointsState` bridge
+    /// derives every mounted follow/follow_requests/mute/block endpoint's
+    /// own state from — see `crate::social_graph::SocialGraphModule`'s own
+    /// doc comment.
+    social_graph: SocialGraphModule,
 }
 
 /// Immutable, cheaply-cloneable shared handle bundling the database
@@ -126,6 +135,7 @@ impl AppState {
         media: MediaModule,
         accounts: AccountsModule,
         statuses: StatusesModule,
+        social_graph: SocialGraphModule,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -138,6 +148,7 @@ impl AppState {
                 media,
                 accounts,
                 statuses,
+                social_graph,
             }),
         }
     }
@@ -221,5 +232,14 @@ impl AppState {
     /// polls/bookmarks endpoint's own state from this handle.
     pub fn statuses(&self) -> &StatusesModule {
         &self.inner.statuses
+    }
+
+    /// The shared social-graph module bundle (task 5.2, Requirements 6.1,
+    /// 7.1, 8.2, 10.1): `src/server.rs`'s `FromRef<AppState> for
+    /// ConcreteSocialGraphEndpointsState` bridge derives every mounted
+    /// follow/follow_requests/mute/block endpoint's own state from this
+    /// handle.
+    pub fn social_graph(&self) -> &SocialGraphModule {
+        &self.inner.social_graph
     }
 }

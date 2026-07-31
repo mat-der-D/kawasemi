@@ -21,6 +21,7 @@ use sqlx::postgres::PgPoolOptions;
 
 use super::*;
 use crate::accounts::{self, AccountsModule};
+use crate::accounts::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::actor::keys::cache::KeyCache;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::{ActorModule, build_actor_module};
@@ -33,6 +34,7 @@ use crate::federation::{FederationModule, FederationWiringConfig, build_federati
 use crate::media::{self, MediaModule};
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
+use crate::social_graph::{SocialGraphModule, build_social_graph_module};
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{StatusesModule, build_statuses_module};
 
@@ -262,6 +264,41 @@ fn sample_statuses_module(
     )
 }
 
+/// Builds a `SocialGraphModule` (task 5.2), mirroring `sample_statuses_module`'s
+/// own "no real I/O beyond what construction itself needs" property:
+/// `build_social_graph_module` only ever stores `pool`/`runtime`/config
+/// values, clones the caller-supplied `directory`/`delivery` `Arc`s, and
+/// calls `set_policy`/`set_relationship_provider`/`set_counts_provider` on
+/// already-constructed, `connect_lazy`-safe registries (no real I/O either)
+/// — so this is safe against the same `connect_lazy` pool this suite's
+/// other fixtures use.
+fn sample_social_graph_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    directory: Arc<crate::actor::ActorDirectory>,
+    federation: &FederationModule,
+    accounts: &AccountsModule,
+) -> SocialGraphModule {
+    let fetcher = Arc::new(RemoteAccountFetcher::new(
+        pool.clone(),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    ));
+    build_social_graph_module(
+        pool,
+        runtime,
+        "state-test.social-graph.internal".to_string(),
+        directory,
+        fetcher,
+        Arc::clone(federation.delivery_service()),
+        federation.block_policy(),
+        accounts.ports(),
+        accounts.service(),
+        NotificationSinkRegistry::new(),
+    )
+}
+
 /// Requirements 1.1, 3.3, 5.5, 5.6: downstream code must be able to retrieve
 /// the pool, the injection boundaries (via `RuntimeContext`), and the
 /// validated config values from `AppState`, unchanged from what was passed
@@ -286,6 +323,13 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         config.media.clone(),
     );
     let statuses = sample_statuses_module(pool.clone(), runtime.clone(), &federation);
+    let social_graph = sample_social_graph_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        &federation,
+        &accounts,
+    );
 
     let state = AppState::new(
         pool,
@@ -297,6 +341,7 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         media,
         accounts,
         statuses,
+        social_graph,
     );
 
     // Config values are retrievable and match what was supplied.
@@ -358,9 +403,25 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
         config.media.clone(),
     );
     let statuses = sample_statuses_module(pool.clone(), runtime.clone(), &federation);
+    let social_graph = sample_social_graph_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        &federation,
+        &accounts,
+    );
 
     let state = AppState::new(
-        pool, runtime, config, actor, oauth, federation, media, accounts, statuses,
+        pool,
+        runtime,
+        config,
+        actor,
+        oauth,
+        federation,
+        media,
+        accounts,
+        statuses,
+        social_graph,
     );
     assert_eq!(Arc::strong_count(&state.inner), 1);
 

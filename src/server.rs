@@ -70,6 +70,11 @@ use crate::oauth::apps_endpoint::{self, AppsEndpointState};
 use crate::oauth::authorize_endpoint::{self, AuthorizeEndpointState};
 use crate::oauth::middleware::AuthState;
 use crate::oauth::token_endpoint::{self, TokenEndpointState};
+use crate::social_graph::activity_builder::PgRemoteActorLookup;
+use crate::social_graph::endpoints as social_graph_endpoints;
+use crate::social_graph::{
+    ConcreteHttpSink as SgConcreteHttpSink, ConcreteLocalSink as SgConcreteLocalSink,
+};
 use crate::state::AppState;
 use crate::statuses::endpoints::{
     self, BOOKMARKS_PATH, POLL_PATH, POLL_VOTES_PATH, STATUS_BOOKMARK_PATH, STATUS_CONTEXT_PATH,
@@ -142,6 +147,18 @@ const ACCOUNTS_SHOW_PATH: &str = "/api/v1/accounts/{id}";
 const ACCOUNTS_STATUSES_PATH: &str = "/api/v1/accounts/{id}/statuses";
 const INSTANCE_V2_PATH: &str = "/api/v2/instance";
 const CUSTOM_EMOJIS_PATH: &str = "/api/v1/custom_emojis";
+
+/// social-graph's route group paths (task 5.2, design.md's `SocialGraphEndpoints`
+/// API Contract table, `src/social_graph/endpoints.rs`'s own doc comment).
+const SG_FOLLOW_PATH: &str = "/api/v1/accounts/{id}/follow";
+const SG_UNFOLLOW_PATH: &str = "/api/v1/accounts/{id}/unfollow";
+const SG_FOLLOW_REQUESTS_PATH: &str = "/api/v1/follow_requests";
+const SG_FOLLOW_REQUEST_AUTHORIZE_PATH: &str = "/api/v1/follow_requests/{id}/authorize";
+const SG_FOLLOW_REQUEST_REJECT_PATH: &str = "/api/v1/follow_requests/{id}/reject";
+const SG_MUTE_PATH: &str = "/api/v1/accounts/{id}/mute";
+const SG_UNMUTE_PATH: &str = "/api/v1/accounts/{id}/unmute";
+const SG_BLOCK_PATH: &str = "/api/v1/accounts/{id}/block";
+const SG_UNBLOCK_PATH: &str = "/api/v1/accounts/{id}/unblock";
 
 /// Rate-limit policy applied to the whole router (task 7.1, api-foundation
 /// Requirements 8.1-8.4): a single-owner deployment ("一人鯖前提") has
@@ -310,6 +327,85 @@ impl FromRef<AppState> for ConcreteStatusesEndpointsState {
             auth: AuthState::from_ref(state),
         }
     }
+}
+
+/// Names social-graph's endpoint handlers' own five generic type parameters
+/// (`AL, AR, D, LS, HS`) with this instance's one concrete instantiation
+/// (`crate::social_graph::ConcreteSocialGraphEndpointsState`'s identical
+/// type argument list) — mirrors [`SA`]/[`SD`]/[`SL`]/[`SH`]/[`SR`]/[`SM`]'s
+/// identical rationale for [`statuses_router`], below.
+type SgAl = ActorDirectory;
+type SgAr = PgRemoteActorLookup;
+type SgD = ActorDirectory;
+type SgLs = SgConcreteLocalSink;
+type SgHs = SgConcreteHttpSink;
+
+/// Bridges `AppState` to
+/// [`crate::social_graph::ConcreteSocialGraphEndpointsState`] (task 5.2,
+/// `_Boundary: SocialGraphModule_`), mirroring
+/// [`ConcreteStatusesEndpointsState`]'s own `FromRef` bridge immediately
+/// above: `AppState::social_graph()`'s already-built `FollowService`/
+/// `FollowRequestService`/`MuteService`/`BlockService` handles (task 5.2's
+/// own `SocialGraphModule`) are `Arc` clones, never freshly constructed
+/// here.
+impl FromRef<AppState> for crate::social_graph::ConcreteSocialGraphEndpointsState {
+    fn from_ref(state: &AppState) -> Self {
+        crate::social_graph::ConcreteSocialGraphEndpointsState {
+            follow: state.social_graph().follow(),
+            follow_requests: state.social_graph().follow_requests(),
+            mute: state.social_graph().mute(),
+            block: state.social_graph().block(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
+/// social-graph's route group (task 5.2, `_Boundary: SocialGraphModule_`,
+/// design.md's `SocialGraphEndpoints` API Contract table): every
+/// follow/follow_requests/mute/block path `src/social_graph/endpoints.rs`
+/// (task 5.1) implements, mounted onto its nine real handlers monomorphized
+/// over this instance's one concrete type argument list ([`SgAl`]/[`SgAr`]/
+/// [`SgD`]/[`SgLs`]/[`SgHs`], above). Kept as a separate `.merge()`-able
+/// group mirroring [`accounts_router`]/[`statuses_router`]'s own precedent —
+/// no real per-instance config is needed to build it either.
+fn social_graph_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            SG_FOLLOW_PATH,
+            post(social_graph_endpoints::follow::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_UNFOLLOW_PATH,
+            post(social_graph_endpoints::unfollow::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_FOLLOW_REQUESTS_PATH,
+            get(social_graph_endpoints::list_follow_requests::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_FOLLOW_REQUEST_AUTHORIZE_PATH,
+            post(social_graph_endpoints::authorize_follow_request::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_FOLLOW_REQUEST_REJECT_PATH,
+            post(social_graph_endpoints::reject_follow_request::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_MUTE_PATH,
+            post(social_graph_endpoints::mute::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_UNMUTE_PATH,
+            post(social_graph_endpoints::unmute::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_BLOCK_PATH,
+            post(social_graph_endpoints::block::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_UNBLOCK_PATH,
+            post(social_graph_endpoints::unblock::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
 }
 
 /// Path of the minimal liveness route this task adds (Requirement 1.1).
@@ -588,6 +684,10 @@ pub fn build_router(state: AppState) -> Router {
         // immediately above — no `state`-derived sizing is needed here
         // either.
         .merge(statuses_router())
+        // task 5.2: merged the same way `statuses_router`/`accounts_router`/
+        // `media_router` are, immediately above — no `state`-derived sizing
+        // is needed here either.
+        .merge(social_graph_router())
         .layer(rate_limit_layer(
             rate_limit_clock,
             RateLimitPolicy::new(RATE_LIMIT_PER_WINDOW, RATE_LIMIT_WINDOW),

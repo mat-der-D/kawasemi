@@ -212,7 +212,12 @@ async fn federation_pair_round_trip_verifies_signature_and_dispatch_and_local_ht
 
     let a_domain = test_domain(&a);
     let activity_id = format!("https://{a_domain}/activities/federation-pair-1");
-    let activity_body: Value = json!({ "id": activity_id, "type": "Follow" });
+    // "Arrive", not "Follow": a generic, handler-agnostic outer Activity
+    // type -- social-graph's task 5.2 now registers a real "Follow" handler
+    // that requires an "actor"/"object" this minimal placeholder body never
+    // carries (mirrors `tests/federation_bootstrap_it.rs`'s identical fix,
+    // same underlying reason).
+    let activity_body: Value = json!({ "id": activity_id, "type": "Arrive" });
 
     // Requirement 10.1/10.2's "one canonical Activity, one resolution"
     // invariant: this single `deliver()` call builds exactly one canonical

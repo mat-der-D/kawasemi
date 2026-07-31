@@ -37,10 +37,17 @@
 //!   `HttpSignatureVerifier<DbFederationPublicKeyResolver<ReqwestFederationHttpClient>>`
 //!   — the production HTTP client backs both public-key resolution and
 //!   outbound signing/negotiation.
-//! - `B` (`BlockPolicy`) = [`ConcreteBlockPolicy`] = `NoopBlockPolicy` — this
-//!   task's own text names exactly this as the port to wire
-//!   ("既定ブロックポリシー"); a real block-graph-backed implementation is
-//!   social-graph's (a later spec's) job.
+//! - `B` (`BlockPolicy`) = [`ConcreteBlockPolicy`] = `BlockPolicyRegistry`
+//!   (task 5.2's own addition — originally a bare `NoopBlockPolicy`; this
+//!   task's own text named exactly this as the port to wire
+//!   ("既定ブロックポリシー")). [`super::inbound::BlockPolicyRegistry`] is a
+//!   runtime-replaceable slot defaulting to `NoopBlockPolicy`, mirroring
+//!   `ObjectDocumentRegistry`/`OutboxSourceRegistry`'s own live-registration
+//!   idiom (see "Downstream registration surface" below) — social-graph
+//!   (task 5.2, `SocialGraphModule` wiring) registers its own
+//!   `blocks`-table-backed implementation into it via
+//!   [`FederationModule::block_policy`]`().set_policy(...)`, after this
+//!   module is already constructed.
 //! - `D` (`ReceivedActivityStore`) = [`ConcreteReceivedActivityStore`] =
 //!   `DbReceivedActivityStore`.
 //! - `DeliveryQueue` = `DbDeliveryQueue`; the delivery-common-part's
@@ -141,7 +148,7 @@ use super::endpoints::{
     OutboxSourceRegistry, OutboxState, WebfingerState,
 };
 use super::inbound::{
-    DbReceivedActivityStore, InboundActivityDispatcher, InboxService, NoopBlockPolicy,
+    BlockPolicyRegistry, DbReceivedActivityStore, InboundActivityDispatcher, InboxService,
     ReceivedActivityStore,
 };
 use super::outbound::{
@@ -161,10 +168,12 @@ pub type ConcreteVerifier =
     HttpSignatureVerifier<DbFederationPublicKeyResolver<ReqwestFederationHttpClient>>;
 
 /// The one concrete [`super::inbound::BlockPolicy`] implementation this
-/// instance mounts with — the "既定ブロックポリシー" this task's own text
-/// names. A real block-graph-backed implementation is social-graph's (a
-/// later spec's) job.
-pub type ConcreteBlockPolicy = NoopBlockPolicy;
+/// instance mounts with — [`super::inbound::BlockPolicyRegistry`] (task
+/// 5.2's own addition), a runtime-replaceable slot defaulting to
+/// `NoopBlockPolicy` (the "既定ブロックポリシー" this task's own text
+/// originally named) until social-graph registers its own block-graph-
+/// backed implementation — see this module's doc comment.
+pub type ConcreteBlockPolicy = BlockPolicyRegistry;
 
 /// The one concrete [`super::inbound::ReceivedActivityStore`] implementation
 /// this instance mounts with.
@@ -300,6 +309,10 @@ pub struct FederationModule {
     outbox_sources: OutboxSourceRegistry,
     inbox: Arc<ConcreteInboxService>,
     delivery: Arc<ConcreteDeliveryService>,
+    /// The live, downstream-registrable [`BlockPolicy`](super::inbound::BlockPolicy)
+    /// slot (task 5.2's own addition) — see [`Self::block_policy`]'s own doc
+    /// comment.
+    block_policy: BlockPolicyRegistry,
 }
 
 impl FederationModule {
@@ -381,6 +394,21 @@ impl FederationModule {
     /// is already sufficient.
     pub fn delivery_service(&self) -> &Arc<ConcreteDeliveryService> {
         &self.delivery
+    }
+
+    /// The live, downstream-registrable [`BlockPolicy`](super::inbound::BlockPolicy)
+    /// slot (task 5.2, Requirement 6.1): a clone of the exact same
+    /// [`BlockPolicyRegistry`] this instance's own [`ConcreteInboxService`]/
+    /// [`ConcreteDeliveryService`] were constructed with — calling
+    /// `.set_policy(...)` on the value returned here is observed by every
+    /// subsequent inbound-Activity block judgment through the real,
+    /// already-constructed pipeline, even though registration happens after
+    /// this `FederationModule` already exists (mirrors
+    /// [`Self::object_documents`]/[`Self::outbox_sources`]'s identical
+    /// live-registration guarantee — see this module's doc comment,
+    /// "Downstream registration surface").
+    pub fn block_policy(&self) -> &BlockPolicyRegistry {
+        &self.block_policy
     }
 }
 
@@ -501,9 +529,18 @@ pub fn build_federation_module(
     let mut dispatcher = InboundActivityDispatcher::new();
     register_downstream(&mut dispatcher);
 
+    // Task 5.2's own addition: a live, downstream-registrable slot (see this
+    // module's doc comment, "Downstream registration surface") in place of a
+    // single hardcoded `NoopBlockPolicy` value — defaults to exactly the
+    // same never-blocks behavior for every caller that never registers a
+    // real implementation, but a downstream spec (social-graph) can replace
+    // it after this `FederationModule` is already constructed via
+    // `FederationModule::block_policy().set_policy(...)`.
+    let block_policy = BlockPolicyRegistry::new();
+
     let inbox = Arc::new(InboxService::new(
         inbox_verifier,
-        NoopBlockPolicy,
+        block_policy.clone(),
         dedup_for_inbox,
         dispatcher,
         urls.clone(),
@@ -555,6 +592,7 @@ pub fn build_federation_module(
         outbox_sources,
         inbox,
         delivery,
+        block_policy,
     };
 
     let background = FederationBackgroundTasks {

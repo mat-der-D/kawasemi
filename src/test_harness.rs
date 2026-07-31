@@ -95,6 +95,7 @@ use crate::config::{
     OauthConfig, OwnerConfig, Secret, ServerConfig, StatusesConfig,
 };
 use crate::db;
+use crate::federation::inbound::InboundActivityDispatcher;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{self, FederationWiringConfig};
 use crate::media;
@@ -102,6 +103,7 @@ use crate::migrate;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::server;
+use crate::social_graph;
 use crate::state::AppState;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{self, ProdRemoteActorResolver};
@@ -650,6 +652,28 @@ pub async fn spawn_test_app() -> TestApp {
     // call site.
     let notifications = NotificationSinkRegistry::new();
 
+    // Assembles social-graph's own `RemoteAccountFetcher` (task 5.2) the
+    // same way `bootstrap()`'s production path does — *before*
+    // `federation::build_federation_module` runs, since
+    // `social_graph::register_downstream_handlers` must be composed into
+    // that function's own `register_downstream` closure before it runs (see
+    // `src/federation/module.rs`'s own doc comment).
+    let social_graph_remote_actor_fetcher = Arc::new(RemoteAccountFetcher::new(
+        pool.clone(),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    ));
+    let (social_graph_register_downstream, social_graph_pending_delivery) =
+        social_graph::register_downstream_handlers(
+            pool.clone(),
+            runtime.clone(),
+            config.server.domain.clone(),
+            Arc::clone(actor_module.directory()),
+            Arc::clone(&social_graph_remote_actor_fetcher),
+            notifications.clone(),
+        );
+
     // Assembles the federation-core port bundle (task 5.4) the same way
     // `bootstrap()`'s production path does
     // (`crate::federation::build_federation_module`), sharing this
@@ -657,9 +681,9 @@ pub async fn spawn_test_app() -> TestApp {
     // shorter background-task poll cadence (see `TEST_DELIVERY_POLL_INTERVAL`'s
     // own doc comment) so integration tests observing delivery/pruning
     // completion do not need to wait production's several-seconds interval.
-    // The final argument (task 7.2's own addition) registers statuses-core's
-    // six post-related inbound handlers against this instance's own live
-    // dispatcher, exactly as `bootstrap()`'s production path does.
+    // The final argument composes both statuses-core's and social-graph's
+    // own registration closures (task 7.2 / task 5.2), exactly as
+    // `bootstrap()`'s production path does.
     let (federation_module, federation_background) = federation::build_federation_module(
         pool.clone(),
         runtime.clone(),
@@ -678,15 +702,28 @@ pub async fn spawn_test_app() -> TestApp {
             pruning_interval: TEST_PRUNING_INTERVAL,
         },
         Arc::new(ReqwestFederationHttpClient::new()),
-        statuses::register_downstream_handlers(
-            pool.clone(),
-            runtime.clone(),
-            config.server.domain.clone(),
-            statuses_remote_actor_resolver,
-            notifications.clone(),
-        ),
+        {
+            let statuses_register = statuses::register_downstream_handlers(
+                pool.clone(),
+                runtime.clone(),
+                config.server.domain.clone(),
+                statuses_remote_actor_resolver,
+                notifications.clone(),
+            );
+            move |dispatcher: &mut InboundActivityDispatcher| {
+                statuses_register(dispatcher);
+                social_graph_register_downstream(dispatcher);
+            }
+        },
     );
     federation_background.spawn();
+
+    // Task 5.2: fills in the deferred delivery cell now that a real
+    // `Arc<ConcreteDeliveryService>` finally exists — see
+    // `social_graph::PendingDeliveryService`'s own doc comment. Strictly
+    // before this harness's own listener starts serving (several steps
+    // below), so no request can ever observe an unresolved cell.
+    social_graph_pending_delivery.resolve(Arc::clone(federation_module.delivery_service()));
 
     // Assembles the media-pipeline module bundle (task 5.2) the same way
     // `bootstrap()`'s production path does
@@ -734,7 +771,7 @@ pub async fn spawn_test_app() -> TestApp {
         runtime.clone(),
         config.server.domain.clone(),
         Arc::clone(federation_module.delivery_service()),
-        notifications,
+        notifications.clone(),
     );
 
     // Supplies statuses-core's own real implementations of the two
@@ -753,6 +790,25 @@ pub async fn spawn_test_app() -> TestApp {
         media_module.store().clone(),
     );
 
+    // Assembles the social-graph module bundle (task 5.2) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::social_graph::build_social_graph_module`) — must run after
+    // `statuses::register_account_ports` immediately above, so this call's
+    // own composed `AccountCountsProvider` registration is the last (and
+    // therefore observed) one.
+    let social_graph_module = social_graph::build_social_graph_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        social_graph_remote_actor_fetcher,
+        Arc::clone(federation_module.delivery_service()),
+        federation_module.block_policy(),
+        accounts_module.ports(),
+        accounts_module.service(),
+        notifications,
+    );
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
@@ -763,6 +819,7 @@ pub async fn spawn_test_app() -> TestApp {
         media_module,
         accounts_module,
         statuses_module,
+        social_graph_module,
     );
     let router = server::build_router(state.clone());
 

@@ -97,6 +97,7 @@ use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::config::{self, AppConfig, ConfigError};
 use crate::db::{self, DbError};
 use crate::error::AppError;
+use crate::federation::inbound::InboundActivityDispatcher;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{self, FederationWiringConfig};
 use crate::media;
@@ -104,6 +105,7 @@ use crate::migrate::{self, MigrateError};
 use crate::oauth::OauthModule;
 use crate::runtime::{RuntimeContext, SnowflakeIdGenerator, SystemClock, SystemRng};
 use crate::server::{self, ServeError};
+use crate::social_graph;
 use crate::state::AppState;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{self, ProdRemoteActorResolver};
@@ -410,6 +412,34 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     // `statuses::build_statuses_module`'s own doc comment.
     let notifications = NotificationSinkRegistry::new();
 
+    // Assembles social-graph's own `RemoteAccountFetcher` (task 5.2,
+    // `_Boundary: SocialGraphModule_`) the same way `statuses_remote_actor_fetcher`
+    // immediately above does — *before* `federation::build_federation_module`
+    // runs, since `social_graph::register_downstream_handlers` (registering
+    // `SocialGraphInboundHandler` against the live `InboundActivityDispatcher`,
+    // Requirement 7.1) must be composed into that function's own
+    // `register_downstream` closure before it runs (see
+    // `src/federation/module.rs`'s own doc comment, "DOWNSTREAM DISPATCHER
+    // REGISTRATION POINT"). Shared afterward with `build_social_graph_module`'s
+    // own `BlockPolicyImpl` construction below, so both this instance's
+    // signer-resolution call sites reuse the same `RemoteAccountFetcher`
+    // cache.
+    let social_graph_remote_actor_fetcher = Arc::new(RemoteAccountFetcher::new(
+        pool.clone(),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    ));
+    let (social_graph_register_downstream, social_graph_pending_delivery) =
+        social_graph::register_downstream_handlers(
+            pool.clone(),
+            runtime.clone(),
+            cfg.server.domain.clone(),
+            Arc::clone(actor_module.directory()),
+            Arc::clone(&social_graph_remote_actor_fetcher),
+            notifications.clone(),
+        );
+
     // Assembles the federation-core port bundle (task 5.4, Requirements 7.3,
     // 10.1, 11.1, 11.2): every federation-core port constructed with one
     // concrete production type (`crate::federation::build_federation_module`),
@@ -437,19 +467,39 @@ async fn build_state() -> Result<AppState, BootstrapError> {
             time::Duration::days(cfg.federation.received_activity_retention_days as i64),
         ),
         Arc::new(ReqwestFederationHttpClient::new()),
-        statuses::register_downstream_handlers(
-            pool.clone(),
-            runtime.clone(),
-            cfg.server.domain.clone(),
-            statuses_remote_actor_resolver,
-            notifications.clone(),
-        ),
+        {
+            // Composes both specs' own registration closures into the one
+            // `register_downstream` call `build_federation_module` accepts
+            // (`src/federation/module.rs`'s own doc comment, "Downstream
+            // registration surface": "同じ closure 内で両 spec の
+            // register_*_handlers を順に呼ぶ").
+            let statuses_register = statuses::register_downstream_handlers(
+                pool.clone(),
+                runtime.clone(),
+                cfg.server.domain.clone(),
+                statuses_remote_actor_resolver,
+                notifications.clone(),
+            );
+            move |dispatcher: &mut InboundActivityDispatcher| {
+                statuses_register(dispatcher);
+                social_graph_register_downstream(dispatcher);
+            }
+        },
     );
     // Starts the delivery-worker poll loop and received-Activity pruning
     // loop as detached background tasks (never awaited here) — this call
     // returns immediately, so it does not delay `bootstrap()`'s own listener
     // bind below (Requirement: background tasks must not block startup).
     federation_background.spawn();
+
+    // Task 5.2: fills in the `SocialGraphInboundHandler`'s deferred delivery
+    // cell now that a real `Arc<ConcreteDeliveryService>` finally exists —
+    // see `social_graph::PendingDeliveryService`'s own doc comment for why
+    // this could not happen any earlier. Strictly before the HTTP listener
+    // starts serving (this function's own `serve_with_shutdown*` call is
+    // still several steps away), so no real inbound request can ever
+    // observe an unresolved cell.
+    social_graph_pending_delivery.resolve(Arc::clone(federation_module.delivery_service()));
 
     // Assembles the media-pipeline module bundle (task 5.2, Requirements
     // 1.1, 4.1, 9.5): builds the repository/queue/store/processor/service
@@ -514,7 +564,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         runtime.clone(),
         cfg.server.domain.clone(),
         Arc::clone(federation_module.delivery_service()),
-        notifications,
+        notifications.clone(),
     );
 
     // Supplies statuses-core's own real implementations of the two
@@ -533,6 +583,36 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         media_module.store().clone(),
     );
 
+    // Assembles the social-graph module bundle (task 5.2, Requirements 6.1,
+    // 8.2, 10.1) the same way `bootstrap()`'s production path assembles
+    // every other bundle above (`social_graph::build_social_graph_module`),
+    // sharing this same `pool`/`runtime`/`cfg.server.domain`/
+    // `actor_module`'s own `ActorDirectory`/`social_graph_remote_actor_fetcher`
+    // every other composition-root component above already shares, plus
+    // `federation_module`'s own `Arc<ConcreteDeliveryService>` and its live
+    // `BlockPolicyRegistry` (task 5.2's own addition to
+    // `src/federation/module.rs`), `accounts_module`'s own
+    // `AccountPortsRegistry`/`AccountService` handles, and this same
+    // `notifications` registry every other module above shares. Must run
+    // after `statuses::register_account_ports` immediately above, so this
+    // call's own `AccountCountsProvider` registration (a composed value —
+    // see `social_graph::CombinedAccountCountsProvider`'s own doc comment)
+    // is the last one, and therefore the one actually observed. No
+    // background task to spawn here — mirrors `accounts_module`'s own "no
+    // resident worker" precedent.
+    let social_graph_module = social_graph::build_social_graph_module(
+        pool.clone(),
+        runtime.clone(),
+        cfg.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        social_graph_remote_actor_fetcher,
+        Arc::clone(federation_module.delivery_service()),
+        federation_module.block_policy(),
+        accounts_module.ports(),
+        accounts_module.service(),
+        notifications,
+    );
+
     Ok(AppState::new(
         pool,
         runtime,
@@ -543,6 +623,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         media_module,
         accounts_module,
         statuses_module,
+        social_graph_module,
     ))
 }
 

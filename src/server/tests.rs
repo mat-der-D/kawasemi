@@ -33,6 +33,7 @@ use tracing_subscriber::registry::LookupSpan;
 
 use super::*;
 use crate::accounts;
+use crate::accounts::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::actor::build_actor_module;
 use crate::actor::keys::cache::KeyCache;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
@@ -46,6 +47,7 @@ use crate::federation::{FederationWiringConfig, build_federation_module};
 use crate::media;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
+use crate::social_graph;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::telemetry::{REQUEST_ID_FIELD, REQUEST_SPAN_NAME};
 
@@ -204,6 +206,30 @@ fn test_state(seed: u64) -> AppState {
         Arc::clone(federation_module.delivery_service()),
         NotificationSinkRegistry::new(),
     );
+    // Mirrors the statuses-module construction immediately above: builds the
+    // social-graph module bundle (task 5.2) the same way `bootstrap()`'s
+    // production path does (`crate::social_graph::build_social_graph_module`)
+    // — this bundle performs no I/O at construction time either (it only
+    // stores pool/runtime/config values and registers already-constructed,
+    // `connect_lazy`-safe registries).
+    let social_graph_remote_actor_fetcher = Arc::new(RemoteAccountFetcher::new(
+        pool.clone(),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    ));
+    let social_graph_module = social_graph::build_social_graph_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        social_graph_remote_actor_fetcher,
+        Arc::clone(federation_module.delivery_service()),
+        federation_module.block_policy(),
+        accounts_module.ports(),
+        accounts_module.service(),
+        NotificationSinkRegistry::new(),
+    );
     AppState::new(
         pool,
         runtime,
@@ -214,6 +240,7 @@ fn test_state(seed: u64) -> AppState {
         media_module,
         accounts_module,
         statuses_module,
+        social_graph_module,
     )
 }
 

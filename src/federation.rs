@@ -155,9 +155,9 @@ pub use endpoints::{
     nodeinfo_discovery, nodeinfo_document, object_get, outbox_get, shared_inbox, webfinger,
 };
 pub use inbound::{
-    BlockPolicy, DEFAULT_RECEIVED_ACTIVITY_RETENTION, DbReceivedActivityStore, HandleOutcome,
-    InboundActivityDispatcher, InboundActivityHandler, InboundContext, InboxOutcome, InboxService,
-    LocalRecipientContext, NoopBlockPolicy, ReceivedActivityStore,
+    BlockPolicy, BlockPolicyRegistry, DEFAULT_RECEIVED_ACTIVITY_RETENTION, DbReceivedActivityStore,
+    HandleOutcome, InboundActivityDispatcher, InboundActivityHandler, InboundContext, InboxOutcome,
+    InboxService, LocalRecipientContext, NoopBlockPolicy, ReceivedActivityStore,
 };
 pub use jsonld::{ParsedActivity, accepts_activitypub, parse_activity, serialize};
 pub use module::{

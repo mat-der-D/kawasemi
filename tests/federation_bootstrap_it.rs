@@ -59,6 +59,8 @@ use time::macros::format_description;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use kawasemi::accounts::model::{ProfileField, RemoteAccount};
+use kawasemi::accounts::remote_repository::upsert_remote;
 use kawasemi::actor::keys::material::generate_keypair;
 use kawasemi::actor::owner::create_owner;
 use kawasemi::actor::{ActorType, Handle, NewActor};
@@ -313,6 +315,43 @@ async fn seed_remote_public_key(app: &TestApp, key_id: &str, actor_uri: &str, pe
     .execute(&app.pool)
     .await
     .expect("seeding a cached remote public key must succeed");
+
+    // social-graph's task 5.2 registers a real, `blocks`-table-backed
+    // `BlockPolicy` (`BlockPolicyImpl`) against the live pipeline's block-
+    // check stage, which runs for *every* signed inbound request regardless
+    // of Activity type -- and which must resolve the verified signer's own
+    // `actor_uri` to an `AccountRef` (`ProdActorUriResolver::resolve_account_ref`)
+    // to look up `blocks` rows. Before this task, `NoopBlockPolicy` never
+    // touched signer resolution at all, so a signer whose only cached trace
+    // was its public key (this function's own original scope) was
+    // sufficient. Now the signer's `remote_accounts` cache row must also
+    // exist (fresh `fetched_at`, so the fallback resolver's cache-hit path
+    // short-circuits before ever attempting a live network fetch to an
+    // unreachable `remote.example` host in this test environment) --
+    // otherwise a genuinely correct, already-approved (task 4.2) fail-closed
+    // resolution failure surfaces as a 502, not a defect in the pipeline
+    // itself.
+    let id = app.runtime.ids.next_id();
+    upsert_remote(
+        &app.pool,
+        &RemoteAccount {
+            id,
+            actor_uri: actor_uri.to_string(),
+            username: "seeded-remote-signer".to_string(),
+            domain: "remote.example".to_string(),
+            display_name: "Seeded Remote Signer".to_string(),
+            note: String::new(),
+            url: actor_uri.to_string(),
+            avatar_url: None,
+            header_url: None,
+            fields: Vec::<ProfileField>::new(),
+            bot: false,
+            locked: false,
+            fetched_at: app.runtime.clock.now(),
+        },
+    )
+    .await
+    .expect("seeding the cached remote account must succeed");
 }
 
 async fn received_activity_exists(app: &TestApp, activity_id: &str) -> bool {
@@ -436,7 +475,16 @@ async fn signed_activity_posted_to_the_real_inbox_route_is_accepted_and_recorded
 
     let inbox_url = urls.inbox_url(&alice.handle);
     let activity_id = "https://remote.example/activities/bootstrap-it-1";
-    let body = json!({ "id": activity_id, "type": "Follow" })
+    // "Arrive" (not "Follow"): a generic, handler-agnostic outer Activity
+    // type deliberately chosen so this test proves the receive pipeline
+    // itself (signature verification -> dedup -> dispatch), never a
+    // particular downstream spec's own semantics -- social-graph's task 5.2
+    // now registers a real "Follow" handler that requires an "actor"/
+    // "object" this minimal placeholder body never carries, so "Follow" is
+    // no longer a safe placeholder type here (this dispatcher's own
+    // contract: an outer type with no registered handler is always a safe
+    // no-op, "Arrive" has none).
+    let body = json!({ "id": activity_id, "type": "Arrive" })
         .to_string()
         .into_bytes();
     let headers = sign_post_request(
@@ -478,8 +526,10 @@ async fn delivery_service_reached_through_federation_module_delivers_locally_and
 
     let activity_id = "https://kawasemi.bootstrap-it.internal/activities/deliver-1";
     let remote_inbox = "https://remote.example/users/nobody/inbox";
+    // "Arrive", not "Follow" -- see the identical note on this file's other
+    // generic-placeholder Activity body, above.
     let request = DeliveryRequest {
-        activity: json!({ "id": activity_id, "type": "Follow" }),
+        activity: json!({ "id": activity_id, "type": "Arrive" }),
         sender: sender.handle.clone(),
         recipients: vec![
             Recipient::Local(recipient.handle.clone()),
