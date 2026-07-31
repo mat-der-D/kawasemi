@@ -277,6 +277,7 @@ fn sample_social_graph_module(
     runtime: RuntimeContext,
     directory: Arc<crate::actor::ActorDirectory>,
     federation: &FederationModule,
+    statuses: &StatusesModule,
     accounts: &AccountsModule,
 ) -> SocialGraphModule {
     let fetcher = Arc::new(RemoteAccountFetcher::new(
@@ -293,6 +294,7 @@ fn sample_social_graph_module(
         fetcher,
         Arc::clone(federation.delivery_service()),
         federation.block_policy(),
+        &statuses.relationship_query_registry(),
         accounts.ports(),
         accounts.service(),
         NotificationSinkRegistry::new(),
@@ -328,6 +330,7 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         runtime.clone(),
         Arc::clone(actor.directory()),
         &federation,
+        &statuses,
         &accounts,
     );
 
@@ -408,6 +411,7 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
         runtime.clone(),
         Arc::clone(actor.directory()),
         &federation,
+        &statuses,
         &accounts,
     );
 

@@ -100,22 +100,34 @@
 //! `WHERE`-clause variants four independent boolean filters would otherwise
 //! require.
 //!
-//! ## `RelationshipQuery`: always `NoRelationshipQuery`, not a generic parameter
-//! Every other statuses-core service generic over `R: RelationshipQuery`
-//! (`StatusService`/`InteractionService`/`PollService`) is, in this crate's
-//! one production build, always monomorphized to
-//! [`visibility::NoRelationshipQuery`] (`crate::statuses`'s own `Concrete*`
-//! type aliases — social-graph has not landed). This module skips the
-//! generic parameter entirely and calls [`visibility::NoRelationshipQuery`]
-//! directly, the same "concrete, not generic" judgment call
+//! ## `RelationshipQuery`: [`RelationshipQueryRegistry`], not a generic parameter
+//! (updated by the feature-level `kiro-validate-impl` remediation round 1
+//! follow-up, 2026-07-31, closing a gap that round's own reviewer flagged:
+//! this module was the one consumer of `RelationshipQuery` left directly
+//! instantiating [`visibility::NoRelationshipQuery`] after
+//! [`visibility::RelationshipQueryRegistry`] was introduced for every other
+//! consumer.) Every other statuses-core service generic over
+//! `R: RelationshipQuery` (`StatusService`/`InteractionService`/
+//! `PollService`) is, in this crate's one production build, always
+//! monomorphized to [`visibility::RelationshipQueryRegistry`]
+//! (`crate::statuses`'s own `Concrete*` type aliases) — a runtime-replaceable
+//! slot `crate::social_graph::build_social_graph_module` registers its own
+//! real, follow-graph-backed implementation into, defaulting to
+//! [`visibility::NoRelationshipQuery`]'s own safe behavior until it does.
+//! This module skips the generic parameter entirely and instead holds one
+//! [`RelationshipQueryRegistry`] field, supplied at construction
+//! (`crate::statuses::register_account_ports`'s own `relationship_query`
+//! parameter — the exact same registry handle
+//! `crate::statuses::build_statuses_module`'s `StatusService`/
+//! `InteractionService`/`PollService` already share, see
+//! `crate::statuses::StatusesModule::relationship_query_registry`'s own doc
+//! comment), the same "concrete, not generic" judgment call
 //! `crate::statuses::ProdRemoteActorResolver` already makes for the same
-//! reason (a zero-field unit struct with exactly one real caller, adding a
-//! type parameter buys no real flexibility this task's tests need — a fake
-//! `RelationshipQuery` is only useful to a caller that can also *supply* an
-//! alternate one at construction, and no test in this task's own boundary
-//! needs a follower-aware private-post scenario beyond what
-//! `status_repository/tests.rs`'s/`visibility/tests.rs`'s own existing
-//! coverage already establishes for `NoRelationshipQuery` itself).
+//! reason (adding a type parameter buys no real flexibility this task's
+//! tests need — a fake `RelationshipQuery` is only useful to a caller that
+//! can also *supply* an alternate one at construction, and this module's own
+//! `new` already accepts exactly that via the registry's
+//! `set_relationship_query`).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -145,7 +157,7 @@ use crate::statuses::serializer::{
 };
 use crate::statuses::status_repository;
 use crate::statuses::tag_repository;
-use crate::statuses::visibility::{self, NoRelationshipQuery, RelationshipQuery};
+use crate::statuses::visibility::{self, RelationshipQuery, RelationshipQueryRegistry};
 
 /// Recovers the [`Id`] both ports need from an [`AccountRef`], regardless of
 /// local/remote-ness — mirrors `crate::accounts::ports::account_ref_id`'s
@@ -170,6 +182,7 @@ pub struct AccountStatusesProviderImpl {
     domain: String,
     accounts: Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>>,
     media_store: LocalFsStore,
+    relationship_query: RelationshipQueryRegistry,
 }
 
 impl AccountStatusesProviderImpl {
@@ -178,14 +191,18 @@ impl AccountStatusesProviderImpl {
     /// domain — see this module's doc comment, "Rendering without a live
     /// request's own forwarded origin"), `accounts` (Account-embed
     /// rendering, `crate::accounts::build_accounts_module`'s own
-    /// `AccountService` handle), and `media_store` (media URL rendering,
-    /// `crate::media::build_media_module`'s own `LocalFsStore` handle).
+    /// `AccountService` handle), `media_store` (media URL rendering,
+    /// `crate::media::build_media_module`'s own `LocalFsStore` handle), and
+    /// `relationship_query` (the live [`RelationshipQueryRegistry`] handle
+    /// — see this module's own doc comment, "`RelationshipQuery`:
+    /// `RelationshipQueryRegistry`, not a generic parameter").
     pub fn new(
         pool: PgPool,
         runtime: RuntimeContext,
         domain: impl Into<String>,
         accounts: Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>>,
         media_store: LocalFsStore,
+        relationship_query: RelationshipQueryRegistry,
     ) -> Self {
         Self {
             pool,
@@ -193,6 +210,7 @@ impl AccountStatusesProviderImpl {
             domain: domain.into(),
             accounts,
             media_store,
+            relationship_query,
         }
     }
 
@@ -203,10 +221,12 @@ impl AccountStatusesProviderImpl {
     }
 
     /// The real visibility judgment (task 3.1's [`visibility::is_visible`]),
-    /// resolved through [`NoRelationshipQuery`] — see this module's own doc
-    /// comment ("`RelationshipQuery`: always `NoRelationshipQuery`").
+    /// resolved through this provider's own [`RelationshipQueryRegistry`]
+    /// handle — see this module's own doc comment ("`RelationshipQuery`:
+    /// `RelationshipQueryRegistry`, not a generic parameter").
     async fn visible_to(&self, status: &Status, viewer: Option<Id>) -> Result<bool, AppError> {
-        let rel = NoRelationshipQuery
+        let rel = self
+            .relationship_query
             .viewer_relation(status.actor_id, viewer)
             .await?;
         Ok(visibility::is_visible(status, viewer, &rel))

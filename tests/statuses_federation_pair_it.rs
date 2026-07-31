@@ -64,12 +64,20 @@
 //! those services' current wiring:
 //! - `InteractionService::reblog`'s own `Announce` addressing is the
 //!   reblog's *own followers* (via `RelationshipQuery::followers_of`), never
-//!   the target's author — and `StatusesModule`'s wiring (task 7.2) always
-//!   uses `NoRelationshipQuery` (social-graph has not landed), so every
-//!   `Announce` this service dispatches carries *zero* recipients,
-//!   regardless of locality (5.2's own note, "reblog 自体の Announce は
-//!   リブースト者自身のフォロワー宛のため影響なし", combined with 3.1's
-//!   documented `NoRelationshipQuery` default).
+//!   the target's author — irrelevant to this task's own "reach a genuinely
+//!   remote recipient" goal regardless of what `RelationshipQuery::followers_of`
+//!   resolves to (5.2's own note, "reblog 自体の Announce は
+//!   リブースト者自身のフォロワー宛のため影響なし"). Originally (task 7.2)
+//!   `StatusesModule`'s wiring hardcoded `NoRelationshipQuery` (always zero
+//!   followers, social-graph had not landed); a later feature-level
+//!   `kiro-validate-impl` remediation (round 1, 2026-07-31) replaced that
+//!   with `crate::statuses::visibility::RelationshipQueryRegistry`, which
+//!   `spawn_paired_instance` below now also feeds a real
+//!   `social_graph::providers::RelationshipQueryImpl` into (the same
+//!   `build_social_graph_module` call every other harness makes) — this
+//!   file's own reason for bypassing `InteractionService` was never about
+//!   `Announce` addressing in the first place, so nothing here changes with
+//!   that update.
 //! - `InteractionService::favourite`/`unfavourite`/`unreblog`'s target-author
 //!   resolution ([`ActorHandleLookup`], reused from task 4.1) only resolves
 //!   **local** actors — favouriting a remote-authored post therefore fails

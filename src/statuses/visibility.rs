@@ -81,9 +81,55 @@
 //! this post's mentioned recipients" (e.g. a future `StatusService::
 //! find_by_id`) must resolve that separately and OR it with this function's
 //! result — out of this task's boundary to decide how.
+//!
+//! ## [`RelationshipQueryRegistry`] (feature-level `kiro-validate-impl`
+//! remediation round 1, 2026-07-31: closing the boundary-commitments gap
+//! this file's own doc comment above already named — "social-graph (a
+//! later, out-of-boundary spec) supplies the real implementation" — but
+//! that supply was never actually wired: `src/statuses.rs`'s `Concrete*`
+//! type aliases hardcoded [`NoRelationshipQuery`] permanently, and no
+//! runtime seam existed for a downstream spec to replace it after
+//! `crate::statuses::build_statuses_module` had already monomorphized every
+//! service's `R` type parameter)
+//! [`RelationshipQuery::viewer_relation`]/[`RelationshipQuery::followers_of`]
+//! are declared `-> impl Future<..> + Send` (widened from a literal
+//! `async fn`, this same remediation) rather than a plain `async fn`, so
+//! [`RelationshipQueryRegistry`] (this module's own runtime-replaceable
+//! registry, mirroring `crate::federation::inbound::block_policy::
+//! BlockPolicyRegistry`'s identical "one replaceable slot, boxed future"
+//! idiom for the identical "generic parameter baked in before the
+//! downstream module exists" problem — task 5.2's own Implementation Note
+//! documents that precedent in full) can hold `Arc<dyn DynRelationshipQuery>`
+//! internally. This mirrors `crate::social_graph::activity_builder::
+//! LocalActorLookup`/`RemoteActorLookup`'s own identical widening for the
+//! identical `async fn`-in-trait auto-trait-leakage reason — every
+//! existing/future `async fn`-bodied `impl RelationshipQuery` (this module's
+//! own [`NoRelationshipQuery`], every `MockRelationshipQuery` test double
+//! across `crate::statuses`, `crate::social_graph::providers::
+//! RelationshipQueryImpl`) remains source-compatible unchanged: an
+//! `async fn` impl body satisfies a trait method declared as
+//! `-> impl Future<..> + Send` without modification.
+//!
+//! `src/statuses.rs`'s `Concrete*` type aliases now mount every `R`
+//! parameter with [`RelationshipQueryRegistry`] in place of a bare
+//! [`NoRelationshipQuery`] value — a registry defaults to exactly
+//! [`NoRelationshipQuery`]'s own always-`false`/always-empty behavior for
+//! any caller that never registers a replacement, so this change is
+//! additive and backward-compatible (mirrors `BlockPolicyRegistry`'s own
+//! identical guarantee). `crate::social_graph::build_social_graph_module`
+//! registers its own `RelationshipQueryImpl` into this registry
+//! (`RelationshipQueryRegistry::set_relationship_query`) after
+//! `crate::statuses::build_statuses_module` has already constructed it,
+//! exactly the same "constructed early, replaced late" ordering
+//! `BlockPolicyRegistry`/`FederationModule::block_policy` already
+//! established.
 
 #[cfg(test)]
 mod tests;
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, RwLock};
 
 use crate::domain::{Id, Visibility};
 use crate::error::AppError;
@@ -108,22 +154,32 @@ pub struct ViewerRelation {
 /// itself — social-graph (a later, out-of-boundary spec) supplies the real
 /// implementation; this spec owns only the contract and the safe default
 /// ([`NoRelationshipQuery`]).
-#[allow(async_fn_in_trait)]
 pub trait RelationshipQuery: Send + Sync {
     /// Resolves whether `viewer` currently follows `author`. `viewer:
     /// None` (unauthenticated) always resolves to "not a follower" —
     /// implementations must not error on an absent viewer.
-    async fn viewer_relation(
+    ///
+    /// Declared `-> impl Future<..> + Send` rather than a plain `async fn`
+    /// (this module's doc comment, "`RelationshipQueryRegistry`") — every
+    /// `async fn`-bodied implementation remains source-compatible
+    /// unchanged.
+    fn viewer_relation(
         &self,
         author: Id,
         viewer: Option<Id>,
-    ) -> Result<ViewerRelation, AppError>;
+    ) -> impl Future<Output = Result<ViewerRelation, AppError>> + Send;
 
     /// Resolves `author`'s followers as delivery recipients, for a
     /// `private`/`unlisted` post's followers-collection addressing
     /// (design.md's `Addressing` Responsibilities; task 3.2's boundary, not
     /// consumed within this task).
-    async fn followers_of(&self, author: Id) -> Result<Vec<Recipient>, AppError>;
+    ///
+    /// Declared `-> impl Future<..> + Send` for the same reason as
+    /// [`Self::viewer_relation`].
+    fn followers_of(
+        &self,
+        author: Id,
+    ) -> impl Future<Output = Result<Vec<Recipient>, AppError>> + Send;
 }
 
 /// This spec's own default [`RelationshipQuery`] (design.md: "既定実装
@@ -147,6 +203,131 @@ impl RelationshipQuery for NoRelationshipQuery {
 
     async fn followers_of(&self, _author: Id) -> Result<Vec<Recipient>, AppError> {
         Ok(Vec::new())
+    }
+}
+
+/// Dyn-safe shim used only by [`RelationshipQueryRegistry`] — boxes
+/// [`RelationshipQuery`]'s futures so a runtime-replaceable registry slot
+/// can hold `Arc<dyn DynRelationshipQuery>` (see this module's doc comment,
+/// "`RelationshipQueryRegistry`"). Blanket-implemented for every
+/// [`RelationshipQuery`] implementation — no real implementation (here or
+/// in social-graph) needs to know this shim exists. Mirrors
+/// `crate::federation::inbound::block_policy::DynBlockPolicy`'s identical
+/// shape.
+trait DynRelationshipQuery: Send + Sync {
+    fn viewer_relation_boxed<'a>(
+        &'a self,
+        author: Id,
+        viewer: Option<Id>,
+    ) -> Pin<Box<dyn Future<Output = Result<ViewerRelation, AppError>> + Send + 'a>>;
+
+    fn followers_of_boxed<'a>(
+        &'a self,
+        author: Id,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Recipient>, AppError>> + Send + 'a>>;
+}
+
+impl<T> DynRelationshipQuery for T
+where
+    T: RelationshipQuery + Send + Sync,
+{
+    fn viewer_relation_boxed<'a>(
+        &'a self,
+        author: Id,
+        viewer: Option<Id>,
+    ) -> Pin<Box<dyn Future<Output = Result<ViewerRelation, AppError>> + Send + 'a>> {
+        Box::pin(self.viewer_relation(author, viewer))
+    }
+
+    fn followers_of_boxed<'a>(
+        &'a self,
+        author: Id,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Recipient>, AppError>> + Send + 'a>> {
+        Box::pin(self.followers_of(author))
+    }
+}
+
+/// The runtime-replaceable [`RelationshipQuery`] slot `src/statuses.rs`'s
+/// `Concrete*` type aliases mount every `R` parameter with, in place of a
+/// single hardcoded [`NoRelationshipQuery`] value (see this module's doc
+/// comment, "`RelationshipQueryRegistry`"). Defaults every fresh instance to
+/// [`NoRelationshipQuery`]'s own contractual behavior (always non-follower,
+/// always empty followers) until a downstream spec calls
+/// [`Self::set_relationship_query`] — mirrors
+/// `crate::federation::inbound::block_policy::BlockPolicyRegistry`'s/
+/// `crate::statuses::notification_sink::NotificationSinkRegistry`'s/
+/// `crate::accounts::ports::AccountPortsRegistry`'s identical "one
+/// replaceable slot, `&self`-callable `set_*`, cheap `Clone`" registry
+/// idiom.
+#[derive(Clone)]
+pub struct RelationshipQueryRegistry {
+    inner: Arc<RwLock<Arc<dyn DynRelationshipQuery>>>,
+}
+
+impl Default for RelationshipQueryRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RelationshipQueryRegistry {
+    /// Builds a registry defaulting to [`NoRelationshipQuery`] — no
+    /// downstream implementation is reachable from a freshly built registry
+    /// until [`Self::set_relationship_query`] is called.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(
+                Arc::new(NoRelationshipQuery) as Arc<dyn DynRelationshipQuery>
+            )),
+        }
+    }
+
+    /// Replaces the registered [`RelationshipQuery`] implementation (a
+    /// downstream spec's own registration entry point —
+    /// `crate::social_graph::build_social_graph_module`, mirroring
+    /// `FederationModule::block_policy().set_policy(...)`'s identical call
+    /// shape). `&self`, not `&mut self`: every `Concrete*` value this
+    /// registry is already cloned into (`StatusService`/`InteractionService`/
+    /// `PollService`, already constructed by `build_statuses_module`) must
+    /// observe the replacement without being rebuilt.
+    pub fn set_relationship_query<Q>(&self, query: Q)
+    where
+        Q: RelationshipQuery + Send + Sync + 'static,
+    {
+        *self
+            .inner
+            .write()
+            .expect("RelationshipQueryRegistry lock must not be poisoned") = Arc::new(query);
+    }
+}
+
+impl RelationshipQuery for RelationshipQueryRegistry {
+    /// Delegates to the currently registered implementation (the built-in
+    /// [`NoRelationshipQuery`] until a downstream spec replaces it via
+    /// [`Self::set_relationship_query`]) — issues a fresh delegated call on
+    /// every invocation, never a cached verdict (mirrors
+    /// `BlockPolicyRegistry::is_blocked`'s identical "no caching"
+    /// contract).
+    async fn viewer_relation(
+        &self,
+        author: Id,
+        viewer: Option<Id>,
+    ) -> Result<ViewerRelation, AppError> {
+        let query = self
+            .inner
+            .read()
+            .expect("RelationshipQueryRegistry lock must not be poisoned")
+            .clone();
+        query.viewer_relation_boxed(author, viewer).await
+    }
+
+    async fn followers_of(&self, author: Id) -> Result<Vec<Recipient>, AppError> {
+        let query = self
+            .inner
+            .read()
+            .expect("RelationshipQueryRegistry lock must not be poisoned")
+            .clone();
+        query.followers_of_boxed(author).await
     }
 }
 

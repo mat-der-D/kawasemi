@@ -129,7 +129,13 @@
 //!   `AccountCountsContribution`'s `statuses`/`last_status_at` — see that
 //!   type's own doc comment for why a composing wrapper, not either
 //!   registrant alone, is required) against accounts-and-instance's
-//!   `AccountCountsProvider` registry (replacing `ZeroCountsProvider`). See
+//!   `AccountCountsProvider` registry (replacing `ZeroCountsProvider`).
+//!   Feature-level `kiro-validate-impl` remediation round 1 (2026-07-31)
+//!   additively registers [`providers::RelationshipQueryImpl`] against
+//!   statuses-core's live `crate::statuses::visibility::
+//!   RelationshipQueryRegistry` (replacing `NoRelationshipQuery` — see that
+//!   type's own doc comment for the full "Boundary Commitments named this
+//!   port but nobody wired it" gap this closes). See
 //!   [`PendingDeliveryService`]'s own doc comment for how this task's own
 //!   "the inbound handler must be constructed and registered *before*
 //!   `federation::build_federation_module` has itself built a
@@ -167,7 +173,8 @@ pub use model::{
 };
 pub use mute_service::MuteService;
 pub use providers::{
-    AccountCountsProviderImpl, BlockPolicyImpl, FilterQuery, RelProviderImpl, RelationshipSets,
+    AccountCountsProviderImpl, BlockPolicyImpl, FilterQuery, RelProviderImpl,
+    RelationshipQueryImpl, RelationshipSets,
 };
 pub use relationship_mapper::RelationshipMapper;
 pub use transitions::Transitions;
@@ -203,6 +210,7 @@ use crate::runtime::RuntimeContext;
 use crate::social_graph::inbound::BoxedDeliver;
 use crate::statuses::account_provider::AccountCountsContribution;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
+use crate::statuses::visibility::RelationshipQueryRegistry;
 
 /// This crate's one concrete in-process `DeliverySink` instantiation for
 /// this module's own services -- matches `crate::federation::ConcreteDeliveryService`'s
@@ -477,16 +485,21 @@ pub fn register_downstream_handlers(
 /// Assembles the [`SocialGraphModule`] bundle (task 5.2, Requirements 6.1,
 /// 7.1, 8.2, 10.1): builds every service this module's own endpoints need,
 /// and additively registers this spec's own real implementations against
-/// federation-core's [`BlockPolicyRegistry`] and accounts-and-instance's
+/// federation-core's [`BlockPolicyRegistry`], statuses-core's
+/// [`RelationshipQueryRegistry`] (feature-level `kiro-validate-impl`
+/// remediation round 1, 2026-07-31 -- see [`RelationshipQueryImpl`]'s own
+/// doc comment in `providers.rs`), and accounts-and-instance's
 /// `RelationshipStateProvider`/`AccountCountsProvider` registries --
-/// replacing their built-in `NoopBlockPolicy`/`NoRelationshipProvider`/
-/// `ZeroCountsProvider` defaults (see [`CombinedAccountCountsProvider`]'s
-/// own doc comment for the counts-registration composition this requires).
+/// replacing their built-in `NoopBlockPolicy`/`NoRelationshipQuery`/
+/// `NoRelationshipProvider`/`ZeroCountsProvider` defaults (see
+/// [`CombinedAccountCountsProvider`]'s own doc comment for the
+/// counts-registration composition this requires).
 ///
-/// Must run *after* both `federation_module` (for `delivery_service()`/
-/// `block_policy()`) and `accounts_module` (for `ports()`/`service()`)
-/// already exist, and after `crate::statuses::register_account_ports` has
-/// already run (so this function's own `account_ports.set_counts_provider`
+/// Must run *after* `federation_module` (for `delivery_service()`/
+/// `block_policy()`), `crate::statuses::build_statuses_module` (for
+/// `relationship_query_registry()`), and `accounts_module` (for `ports()`/
+/// `service()`) already exist, and after `crate::statuses::register_account_ports`
+/// has already run (so this function's own `account_ports.set_counts_provider`
 /// call is the *last* one, and therefore wins) -- mirrors
 /// `crate::statuses::register_account_ports`'s identical "runs after both
 /// dependencies are already built" ordering constraint. `directory`/
@@ -503,6 +516,7 @@ pub fn build_social_graph_module(
     remote_actor_fetcher: Arc<RemoteAccountFetcher<ReqwestFederationHttpClient>>,
     delivery: Arc<ConcreteDeliveryService>,
     block_policy_registry: &BlockPolicyRegistry,
+    relationship_query_registry: &RelationshipQueryRegistry,
     account_ports: AccountPortsRegistry,
     accounts: Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>>,
     notifications: NotificationSinkRegistry,
@@ -574,6 +588,16 @@ pub fn build_social_graph_module(
         block_policy_actor_uris,
     );
     block_policy_registry.set_policy(block_policy_impl);
+
+    // Feature-level `kiro-validate-impl` remediation round 1 (2026-07-31):
+    // RelationshipQueryImpl -> statuses-core's live RelationshipQueryRegistry,
+    // replacing NoRelationshipQuery (design.md's Boundary Commitments --
+    // see `providers::RelationshipQueryImpl`'s own doc comment).
+    relationship_query_registry.set_relationship_query(RelationshipQueryImpl::new(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(&directory),
+    ));
 
     // Requirement 8.2: RelProviderImpl -> accounts-and-instance's
     // RelationshipStateProvider registry, replacing NoRelationshipProvider.

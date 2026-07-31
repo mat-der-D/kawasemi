@@ -572,8 +572,12 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     // 6.1, 7.1), replacing `accounts_module`'s built-in
     // `EmptyStatusesProvider`/`ZeroCountsProvider` defaults — see
     // `statuses::register_account_ports`'s own doc comment. Must run after
-    // both `accounts_module` (for `ports()`/`service()`) and `media_module`
-    // (for `store()`) above.
+    // `accounts_module` (for `ports()`/`service()`), `media_module` (for
+    // `store()`), and `statuses_module` (for `relationship_query_registry()`
+    // — feature-level `kiro-validate-impl` remediation round 1 follow-up,
+    // 2026-07-31, so `AccountStatusesProviderImpl::visible_to` consults the
+    // same live registry every other statuses-core consumer already does)
+    // above.
     statuses::register_account_ports(
         pool.clone(),
         runtime.clone(),
@@ -581,6 +585,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         accounts_module.ports(),
         accounts_module.service(),
         media_module.store().clone(),
+        statuses_module.relationship_query_registry(),
     );
 
     // Assembles the social-graph module bundle (task 5.2, Requirements 6.1,
@@ -591,7 +596,10 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     // every other composition-root component above already shares, plus
     // `federation_module`'s own `Arc<ConcreteDeliveryService>` and its live
     // `BlockPolicyRegistry` (task 5.2's own addition to
-    // `src/federation/module.rs`), `accounts_module`'s own
+    // `src/federation/module.rs`), `statuses_module`'s own live
+    // `RelationshipQueryRegistry` (feature-level `kiro-validate-impl`
+    // remediation round 1, 2026-07-31 — must run after `statuses_module` is
+    // already built, immediately above), `accounts_module`'s own
     // `AccountPortsRegistry`/`AccountService` handles, and this same
     // `notifications` registry every other module above shares. Must run
     // after `statuses::register_account_ports` immediately above, so this
@@ -608,6 +616,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         social_graph_remote_actor_fetcher,
         Arc::clone(federation_module.delivery_service()),
         federation_module.block_policy(),
+        &statuses_module.relationship_query_registry(),
         accounts_module.ports(),
         accounts_module.service(),
         notifications,
