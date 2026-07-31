@@ -115,6 +115,7 @@
 pub mod activity_builder;
 pub mod approval_policy;
 pub mod block_service;
+pub mod endpoints;
 pub mod follow_request_service;
 pub mod follow_service;
 pub mod inbound;
