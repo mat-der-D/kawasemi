@@ -49,8 +49,24 @@
 //!   No `TimelineMatcher`/`StatusHydrator`/`TimelineService`/
 //!   `TimelineEndpoints` (later tasks), and no wiring into
 //!   `crate::state`/`crate::bootstrap`/`crate::server` (task 5.2) live here.
+//! - Task 3.2 (`Boundary: TimelineMatcher`): the single generation point
+//!   design.md's "Domain (single point) / 単一生成点" component names —
+//!   [`matcher::TimelineMatcher::candidate_spec`] (converts a
+//!   [`model::TimelineKind`] and [`model::TimelineParams`] into the
+//!   [`model::TimelineQuerySpec`] `CandidateRepository` consumes, the REST
+//!   candidate-query side) and [`matcher::TimelineMatcher::matches`] (single-
+//!   status membership judgment combining [`kind_rules::TimelineKindRules`]
+//!   with [`filter::TimelineFilter`], the Streaming reuse side) — both built
+//!   on the already-established `TimelineKindRules`/`TimelineFilter` without
+//!   re-deriving either (8.1, 8.2). Delivery/broadcast itself is not
+//!   included (8.4) — see [`matcher`].
+//!
+//!   No `StatusHydrator`/`TimelineService`/`TimelineEndpoints` (later
+//!   tasks), and no wiring into `crate::state`/`crate::bootstrap`/
+//!   `crate::server` (task 5.2) live here.
 
 pub mod candidate_repository;
 pub mod filter;
 pub mod kind_rules;
+pub mod matcher;
 pub mod model;

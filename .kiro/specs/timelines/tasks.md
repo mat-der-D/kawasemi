@@ -25,7 +25,7 @@
   - 観測可能な完了: ブロック/被ブロック/ミュート対象が除外され、`show_reblogs` 無効フォローのブーストと被ブースト元が関係対象のブーストが除外され、未認証文脈で public のみ通過する（フィルタ単体テストがグリーン）
   - _Requirements: 1.2, 1.4, 1.5, 2.6, 3.3, 4.6, 5.1, 5.2, 5.3, 5.4, 6.1, 6.2, 6.3, 6.4_
   - _Boundary: TimelineFilter_
-- [ ] 3.2 単一生成点（TimelineMatcher）を実装する
+- [x] 3.2 単一生成点（TimelineMatcher）を実装する
   - 種別条件（`TimelineKindRules`）をカーソル付きクエリ仕様へ変換する `candidate_spec` と、単一投稿の所属を判定する `matches`（種別条件 + 可視性 + 関係フィルタ）を、REST 取得とロジックを二重定義せず同一の `TimelineKindRules`/`TimelineFilter` の上に実装する。配信そのものは含めない
   - 観測可能な完了: `matches` の判定が候補クエリ + フィルタ適用と同一結果を返し、下流が再利用可能なシームとして公開される（Matcher 単体テストがグリーン）
   - _Requirements: 8.1, 8.2, 8.4_
