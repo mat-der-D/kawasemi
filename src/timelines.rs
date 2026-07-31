@@ -37,7 +37,20 @@
 //!   No `TimelineFilter`/`TimelineMatcher`/`StatusHydrator`/`TimelineService`/
 //!   `TimelineEndpoints` (later tasks), and no wiring into
 //!   `crate::state`/`crate::bootstrap`/`crate::server` (task 5.2) live here.
+//! - Task 3.1 (`Boundary: TimelineFilter`): applying, to a single already
+//!   kind-matched candidate, statuses-core's `VisibilityPolicy::is_visible`
+//!   (unauthenticated viewer -> public-only) and social-graph `FilterQuery`-
+//!   sourced relationship exclusion (blocked/blocked_by/muted, mute-expiry
+//!   already considered upstream) bundled via [`model::FilterContext`], plus
+//!   the boost-specific `reblogs_hidden`/boosted-original-author exclusion
+//!   rules — design.md's "Filter / フィルタ層" component names — see
+//!   [`filter::TimelineFilter::keep`].
+//!
+//!   No `TimelineMatcher`/`StatusHydrator`/`TimelineService`/
+//!   `TimelineEndpoints` (later tasks), and no wiring into
+//!   `crate::state`/`crate::bootstrap`/`crate::server` (task 5.2) live here.
 
 pub mod candidate_repository;
+pub mod filter;
 pub mod kind_rules;
 pub mod model;
