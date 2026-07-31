@@ -73,3 +73,7 @@
   - _Requirements: 8.1, 8.2, 10.1, 10.2, 10.3, 10.4_
   - _Boundary: TimelineMatcher, StatusHydrator_
   - _Depends: 5.2_
+
+## Implementation Notes
+
+- タスク 1.2（`TimelineKindRules`）実装時、`src/timelines/kind_rules.rs` に候補投稿を表す `pub struct TimelineCandidate { author, local, visibility, is_boost, tags }` を導入した（`model.rs` はタスク 1.1 の境界上、候補形状の型をあえて定義していない）。この型は `TimelineKindRules::matches`/`matches_home`/`matches_public`/`matches_local`/`matches_tag` の実引数型であり、`CandidateRepository`（タスク 2.1）が読み取る `statuses` 行や `TimelineMatcher`（タスク 3.2）が呼び出す形状と一致させる必要がある（「条件の二重定義禁止」）。タスク 2.1 の実装者は、実際のリポジトリ行形状から `TimelineCandidate` を構築するか、両者の候補形状を意図的にすり合わせること — 暗黙に発散させないこと。
