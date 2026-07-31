@@ -138,7 +138,7 @@
   - _Boundary: InboundHandler, BlockPolicyImpl, RelProviderImpl_
   - _Depends: 5.2_
 
-- [ ] 6.3 連合対称性テスト（2 インスタンス往復）
+- [x] 6.3 連合対称性テスト（2 インスタンス往復）
   - 2 インスタンスで Follow/Block の往復（確立・承認・ブロック受信拒否）を検証し、同一 Activity をローカル in-process と HTTP 配送で実行して関係状態遷移結果が同値になることを検証する
   - ローカル配送と HTTP 配送で関係状態が一致し、往復シナリオが成立することをテストで確認できる状態
   - _Requirements: 1.2, 1.3, 10.3_
