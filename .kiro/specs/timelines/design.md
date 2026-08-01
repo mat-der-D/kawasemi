@@ -48,6 +48,9 @@
 - api-foundation: Bearer 認証（`authenticate` は `Option<RequestActorContext>` を返す任意認証対応 / `require_scope`）/ `Scope`（`read:statuses` 内包判定）/ `MastodonError` / ページネーション（`PageParams` / `Cursor` / `Page<T>` / `build_link_header`）/ `X-RateLimit-*` レイヤー / 契約ハーネス（`assert_golden` / `register_fixture`）。
 - statuses-core: `VisibilityPolicy::is_visible`（可視性判定）/ `StatusSerializer::status_to_json`（Status 具体化・viewer 操作状態・reblog ネスト・null 規律）/ Status・Visibility モデル / `statuses`・`status_media`・ハッシュタグ関連の read-only 照会。
 - social-graph: `FilterQuery`（`blocked_set` = blocked/blocked_by/muted（期限考慮）/ `following_set` / ブースト表示可否 `show_reblogs` 由来集合）。
+- accounts-and-instance: `AccountService::show_account`（`crate::accounts::account_service::AccountService`）と `crate::accounts::emoji_repository`（`CustomEmojiView` 解決）を消費する（`StatusHydrator` が `status_to_json` の呼び出しに必要な Account JSON・カスタム絵文字を組み立てるために使用。実装済みだが本 spec 初版の Allowed Dependencies に記載漏れがあった — 2026-08-01 の feature-level `kiro-validate-impl` の design alignment 検証で判明し追記）。
+- media-pipeline: `crate::media::local_fs::LocalFsStore`・`crate::media::media_repository`・`crate::media::serializer::to_media_attachment`・`crate::media::ResolvedOrigin` を消費する（`StatusHydrator` が MediaAttachment JSON を組み立てるため、および endpoints 層が `Link` ヘッダー生成に使う origin 解決のために使用。実装済みだが本 spec 初版の Allowed Dependencies に記載漏れがあった — 2026-08-01 の feature-level `kiro-validate-impl` の design alignment 検証で判明し追記）。
+- federation-core: `crate::federation::signatures::ReqwestFederationHttpClient` を消費する（`AccountService<LocalFsStore, ReqwestFederationHttpClient>` の型引数として、accounts-and-instance の `AccountService` 経由で `TimelinesModule`/`build_timelines_module` の公開コンポジションルート API に及ぶ推移的依存。実装済みだが本 spec 初版の Allowed Dependencies に記載漏れがあった — 2026-08-01 の feature-level `kiro-validate-impl` の design alignment 検証で判明し追記）。
 - 下流仕様（streaming の配信実体、experience-expansion の list TL）を本 spec に持ち込まない。
 
 ### Revalidation Triggers

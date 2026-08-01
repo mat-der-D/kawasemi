@@ -403,6 +403,13 @@ async fn home_timeline_requires_authentication_and_sufficient_scope_via_real_rou
         StatusCode::UNAUTHORIZED,
         "unauthenticated home must be rejected: {body:?}"
     );
+    // Requirement 9.4: failure responses use api-foundation's
+    // Mastodon-compatible error body shape (`{"error": "..."}`) — mirrors
+    // `tests/status_crud_it.rs::assert_error_shape`'s own identical check.
+    assert!(
+        body.get("error").and_then(Value::as_str).is_some(),
+        "expected a Mastodon-compatible {{\"error\": ...}} body, got: {body:?}"
+    );
 
     // Authenticated, but the token is missing `read:statuses` -> 403
     // (Requirement 9.3).
@@ -414,6 +421,12 @@ async fn home_timeline_requires_authentication_and_sufficient_scope_via_real_rou
         status,
         StatusCode::FORBIDDEN,
         "insufficient scope must be rejected: {body:?}"
+    );
+    // Requirement 9.4: same Mastodon-compatible error body shape on the
+    // 403 path.
+    assert!(
+        body.get("error").and_then(Value::as_str).is_some(),
+        "expected a Mastodon-compatible {{\"error\": ...}} body, got: {body:?}"
     );
 
     app.cleanup().await;
@@ -857,6 +870,58 @@ async fn local_timeline_excludes_remote_authors_and_boosts_supports_only_media_v
         "Requirement 3.4: {ids:?}"
     );
     assert!(!ids.contains(&local_post.id.as_i64().to_string()));
+
+    app.cleanup().await;
+}
+
+#[tokio::test]
+async fn local_timeline_excludes_blocked_and_muted_authors_for_an_authenticated_viewer_via_real_router()
+ {
+    let app = spawn_test_app().await;
+    let router = real_router(&app);
+    let app_id = register_test_app(&app).await;
+
+    let viewer = actor_fixture(&app, "local_relations_viewer").await;
+    let blocked_author = actor_fixture(&app, "local_relations_blocked").await;
+    let muted_author = actor_fixture(&app, "local_relations_muted").await;
+    let stranger = actor_fixture(&app, "local_relations_stranger").await;
+
+    upsert_block(
+        &app,
+        AccountRef::Local(viewer),
+        AccountRef::Local(blocked_author),
+    )
+    .await;
+    upsert_mute(
+        &app,
+        AccountRef::Local(viewer),
+        AccountRef::Local(muted_author),
+    )
+    .await;
+
+    let blocked_post =
+        insert_status_fixture(&app, blocked_author, Visibility::Public, true, None).await;
+    let muted_post =
+        insert_status_fixture(&app, muted_author, Visibility::Public, true, None).await;
+    let stranger_post = insert_status_fixture(&app, stranger, Visibility::Public, true, None).await;
+
+    let token = issue_test_token(&app, app_id, viewer, &["read:statuses"]).await;
+    let (status, _h, body) = send(
+        &router,
+        get_req("/api/v1/timelines/public?local=true", Some(&token)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    let ids = ids_of(&body);
+    assert!(
+        !ids.contains(&blocked_post.id.as_i64().to_string()),
+        "Requirement 3.3: {ids:?}"
+    );
+    assert!(
+        !ids.contains(&muted_post.id.as_i64().to_string()),
+        "Requirement 3.3: {ids:?}"
+    );
+    assert!(ids.contains(&stranger_post.id.as_i64().to_string()));
 
     app.cleanup().await;
 }
