@@ -31,26 +31,36 @@
 //!   `status` embeds to accounts-and-instance's/statuses-core's own
 //!   serializers rather than redefining either contract. See
 //!   [`serializer`]'s own doc comment.
+//! - Task 2.2 (`Boundary: ports`): the delegation seams —
+//!   [`ports::NotificationEventSink`] (upstream event receipt, default
+//!   [`ports::NoopSink`]) and [`ports::NotificationDeliverySink`]
+//!   (downstream delivery of a persisted notification, same default), plus
+//!   the swap-in registry handle [`ports::NotificationPortsRegistry`] a
+//!   later task (4.2) stores inside `AppState`. See [`ports`]'s own doc
+//!   comment.
 //!
 //! This file will eventually become the `NotificationModule` composition
 //! point (design.md's File Structure Plan: "`src/notifications.rs` —
 //! NotificationModule 組み立て・公開・ルータ装着点・EventSink/DeliverySink
-//! 登録") once later tasks (2.x-4.x: `ports`, `filter`, `generator`,
-//! `event_sink`, `service`, `endpoints`, and their wiring) land. Declaring
-//! `pub mod serializer;` here (this task, `Boundary: NotificationSerializer`)
-//! is the same minimal, precedented "add this task's new submodule + its
-//! public re-exports, nothing else" touch task 1.2/1.3 already made to add
-//! `pub mod model;`/`pub mod repository;` — no `AppState`/bootstrap/router
-//! composition, `NotificationEventSink`/`NotificationDeliverySink`
-//! registration, or any other task's boundary is touched here. See this
-//! task's own status report (CONCERNS) for why this narrow addition was
-//! necessary despite this file being named as a boundary exclusion.
+//! 登録") once later tasks (2.x-4.x: `filter`, `generator`, `event_sink`,
+//! `service`, `endpoints`, and their wiring) land. Declaring
+//! `pub mod ports;` here (this task, `Boundary: ports`) is the same
+//! minimal, precedented "add this task's new submodule + its public
+//! re-exports, nothing else" touch tasks 1.2/1.3/2.1 already made — no
+//! `AppState`/bootstrap/router composition or any other task's boundary is
+//! touched here. See this task's own status report for why this narrow
+//! addition was necessary despite this file being named as a boundary
+//! exclusion.
 
 pub mod model;
+pub mod ports;
 pub mod repository;
 pub mod serializer;
 
 pub use model::{Notification, NotificationEvent, NotificationType};
+pub use ports::{
+    NoopSink, NotificationDeliverySink, NotificationEventSink, NotificationPortsRegistry,
+};
 pub use repository::{InsertOutcome, ListFilter};
 pub use serializer::{
     NotificationJson, NotificationRenderInput, SerializeContext, notification_to_json,
