@@ -53,6 +53,18 @@
 //!   sequence diagram. Implements no filtering/dedup/delivery logic of its
 //!   own — every collaborator it sequences was already built by an earlier
 //!   task. See [`generator`]'s own doc comment.
+//! - Task 3.1 (`Boundary: NotificationEventSink`): the real (non-`NoopSink`)
+//!   [`ports::NotificationEventSink`] implementation —
+//!   [`event_sink::GeneratorEventSink`], which routes a canonical
+//!   [`NotificationEvent`] straight into
+//!   [`generator::NotificationGenerator::generate`] — plus the bridge that
+//!   makes that routing reachable from the two upstream emitters that
+//!   already exist, [`event_sink::StatusesEventSinkAdapter`], which
+//!   converts `statuses::notification_sink`'s placeholder event/kind types
+//!   into this module's own and delegates onward. Registering either into
+//!   a live `AppState`/`statuses::notification_sink::NotificationSinkRegistry`
+//!   is task 4.2's job, not this one's — see [`event_sink`]'s own doc
+//!   comment.
 //!
 //! This file will eventually become the `NotificationModule` composition
 //! point (design.md's File Structure Plan: "`src/notifications.rs` —
@@ -67,6 +79,7 @@
 //! report for why this narrow addition was necessary despite this file
 //! being named as a boundary exclusion.
 
+pub mod event_sink;
 pub mod filter;
 pub mod generator;
 pub mod model;
@@ -74,6 +87,7 @@ pub mod ports;
 pub mod repository;
 pub mod serializer;
 
+pub use event_sink::{GeneratorEventSink, StatusesEventSinkAdapter};
 pub use filter::NotificationFilter;
 pub use generator::{GenerateOutcome, NotificationGenerator};
 pub use model::{Notification, NotificationEvent, NotificationType};
