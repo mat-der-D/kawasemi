@@ -22,7 +22,7 @@
   - _Depends: 1.2_
 
 - [ ] 2. コア: シリアライズ・委譲シーム・フィルタ・生成
-- [ ] 2.1 (P) 通知シリアライザ
+- [x] 2.1 (P) 通知シリアライザ
   - Notification の JSON 外殻（id/type/created_at）を生成し、投稿関連種別では関連投稿を受信者視点で statuses-core のシリアライザへ委譲して status に埋め込み、通知元を accounts-and-instance のシリアライザで account に構成し、follow/follow_request の null 規律を維持して契約ハーネスへゴールデン登録する
   - type が v1 種別のみで、follow 系で status が null、投稿関連種別で status 埋め込み点が受信者 viewer となり、外殻ゴールデンが決定的に再現される状態
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6_
@@ -103,6 +103,7 @@
 
 ## Implementation Notes
 
+- 2.1: `src/notifications/serializer.rs` を追加。`NotificationSerializer` は design.md の `&self` メソッド案ではなく `StatusSerializer`/`AccountSerializer` と同じ「事前解決済み `Value` を受け取る自由関数」パターン（`NotificationRenderInput<'a>`）で実装（既存踏襲パターンとしてレビューで実コード照合済み）。null 規律（follow/follow_request で `status: null`）は呼び出し側の入力に関わらず関数内部で強制。ゴールデンは `KAWASEMI_UPDATE_GOLDEN=1` 生成 → 再実行で決定性確認（`src/statuses/serializer/tests.rs` と同じ規約）。`cargo fmt`（書き込みモード）をリポジトリ全体に対して実行すると `tests/timeline_status_contract_it.rs` 等の無関係ファイルに整形差分が波及することを確認済み — 以降のタスクでは `cargo fmt -- <対象ファイルのみ>` のようにスコープを絞ること。
 - 1.3: `src/notifications/repository.rs` を追加。design.md の Service Interface（`insert_dedup`/`list`/`find_for_recipient`/`dismiss`/`clear`/`ListFilter`）に一致。`ON CONFLICT (recipient_id, kind, origin_kind, origin_id, COALESCE(status_id, 0)) WHERE NOT dismissed` は migration 0009 の `notifications_dedup_idx` 定義と厳密に一致させる必要がある（Postgres の ON CONFLICT 推論対象は既存インデックス定義と完全一致が必須）ことを確認済み。`find_for_recipient` は Requirement 4.4 の文言（「一覧取得・単一取得から...除外する」）どおり消去済み行も除外する。`list` は全件取得後インメモリページングで、`social_graph/repository.rs::list_inbound_requests` 等の既存踏襲パターン。
 - 1.2: `src/notifications/model.rs` を追加。`NotificationType`/`Notification`/`NotificationEvent` は design.md の型定義に完全一致（フィールド名・型を1対1で確認済み）。`crate::domain::{Id, AccountRef}` を再定義せず再利用。`src/statuses/notification_sink.rs`（task 9.2 が用意した暫定プレースホルダ、同一形状の `NotificationType`/`NotificationEvent`）は本タスクの境界（`model` のみ）外のため意図的に未着手・共存のまま — 移行は task 2.2/3.1 の責務。ユニットテストは `model.rs` 内インライン（`src/statuses/model.rs` 等、既存の `model.rs` すべてに共通する先例に合わせた。`model/tests.rs` はリポジトリ内に一つも存在しない）。
 - 1.1: `migrations/0009_notifications.sql` を追加。`research.md` の番号調整記録どおり `0009` は未使用で、既存の `0011`/`0012` と衝突しない（sqlx は埋め込み時に昇順で適用するのみで、履歴上の適用順は要求しないため安全）。`tests/notifications_migrations_it.rs` で実 Postgres 経由の RED→GREEN を確認し、`WHERE NOT dismissed` 部分一意インデックスの重複排除/再通知セマンティクスを実際の制約違反 INSERT + SQLSTATE 23505 で検証済み。

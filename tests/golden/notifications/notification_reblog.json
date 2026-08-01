@@ -1,0 +1,15 @@
+{
+  "account": {
+    "acct": "alice",
+    "display_name": "Alice",
+    "id": "20",
+    "username": "alice"
+  },
+  "created_at": "2026-07-24T00:00:00Z",
+  "id": "1",
+  "status": {
+    "content": "<p>hello</p>",
+    "id": "99"
+  },
+  "type": "reblog"
+}
