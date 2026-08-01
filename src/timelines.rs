@@ -80,6 +80,22 @@
 //!   No `TimelineService`/`TimelineEndpoints` (later tasks), and no wiring
 //!   into `crate::state`/`crate::bootstrap`/`crate::server` (task 5.2) live
 //!   here.
+//! - Task 4.2 (`Boundary: TimelineService`): the end-to-end aggregation
+//!   design.md's "Service / サービス層" component names —
+//!   [`service::TimelineService::timeline`] loads the viewer's relationship
+//!   sets once into a [`model::FilterContext`] (`FilterQuery`, Requirement
+//!   6.1), calls [`matcher::TimelineMatcher::candidate_spec`], runs a
+//!   bounded fill loop ([`candidate_repository::fetch_candidates`] batches
+//!   -> [`filter::TimelineFilter::keep`], capped by a small fixed
+//!   `MAX_FILL_ITERATIONS` so a viewer with many blocks/mutes or a sparse
+//!   tag query never approaches a full-table scan — Requirement 7.4), hands
+//!   the accumulated survivors to api-foundation's `paginate` for cursor-
+//!   stable windowing, and hydrates the final page via
+//!   [`hydrator::StatusHydrator::hydrate`] — see [`service`].
+//!
+//!   No `TimelineEndpoints`/`TimelinesModule` (later tasks), and no wiring
+//!   into `crate::state`/`crate::bootstrap`/`crate::server` (task 5.2) live
+//!   here.
 
 pub mod candidate_repository;
 pub mod filter;
@@ -87,3 +103,4 @@ pub mod hydrator;
 pub mod kind_rules;
 pub mod matcher;
 pub mod model;
+pub mod service;
