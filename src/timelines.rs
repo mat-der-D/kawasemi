@@ -64,9 +64,26 @@
 //!   No `StatusHydrator`/`TimelineService`/`TimelineEndpoints` (later
 //!   tasks), and no wiring into `crate::state`/`crate::bootstrap`/
 //!   `crate::server` (task 5.2) live here.
+//! - Task 4.1 (`Boundary: StatusHydrator`): hydrating a filtered candidate
+//!   into Status JSON design.md's "Serialize / 具体化層" component names —
+//!   [`hydrator::StatusHydrator::hydrate`] resolves the
+//!   `Status -> StatusRenderInput` assembly glue (account/media/tags/
+//!   emojis/interactions/poll/reblog target) and delegates the actual JSON
+//!   mapping to statuses-core's `serializer::status_to_json`
+//!   (Requirement 10.1), passing viewer operation state so
+//!   `favourited`/`reblogged`/`bookmarked`/... reflect the authenticated
+//!   context (Requirement 10.2), nesting a boost's original post under
+//!   `reblog` non-recursively (Requirement 10.3), and never building its
+//!   own Account/MediaAttachment representation (Requirement 10.4) — see
+//!   [`hydrator`].
+//!
+//!   No `TimelineService`/`TimelineEndpoints` (later tasks), and no wiring
+//!   into `crate::state`/`crate::bootstrap`/`crate::server` (task 5.2) live
+//!   here.
 
 pub mod candidate_repository;
 pub mod filter;
+pub mod hydrator;
 pub mod kind_rules;
 pub mod matcher;
 pub mod model;
