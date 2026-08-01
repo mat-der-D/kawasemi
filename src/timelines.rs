@@ -96,8 +96,26 @@
 //!   No `TimelineEndpoints`/`TimelinesModule` (later tasks), and no wiring
 //!   into `crate::state`/`crate::bootstrap`/`crate::server` (task 5.2) live
 //!   here.
+//! - Task 5.1 (`Boundary: TimelineEndpoints`): the HTTP surface design.md's
+//!   "API / エンドポイント層" component names — [`endpoints::home_timeline`]
+//!   (`GET /api/v1/timelines/home`, Bearer + `read:statuses`, 401 when
+//!   unauthenticated), [`endpoints::public_timeline`] (`GET
+//!   /api/v1/timelines/public`, optional auth, `local`/`remote`/
+//!   `only_media`, unauthenticated returns public-only — also serves the
+//!   local timeline via `?local=true`, no separate route), and
+//!   [`endpoints::tag_timeline`] (`GET /api/v1/timelines/tag/:hashtag`,
+//!   optional auth, `any[]`/`all[]`/`none[]`/`local`/`only_media`) — each
+//!   applying scope validation, Mastodon-compatible errors, and `Link`
+//!   header attachment (Requirements 1.1, 1.6, 2.1, 2.3, 3.1, 4.1, 7.2, 9.1,
+//!   9.2, 9.3, 9.4) atop [`service::TimelineService::timeline`] (task 4.2)
+//!   unchanged — see [`endpoints`].
+//!
+//!   No `TimelinesModule` (task 5.2), and no wiring into
+//!   `crate::state`/`crate::bootstrap`/`crate::server` live here — this
+//!   module's handlers are not mounted onto the live application router yet.
 
 pub mod candidate_repository;
+pub mod endpoints;
 pub mod filter;
 pub mod hydrator;
 pub mod kind_rules;
