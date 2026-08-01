@@ -86,6 +86,7 @@ pub mod model;
 pub mod ports;
 pub mod repository;
 pub mod serializer;
+pub mod service;
 
 pub use event_sink::{GeneratorEventSink, StatusesEventSinkAdapter};
 pub use filter::NotificationFilter;
@@ -99,3 +100,4 @@ pub use serializer::{
     NotificationJson, NotificationRenderInput, SerializeContext, notification_to_json,
     to_notification_json,
 };
+pub use service::NotificationService;
