@@ -444,8 +444,7 @@ async fn home_timeline_boost_nests_a_reblog_byte_identical_to_its_own_detail_end
     let app_id = register_test_app(&app).await;
     let alice_token =
         issue_test_token(&app, app_id, alice, &["write:statuses", "read:statuses"]).await;
-    let bob_token =
-        issue_test_token(&app, app_id, bob, &["write:statuses", "read:statuses"]).await;
+    let bob_token = issue_test_token(&app, app_id, bob, &["write:statuses", "read:statuses"]).await;
 
     let original = create_status(
         &router,
