@@ -38,25 +38,33 @@
 //!   the swap-in registry handle [`ports::NotificationPortsRegistry`] a
 //!   later task (4.2) stores inside `AppState`. See [`ports`]'s own doc
 //!   comment.
+//! - Task 2.3 (`Boundary: NotificationFilter`): the generation-stage
+//!   block/notification-mute suppression decision —
+//!   [`filter::NotificationFilter::should_suppress`], a thin consumer of
+//!   social-graph's `FilterQuery::blocked_set` that reimplements no
+//!   relationship state or expiry logic of its own. See [`filter`]'s own
+//!   doc comment.
 //!
 //! This file will eventually become the `NotificationModule` composition
 //! point (design.md's File Structure Plan: "`src/notifications.rs` —
 //! NotificationModule 組み立て・公開・ルータ装着点・EventSink/DeliverySink
-//! 登録") once later tasks (2.x-4.x: `filter`, `generator`, `event_sink`,
-//! `service`, `endpoints`, and their wiring) land. Declaring
-//! `pub mod ports;` here (this task, `Boundary: ports`) is the same
-//! minimal, precedented "add this task's new submodule + its public
-//! re-exports, nothing else" touch tasks 1.2/1.3/2.1 already made — no
-//! `AppState`/bootstrap/router composition or any other task's boundary is
-//! touched here. See this task's own status report for why this narrow
-//! addition was necessary despite this file being named as a boundary
-//! exclusion.
+//! 登録") once later tasks (2.x-4.x: `generator`, `event_sink`, `service`,
+//! `endpoints`, and their wiring) land. Declaring `pub mod ports;`/
+//! `pub mod filter;` here (tasks 2.2/2.3, boundaries `ports`/
+//! `NotificationFilter`) is the same minimal, precedented "add this task's
+//! new submodule + its public re-exports, nothing else" touch tasks
+//! 1.2/1.3/2.1 already made — no `AppState`/bootstrap/router composition or
+//! any other task's boundary is touched here. See this task's own status
+//! report for why this narrow addition was necessary despite this file
+//! being named as a boundary exclusion.
 
+pub mod filter;
 pub mod model;
 pub mod ports;
 pub mod repository;
 pub mod serializer;
 
+pub use filter::NotificationFilter;
 pub use model::{Notification, NotificationEvent, NotificationType};
 pub use ports::{
     NoopSink, NotificationDeliverySink, NotificationEventSink, NotificationPortsRegistry,

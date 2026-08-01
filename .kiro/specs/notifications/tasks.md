@@ -36,7 +36,7 @@
   - _Boundary: ports_
   - _Depends: 1.2_
 
-- [ ] 2.3 (P) 通知フィルタ
+- [x] 2.3 (P) 通知フィルタ
   - 受信者と通知元について social-graph の関係状態問い合わせからブロック/被ブロック/通知ミュート（期限考慮）集合を取得し、いずれかに該当すれば抑制を返す判定を実装する（関係状態・期限判定は再実装しない）
   - ブロック/被ブロック/通知ミュートで抑制が真、期限切れミュートでは抑制が偽になることを単体で確認できる状態
   - _Requirements: 7.1, 7.2, 7.3, 7.4_
@@ -103,6 +103,7 @@
 
 ## Implementation Notes
 
+- 2.3: `src/notifications/filter.rs` を追加。`NotificationFilter::should_suppress` は `social_graph::FilterQuery::blocked_set(recipient)` を一度呼ぶだけで、`blocked`/`blocked_by`/`muted_notifications` のいずれかに `origin` が含まれれば抑制（素の `muted` は 7.2 の要求どおり判定に使わない）。関係状態・期限判定の再実装なし（7.4）。このサンドボックスには到達可能な Postgres が無く（`social_graph::providers` 自身の既存テストも同一の `PoolTimedOut` で失敗することをレビューで確認済み・タスク横断のサンドボックス制約）、6 件のテストは実行不能だがレビューでの手動トレース（各テストが実装のどのバグを検出できるか 1 行ずつ検証済み）で正当性を確認した。
 - 2.1/2.2: `src/notifications/serializer.rs`・`src/notifications/ports.rs` を追加。`NotificationSerializer`/`NotificationEventSink`/`NotificationDeliverySink` は design.md の `&self` メソッド案ではなく `StatusSerializer`/`AccountSerializer`/`accounts::ports` と同じ「事前解決済み値・ハンドル」パターンで実装（既存踏襲パターンとしてレビューで実コード照合済み）。**根本原因を特定・恒久修正済み**: `tests/timeline_status_contract_it.rs` は HEAD 時点で rustfmt 非準拠だった。この repo では `cargo fmt -- <単一ファイル>` が cargo-fmt の仕様上 `--` 以降の引数を「自動検出したファイル一覧への追加」として扱うため、実際には**クレート全体**を再フォーマットする（単一ファイルにスコープされない）。`.claude/settings.json` の PostToolUse フック（`.rs` の Edit/Write 毎に `cargo fmt -- "$f"` を実行）がこれを踏むため、**どのタスクであっても `.rs` ファイルを編集するたびに**この差分が再発する。commit `b927681` で `tests/timeline_status_contract_it.rs` を rustfmt 準拠に一度だけ直し（純粋な空白差分、挙動変更なし、`cargo test --test timeline_status_contract_it` で DB 未接続以外の失敗が無いことを確認済み）、恒久的に解消した。以降のタスクでこの diff が再出現することは想定されないが、`.rs` を編集した後は常に `git status`/`git diff --name-only` で意図しないファイルが混入していないか確認すること（フック自体は今後も全体を re-fmt するため、真にリスクがあるのは「まだ rustfmt 非準拠な行が repo 内に残っている場合」のみ）。
 - 1.3: `src/notifications/repository.rs` を追加。design.md の Service Interface（`insert_dedup`/`list`/`find_for_recipient`/`dismiss`/`clear`/`ListFilter`）に一致。`ON CONFLICT (recipient_id, kind, origin_kind, origin_id, COALESCE(status_id, 0)) WHERE NOT dismissed` は migration 0009 の `notifications_dedup_idx` 定義と厳密に一致させる必要がある（Postgres の ON CONFLICT 推論対象は既存インデックス定義と完全一致が必須）ことを確認済み。`find_for_recipient` は Requirement 4.4 の文言（「一覧取得・単一取得から...除外する」）どおり消去済み行も除外する。`list` は全件取得後インメモリページングで、`social_graph/repository.rs::list_inbound_requests` 等の既存踏襲パターン。
 - 1.2: `src/notifications/model.rs` を追加。`NotificationType`/`Notification`/`NotificationEvent` は design.md の型定義に完全一致（フィールド名・型を1対1で確認済み）。`crate::domain::{Id, AccountRef}` を再定義せず再利用。`src/statuses/notification_sink.rs`（task 9.2 が用意した暫定プレースホルダ、同一形状の `NotificationType`/`NotificationEvent`）は本タスクの境界（`model` のみ）外のため意図的に未着手・共存のまま — 移行は task 2.2/3.1 の責務。ユニットテストは `model.rs` 内インライン（`src/statuses/model.rs` 等、既存の `model.rs` すべてに共通する先例に合わせた。`model/tests.rs` はリポジトリ内に一つも存在しない）。
