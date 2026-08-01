@@ -107,6 +107,7 @@ use crate::social_graph;
 use crate::state::AppState;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{self, ProdRemoteActorResolver};
+use crate::timelines;
 
 /// Environment variable overriding the shared test database's connection
 /// URL, mirroring `src/db/tests.rs`'/`src/migrate/tests.rs`'s own convention.
@@ -816,6 +817,19 @@ pub async fn spawn_test_app() -> TestApp {
         notifications,
     );
 
+    // Assembles the timelines module bundle (task 5.2) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::timelines::build_timelines_module`), sharing this instance's
+    // own `pool`/`runtime`/`accounts_module`'s `AccountService`/
+    // `media_module`'s `LocalFsStore` — no background task to spawn (see
+    // `accounts_module`'s own identical precedent above).
+    let timelines_module = timelines::build_timelines_module(
+        pool.clone(),
+        runtime.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+    );
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
@@ -827,6 +841,7 @@ pub async fn spawn_test_app() -> TestApp {
         accounts_module,
         statuses_module,
         social_graph_module,
+        timelines_module,
     );
     let router = server::build_router(state.clone());
 

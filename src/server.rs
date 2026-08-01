@@ -85,6 +85,10 @@ use crate::statuses::endpoints::{
 use crate::statuses::visibility::RelationshipQueryRegistry;
 use crate::statuses::{ConcreteHttpSink, ConcreteLocalSink, ConcreteStatusesEndpointsState};
 use crate::telemetry;
+use crate::timelines::endpoints::{
+    self as timelines_endpoints, HOME_TIMELINE_PATH, PUBLIC_TIMELINE_PATH, TAG_TIMELINE_PATH,
+    TimelineEndpointsState,
+};
 
 /// `POST /api/v1/apps` / `GET /api/v1/apps/verify_credentials` path
 /// (design.md's API Contract table, api-foundation task 5.1).
@@ -360,6 +364,21 @@ impl FromRef<AppState> for crate::social_graph::ConcreteSocialGraphEndpointsStat
     }
 }
 
+/// Bridges `AppState` to [`TimelineEndpointsState`] (task 5.2, `_Boundary:
+/// TimelinesModule, server, bootstrap, state_`), mirroring
+/// [`ConcreteSocialGraphEndpointsState`]'s own `FromRef` bridge immediately
+/// above: `AppState::timelines()`'s already-built `TimelineService` handle
+/// (task 5.2's own `TimelinesModule`) is an `Arc` clone, never freshly
+/// constructed here.
+impl FromRef<AppState> for TimelineEndpointsState {
+    fn from_ref(state: &AppState) -> Self {
+        TimelineEndpointsState {
+            service: state.timelines().service(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
 /// social-graph's route group (task 5.2, `_Boundary: SocialGraphModule_`,
 /// design.md's `SocialGraphEndpoints` API Contract table): every
 /// follow/follow_requests/mute/block path `src/social_graph/endpoints.rs`
@@ -406,6 +425,27 @@ fn social_graph_router() -> Router<AppState> {
             SG_UNBLOCK_PATH,
             post(social_graph_endpoints::unblock::<SgAl, SgAr, SgD, SgLs, SgHs>),
         )
+}
+
+/// timelines's route group (task 5.2, `_Boundary: TimelinesModule, server,
+/// bootstrap, state_`, design.md's `TimelineEndpoints` API Contract table):
+/// home/public(local)/tag, mounted onto the three real handlers task 5.1's
+/// `src/timelines/endpoints.rs` implements. Kept as a separate `.merge()`-able
+/// group mirroring [`social_graph_router`]/[`statuses_router`]'s own
+/// precedent — task 5.1's own Implementation Note explicitly directs this
+/// (`endpoints.rs` deliberately defines no `router()` function of its own,
+/// following `social_graph::endpoints`'s identical precedent, so this
+/// function is the one place `HOME_TIMELINE_PATH`/`PUBLIC_TIMELINE_PATH`/
+/// `TAG_TIMELINE_PATH` are actually mounted). No real per-instance config is
+/// needed to build it either.
+fn timelines_router() -> Router<AppState> {
+    Router::new()
+        .route(HOME_TIMELINE_PATH, get(timelines_endpoints::home_timeline))
+        .route(
+            PUBLIC_TIMELINE_PATH,
+            get(timelines_endpoints::public_timeline),
+        )
+        .route(TAG_TIMELINE_PATH, get(timelines_endpoints::tag_timeline))
 }
 
 /// Path of the minimal liveness route this task adds (Requirement 1.1).
@@ -688,6 +728,10 @@ pub fn build_router(state: AppState) -> Router {
         // `media_router` are, immediately above — no `state`-derived sizing
         // is needed here either.
         .merge(social_graph_router())
+        // task 5.2: merged the same way `social_graph_router`/
+        // `statuses_router`/`accounts_router`/`media_router` are, immediately
+        // above — no `state`-derived sizing is needed here either.
+        .merge(timelines_router())
         .layer(rate_limit_layer(
             rate_limit_clock,
             RateLimitPolicy::new(RATE_LIMIT_PER_WINDOW, RATE_LIMIT_WINDOW),

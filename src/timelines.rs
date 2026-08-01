@@ -113,6 +113,59 @@
 //!   No `TimelinesModule` (task 5.2), and no wiring into
 //!   `crate::state`/`crate::bootstrap`/`crate::server` live here — this
 //!   module's handlers are not mounted onto the live application router yet.
+//! - Task 5.2 (`Boundary: TimelinesModule, server, bootstrap, state`,
+//!   `_Depends: 5.1_`): this module's own wiring/assembly point — design.md's
+//!   "Runtime / 配線層" -> "`TimelinesModule`（wiring）" (design.md line
+//!   ~420) and "File Structure Plan"'s explicit assignment of "TimelinesModule
+//!   組み立て・公開・ルータ装着点・TimelineMatcher シーム公開" to this very
+//!   file — mirrors `crate::statuses::StatusesModule`/
+//!   `crate::social_graph::SocialGraphModule`'s identical "bundle, don't
+//!   build; accessors return `Arc::clone`" shape (`src/statuses.rs`/
+//!   `src/social_graph.rs`'s own doc comments).
+//!
+//!   [`build_timelines_module`] constructs exactly one [`hydrator::StatusHydrator`]
+//!   (task 4.1, already reviewed) from `pool`/`accounts`/`media_store`, wraps
+//!   it in exactly one [`service::TimelineService`] (task 4.2, already
+//!   reviewed) alongside `pool`/`runtime`, and bundles that together with a
+//!   [`matcher::TimelineMatcher`] value (task 3.2, already reviewed — a
+//!   stateless `Copy` unit struct, so "storing" it costs nothing and needs no
+//!   async construction) into a [`TimelinesModule`]. This is the "結線"
+//!   (wiring) design.md's own Responsibilities & Constraints for this
+//!   component names explicitly: `VisibilityPolicy`(statuses-core)/
+//!   `FilterQuery`(social-graph)/`StatusSerializer`(statuses-core)/
+//!   Pagination(api-foundation) are each already consumed, unmodified, by
+//!   `TimelineFilter`/`TimelineService`/`StatusHydrator`'s own already-
+//!   reviewed bodies (`filter.rs`'s `VisibilityPolicy::is_visible` call,
+//!   `service.rs`'s `FilterQuery::new(...)` call, `hydrator.rs`'s
+//!   `serializer::status_to_json` call, `service.rs`'s `paginate` call) —
+//!   none of those four upstream dependencies need a registry/port
+//!   indirection the way `crate::statuses::visibility::RelationshipQueryRegistry`
+//!   does, so this module's own "結線" is exactly and only constructing the
+//!   already-reviewed collaborator chain once, with real production
+//!   `Arc<AccountService<...>>`/`LocalFsStore` handles sourced the same way
+//!   every sibling module already sources them (`accounts_module.service()`/
+//!   `media_module.store()`, per `crate::statuses::build_statuses_module`'s
+//!   own identical precedent for `StatusHydrator`'s own account/media
+//!   dependencies).
+//!
+//!   `src/state.rs` gains a `timelines: TimelinesModule` field/accessor
+//!   (mirroring `statuses`/`social_graph`'s own identical addition);
+//!   `src/bootstrap.rs` (and every other Composition-Root call site that
+//!   builds an `AppState` — `src/test_harness.rs`, `src/federation/
+//!   test_harness.rs`, `src/server/tests.rs`, `src/state/tests.rs` — calls
+//!   [`build_timelines_module`] after `accounts_module`/`media_module` already
+//!   exist and threads the result into `AppState::new`'s new final argument;
+//!   `src/server.rs` builds `timelines_router()` (mirroring
+//!   `social_graph_router()`/`statuses_router()`'s own precedent — see task
+//!   5.1's own Implementation Note, "no `pub fn router(...)` in this module")
+//!   mounting [`endpoints::HOME_TIMELINE_PATH`]/[`endpoints::PUBLIC_TIMELINE_PATH`]/
+//!   [`endpoints::TAG_TIMELINE_PATH`] to [`endpoints::home_timeline`]/
+//!   [`endpoints::public_timeline`]/[`endpoints::tag_timeline`], and `.merge()`s
+//!   it onto the foundation router the same way every other route group is.
+//!   `TimelineMatcher` becomes reachable from `AppState` via
+//!   `state.timelines().matcher()` — the public seam Requirement 8.3 and this
+//!   task's own "観測可能な完了" both name, ready for a future `streaming`
+//!   spec to reuse without this module's own API needing to change shape.
 
 pub mod candidate_repository;
 pub mod endpoints;
@@ -122,3 +175,87 @@ pub mod kind_rules;
 pub mod matcher;
 pub mod model;
 pub mod service;
+
+// ---- Task 5.2 (Boundary: TimelinesModule, server, bootstrap, state):
+// module wiring -------------------------------------------------------------
+
+use std::sync::Arc;
+
+use sqlx::PgPool;
+
+use crate::accounts::account_service::AccountService;
+use crate::federation::signatures::ReqwestFederationHttpClient;
+use crate::media::local_fs::LocalFsStore;
+use crate::runtime::RuntimeContext;
+use crate::timelines::hydrator::StatusHydrator;
+use crate::timelines::matcher::TimelineMatcher;
+use crate::timelines::service::TimelineService;
+
+/// The timelines module bundle (design.md's exact `TimelinesModule`
+/// component; task 5.2, Requirements 8.1, 8.3): the shared
+/// [`service::TimelineService`] handle `src/server.rs`'s
+/// `FromRef<AppState> for crate::timelines::endpoints::TimelineEndpointsState`
+/// bridge derives every mounted home/public/tag timeline endpoint's own
+/// state from, plus the [`matcher::TimelineMatcher`] public seam a future
+/// `streaming` spec reuses via `AppState::timelines().matcher()` (Requirement
+/// 8.3). Built by [`build_timelines_module`].
+pub struct TimelinesModule {
+    service: Arc<TimelineService>,
+    matcher: TimelineMatcher,
+}
+
+impl TimelinesModule {
+    /// The shared `TimelineService` handle — mirrors
+    /// `crate::statuses::StatusesModule::status_service`/
+    /// `crate::social_graph::SocialGraphModule::follow`'s own identical
+    /// "cheap `Arc::clone` accessor" shape.
+    pub fn service(&self) -> Arc<TimelineService> {
+        Arc::clone(&self.service)
+    }
+
+    /// The `TimelineMatcher` public seam (Requirement 8.3): a downstream
+    /// `streaming` spec reaches the single membership-judgment point this
+    /// spec establishes through this accessor, exactly the way REST
+    /// (`service::TimelineService::timeline`, task 4.2, already reviewed)
+    /// already does internally. Returned by value (not `&`/`Arc`): the type
+    /// itself is a zero-field, `Copy` unit struct (`matcher.rs`'s own doc
+    /// comment — "Holds no state of its own"), so cloning/copying it is
+    /// exactly as cheap as taking a reference would be, with none of a
+    /// reference's borrow-lifetime friction for a caller that wants to hold
+    /// its own owned value (e.g. to capture into a future `streaming`
+    /// broadcast closure).
+    pub fn matcher(&self) -> TimelineMatcher {
+        self.matcher
+    }
+}
+
+/// Assembles the [`TimelinesModule`] bundle (task 5.2, Requirements 8.1,
+/// 8.3): builds one [`hydrator::StatusHydrator`] from `pool`/`accounts`/
+/// `media_store`, wraps it in one [`service::TimelineService`] alongside
+/// `pool`/`runtime`, and pairs that with a fresh [`matcher::TimelineMatcher`]
+/// value — see this module's own doc comment ("Task 5.2") for why no
+/// registry/port indirection is needed for the four upstream dependencies
+/// design.md's own Responsibilities & Constraints names
+/// (`VisibilityPolicy`/`FilterQuery`/`StatusSerializer`/Pagination).
+///
+/// `accounts`/`media_store` are the exact same production handles every
+/// sibling module already sources from the same two upstream module bundles
+/// (`accounts_module.service()`/`media_module.store().clone()`, mirroring
+/// `crate::statuses::register_account_ports`'s own identical parameter
+/// pair) — callers (`src/bootstrap.rs`, `src/test_harness.rs`, `src/federation/
+/// test_harness.rs`) must call this after both `accounts::build_accounts_module`
+/// and `media::build_media_module` have already run.
+pub fn build_timelines_module(
+    pool: PgPool,
+    runtime: RuntimeContext,
+    accounts: Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>>,
+    media_store: LocalFsStore,
+) -> TimelinesModule {
+    let hydrator = StatusHydrator::new(pool.clone(), accounts, media_store);
+    let service = Arc::new(TimelineService::new(pool, runtime, hydrator));
+
+    TimelinesModule {
+        service,
+        matcher: TimelineMatcher,
+    }
+}

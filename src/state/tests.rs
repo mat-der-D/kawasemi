@@ -37,6 +37,7 @@ use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::social_graph::{SocialGraphModule, build_social_graph_module};
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{StatusesModule, build_statuses_module};
+use crate::timelines::{TimelinesModule, build_timelines_module};
 
 const LAZY_TEST_DB_URL: &str = "postgres://lazy-user:lazy-pw@127.0.0.1:5432/lazy-test-db";
 
@@ -301,6 +302,22 @@ fn sample_social_graph_module(
     )
 }
 
+/// Builds a `TimelinesModule` (task 5.2), mirroring
+/// `sample_social_graph_module`'s own "no real I/O beyond what construction
+/// itself needs" property: `build_timelines_module` only ever stores
+/// `pool`/`runtime` values and clones the caller-supplied `accounts`
+/// `Arc`/`media_store` handle (never dials the database or the network
+/// itself), so this is safe against the same `connect_lazy` pool this
+/// suite's other fixtures use.
+fn sample_timelines_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    accounts: &AccountsModule,
+    media: &MediaModule,
+) -> TimelinesModule {
+    build_timelines_module(pool, runtime, accounts.service(), media.store().clone())
+}
+
 /// Requirements 1.1, 3.3, 5.5, 5.6: downstream code must be able to retrieve
 /// the pool, the injection boundaries (via `RuntimeContext`), and the
 /// validated config values from `AppState`, unchanged from what was passed
@@ -333,6 +350,7 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         &statuses,
         &accounts,
     );
+    let timelines = sample_timelines_module(pool.clone(), runtime.clone(), &accounts, &media);
 
     let state = AppState::new(
         pool,
@@ -345,6 +363,7 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         accounts,
         statuses,
         social_graph,
+        timelines,
     );
 
     // Config values are retrievable and match what was supplied.
@@ -414,6 +433,7 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
         &statuses,
         &accounts,
     );
+    let timelines = sample_timelines_module(pool.clone(), runtime.clone(), &accounts, &media);
 
     let state = AppState::new(
         pool,
@@ -426,6 +446,7 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
         accounts,
         statuses,
         social_graph,
+        timelines,
     );
     assert_eq!(Arc::strong_count(&state.inner), 1);
 

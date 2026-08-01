@@ -40,6 +40,7 @@ use crate::oauth::OauthModule;
 use crate::runtime::RuntimeContext;
 use crate::social_graph::SocialGraphModule;
 use crate::statuses::StatusesModule;
+use crate::timelines::TimelinesModule;
 
 /// The data `AppState` bundles, held behind a single `Arc` so cloning the
 /// outer handle is one atomic increment rather than a deep copy of any of
@@ -81,6 +82,14 @@ struct AppStateInner {
     /// own state from — see `crate::social_graph::SocialGraphModule`'s own
     /// doc comment.
     social_graph: SocialGraphModule,
+    /// timelines's module bundle (task 5.2, Requirements 8.1, 8.3): the
+    /// shared `TimelineService` handle `src/server.rs`'s `FromRef<AppState>
+    /// for crate::timelines::endpoints::TimelineEndpointsState` bridge
+    /// derives every mounted home/public/tag timeline endpoint's own state
+    /// from, and the `TimelineMatcher` public seam a downstream `streaming`
+    /// spec reuses via `AppState::timelines().matcher()` — see
+    /// `crate::timelines::TimelinesModule`'s own doc comment.
+    timelines: TimelinesModule,
 }
 
 /// Immutable, cheaply-cloneable shared handle bundling the database
@@ -136,6 +145,7 @@ impl AppState {
         accounts: AccountsModule,
         statuses: StatusesModule,
         social_graph: SocialGraphModule,
+        timelines: TimelinesModule,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -149,6 +159,7 @@ impl AppState {
                 accounts,
                 statuses,
                 social_graph,
+                timelines,
             }),
         }
     }
@@ -241,5 +252,16 @@ impl AppState {
     /// handle.
     pub fn social_graph(&self) -> &SocialGraphModule {
         &self.inner.social_graph
+    }
+
+    /// The shared timelines module bundle (task 5.2, Requirements 8.1, 8.3):
+    /// `src/server.rs`'s `FromRef<AppState> for
+    /// crate::timelines::endpoints::TimelineEndpointsState` bridge derives
+    /// every mounted home/public/tag timeline endpoint's own state from this
+    /// handle, and a downstream `streaming` spec reaches the
+    /// `TimelineMatcher` public seam through
+    /// `state.timelines().matcher()`.
+    pub fn timelines(&self) -> &TimelinesModule {
+        &self.inner.timelines
     }
 }

@@ -110,6 +110,7 @@ use crate::state::AppState;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{self, ProdRemoteActorResolver};
 use crate::test_harness::{TestApp, TestAppParts};
+use crate::timelines;
 
 /// Same shared-test-database override convention as
 /// `crate::test_harness::TEST_DB_URL_ENV` (duplicated, not imported — that
@@ -528,6 +529,18 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         notifications,
     );
 
+    // Mirrors `crate::test_harness::spawn_test_app`'s own timelines wiring
+    // (task 5.2): builds the module the same way, sharing this paired
+    // instance's own `pool`/`runtime`/`accounts_module`'s `AccountService`/
+    // `media_module`'s `LocalFsStore` — no background task to spawn (see
+    // that call site's identical comment).
+    let timelines_module = timelines::build_timelines_module(
+        pool.clone(),
+        runtime.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+    );
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
@@ -539,6 +552,7 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         accounts_module,
         statuses_module,
         social_graph_module,
+        timelines_module,
     );
     let router = server::build_router(state.clone());
 

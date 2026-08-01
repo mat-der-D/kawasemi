@@ -110,6 +110,7 @@ use crate::state::AppState;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{self, ProdRemoteActorResolver};
 use crate::telemetry::{self, TelemetryError};
+use crate::timelines;
 
 #[cfg(test)]
 mod tests;
@@ -622,6 +623,20 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         notifications,
     );
 
+    // Assembles the timelines module bundle (task 5.2, Requirements 8.1,
+    // 8.3) the same way `bootstrap()`'s production path assembles every
+    // other bundle above (`timelines::build_timelines_module`), sharing this
+    // same `pool`/`runtime` and `accounts_module`'s own `AccountService`/
+    // `media_module`'s own `LocalFsStore` handles (`StatusHydrator`'s
+    // account/media dependencies) — mirrors `statuses_module`'s own
+    // identical "no background task to spawn" precedent.
+    let timelines_module = timelines::build_timelines_module(
+        pool.clone(),
+        runtime.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+    );
+
     Ok(AppState::new(
         pool,
         runtime,
@@ -633,6 +648,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         accounts_module,
         statuses_module,
         social_graph_module,
+        timelines_module,
     ))
 }
 

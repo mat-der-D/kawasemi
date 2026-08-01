@@ -50,6 +50,7 @@ use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::social_graph;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::telemetry::{REQUEST_ID_FIELD, REQUEST_SPAN_NAME};
+use crate::timelines;
 
 const LAZY_TEST_DB_URL: &str = "postgres://lazy-user:lazy-pw@127.0.0.1:5432/lazy-test-db";
 
@@ -231,6 +232,16 @@ fn test_state(seed: u64) -> AppState {
         accounts_module.service(),
         NotificationSinkRegistry::new(),
     );
+    // Mirrors the social-graph-module construction immediately above: builds
+    // the timelines module bundle (task 5.2) the same way `bootstrap()`'s
+    // production path does (`crate::timelines::build_timelines_module`) —
+    // this bundle performs no I/O at construction time either.
+    let timelines_module = timelines::build_timelines_module(
+        pool.clone(),
+        runtime.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+    );
     AppState::new(
         pool,
         runtime,
@@ -242,6 +253,7 @@ fn test_state(seed: u64) -> AppState {
         accounts_module,
         statuses_module,
         social_graph_module,
+        timelines_module,
     )
 }
 
