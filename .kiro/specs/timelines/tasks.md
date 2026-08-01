@@ -67,7 +67,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 3.1, 3.2, 3.3, 3.4, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 5.1, 5.2, 5.3, 5.4, 6.1, 6.2, 6.3, 6.4, 7.1, 7.2, 7.3, 7.4, 9.1, 9.2, 9.3, 9.4_
   - _Boundary: TimelineService, TimelineEndpoints, TimelineFilter_
   - _Depends: 5.2_
-- [ ] 6.2 (P) 単一生成点の一致と契約テストを整備する
+- [x] 6.2 (P) 単一生成点の一致と契約テストを整備する
   - REST タイムライン取得結果と `TimelineMatcher.matches` の単一投稿判定が同一 membership になることを検証し、タイムライン応答が statuses-core Status ゴールデンと整合（viewer 操作状態・reblog ネスト・null 規律を上流から継承）することを api-foundation 契約ハーネスで検証、実クライアントキャプチャをフィクスチャ登録する
   - 観測可能な完了: REST と membership 判定の一致テストがグリーンになり、タイムライン応答の Status 契約テストが決定的に再現する
   - _Requirements: 8.1, 8.2, 10.1, 10.2, 10.3, 10.4_
