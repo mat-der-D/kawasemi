@@ -43,7 +43,7 @@
   - _Boundary: NotificationFilter_
   - _Depends: 1.2_
 
-- [ ] 2.4 通知ジェネレータ（単一生成点）
+- [x] 2.4 通知ジェネレータ（単一生成点）
   - 受信者ローカル限定 → フィルタ抑制判定 → 種別ごとのイベント→通知写像 → 重複排除付き永続化 → 新規時のみ配信シーク引き渡しを、唯一の生成点として集約する。重複判定は「同一の未消去通知が既に存在するか」に限られ、dismiss/clear 済み通知と同一キーのイベントは新規通知として生成されることを前提とする
   - 非ローカル受信者・抑制・重複では永続化も配信引き渡しも起こらず、新規生成時のみ配信シークが呼ばれ、fav/reblog/mention/follow/follow_request/poll の各種別で受信者宛通知が作られる状態
   - _Requirements: 5.1, 5.2, 5.3, 5.5, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 8.1, 8.2_
@@ -103,6 +103,7 @@
 
 ## Implementation Notes
 
+- 2.4: `src/notifications/generator.rs` を追加。`NotificationGenerator::generate` は design.md のシーケンス図どおり「ローカル受信者判定（非ローカルは DB に触れず即 `SkippedNonLocal`）→ `NotificationFilter::should_suppress` → 種別非依存のイベント→通知写像（`id`/`created_at` は `RuntimeContext` から採番、`event.occurred_at` は使わない）→ `insert_dedup`（独自の存在事前チェックはしない）→ `Created` 時のみ配信シーク呼び出し」の順。配信シークのエラーは `generate` 自体の失敗にせず `tracing::warn!` でログして握りつぶす（フィルタ/リポジトリのエラーは `?` で伝播、配信のみ非対称に扱う）。`NotificationDeliverySink` は `NotificationPortsRegistry` 全体ではなく `Arc<dyn NotificationDeliverySink>` のみを保持（design.md の Components 表が `DeliverySink` 単体を依存として挙げているため）。このサンドボックスには到達可能な Postgres が無く、5 テスト中 DB 非依存の 1 件（`SkippedNonLocal` を `PgPool::connect_lazy` 上で検証、フィルタより先にローカル判定が走ることの証明にもなる）のみ実行確認、残り 4 件（抑制・6 種別生成・重複・dismiss 後の再生成=8.1/8.2 の取り消し→再実行）はレビューでの手動トレースにより正当性を確認した。
 - 2.3: `src/notifications/filter.rs` を追加。`NotificationFilter::should_suppress` は `social_graph::FilterQuery::blocked_set(recipient)` を一度呼ぶだけで、`blocked`/`blocked_by`/`muted_notifications` のいずれかに `origin` が含まれれば抑制（素の `muted` は 7.2 の要求どおり判定に使わない）。関係状態・期限判定の再実装なし（7.4）。このサンドボックスには到達可能な Postgres が無く（`social_graph::providers` 自身の既存テストも同一の `PoolTimedOut` で失敗することをレビューで確認済み・タスク横断のサンドボックス制約）、6 件のテストは実行不能だがレビューでの手動トレース（各テストが実装のどのバグを検出できるか 1 行ずつ検証済み）で正当性を確認した。
 - 2.1/2.2: `src/notifications/serializer.rs`・`src/notifications/ports.rs` を追加。`NotificationSerializer`/`NotificationEventSink`/`NotificationDeliverySink` は design.md の `&self` メソッド案ではなく `StatusSerializer`/`AccountSerializer`/`accounts::ports` と同じ「事前解決済み値・ハンドル」パターンで実装（既存踏襲パターンとしてレビューで実コード照合済み）。**根本原因を特定・恒久修正済み**: `tests/timeline_status_contract_it.rs` は HEAD 時点で rustfmt 非準拠だった。この repo では `cargo fmt -- <単一ファイル>` が cargo-fmt の仕様上 `--` 以降の引数を「自動検出したファイル一覧への追加」として扱うため、実際には**クレート全体**を再フォーマットする（単一ファイルにスコープされない）。`.claude/settings.json` の PostToolUse フック（`.rs` の Edit/Write 毎に `cargo fmt -- "$f"` を実行）がこれを踏むため、**どのタスクであっても `.rs` ファイルを編集するたびに**この差分が再発する。commit `b927681` で `tests/timeline_status_contract_it.rs` を rustfmt 準拠に一度だけ直し（純粋な空白差分、挙動変更なし、`cargo test --test timeline_status_contract_it` で DB 未接続以外の失敗が無いことを確認済み）、恒久的に解消した。以降のタスクでこの diff が再出現することは想定されないが、`.rs` を編集した後は常に `git status`/`git diff --name-only` で意図しないファイルが混入していないか確認すること（フック自体は今後も全体を re-fmt するため、真にリスクがあるのは「まだ rustfmt 非準拠な行が repo 内に残っている場合」のみ）。
 - 1.3: `src/notifications/repository.rs` を追加。design.md の Service Interface（`insert_dedup`/`list`/`find_for_recipient`/`dismiss`/`clear`/`ListFilter`）に一致。`ON CONFLICT (recipient_id, kind, origin_kind, origin_id, COALESCE(status_id, 0)) WHERE NOT dismissed` は migration 0009 の `notifications_dedup_idx` 定義と厳密に一致させる必要がある（Postgres の ON CONFLICT 推論対象は既存インデックス定義と完全一致が必須）ことを確認済み。`find_for_recipient` は Requirement 4.4 の文言（「一覧取得・単一取得から...除外する」）どおり消去済み行も除外する。`list` は全件取得後インメモリページングで、`social_graph/repository.rs::list_inbound_requests` 等の既存踏襲パターン。

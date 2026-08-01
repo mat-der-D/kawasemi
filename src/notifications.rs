@@ -44,6 +44,15 @@
 //!   social-graph's `FilterQuery::blocked_set` that reimplements no
 //!   relationship state or expiry logic of its own. See [`filter`]'s own
 //!   doc comment.
+//! - Task 2.4 (`Boundary: NotificationGenerator`): the single notification
+//!   generation point — [`generator::NotificationGenerator::generate`],
+//!   which sequences recipient-local-check → [`filter::NotificationFilter`]
+//!   → kind-agnostic event-to-notification mapping →
+//!   [`repository::insert_dedup`] → new-only
+//!   [`ports::NotificationDeliverySink`] hand-off, per design.md's own
+//!   sequence diagram. Implements no filtering/dedup/delivery logic of its
+//!   own — every collaborator it sequences was already built by an earlier
+//!   task. See [`generator`]'s own doc comment.
 //!
 //! This file will eventually become the `NotificationModule` composition
 //! point (design.md's File Structure Plan: "`src/notifications.rs` —
@@ -59,12 +68,14 @@
 //! being named as a boundary exclusion.
 
 pub mod filter;
+pub mod generator;
 pub mod model;
 pub mod ports;
 pub mod repository;
 pub mod serializer;
 
 pub use filter::NotificationFilter;
+pub use generator::{GenerateOutcome, NotificationGenerator};
 pub use model::{Notification, NotificationEvent, NotificationType};
 pub use ports::{
     NoopSink, NotificationDeliverySink, NotificationEventSink, NotificationPortsRegistry,
