@@ -17,17 +17,27 @@
 //!   `crate::domain` (core-runtime's canonical shared primitives module,
 //!   mirroring `src/statuses/model.rs`'s and `src/social_graph/model.rs`'s
 //!   identical precedent) — see [`model`]'s own doc comment.
+//! - Task 1.3 (`Boundary: NotificationRepository`): the notification's own
+//!   persistence — [`repository::insert_dedup`] (dedup-idempotent insert),
+//!   [`repository::list`] (recipient-scoped/dismissed-excluded/cursor-
+//!   paginated/type-and-account-filtered), [`repository::find_for_recipient`]
+//!   (single fetch), [`repository::dismiss`], [`repository::clear`], plus
+//!   [`repository::InsertOutcome`]/[`repository::ListFilter`] — against
+//!   `notifications` (`migrations/0009_notifications.sql`, task 1.1). See
+//!   [`repository`]'s own doc comment.
 //!
 //! This file will eventually become the `NotificationModule` composition
 //! point (design.md's File Structure Plan: "`src/notifications.rs` —
 //! NotificationModule 組み立て・公開・ルータ装着点・EventSink/DeliverySink
-//! 登録") once later tasks (2.x-4.x: `repository`, `ports`, `filter`,
-//! `generator`, `event_sink`, `serializer`, `service`, `endpoints`, and
-//! their wiring) land. For this task (`Boundary: model`), it declares only
-//! the `model` submodule and re-exports its types — no repository, port,
-//! filter, generator, serializer, service, endpoint, or wiring code exists
-//! yet.
+//! 登録") once later tasks (2.x-4.x: `ports`, `filter`, `generator`,
+//! `event_sink`, `serializer`, `service`, `endpoints`, and their wiring)
+//! land. For this task (`Boundary: NotificationRepository`), it declares
+//! the `model` and `repository` submodules and re-exports their public
+//! types — no port, filter, generator, serializer, service, endpoint, or
+//! wiring code exists yet.
 
 pub mod model;
+pub mod repository;
 
 pub use model::{Notification, NotificationEvent, NotificationType};
+pub use repository::{InsertOutcome, ListFilter};

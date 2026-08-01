@@ -14,7 +14,7 @@
   - _Boundary: model_
   - _Depends: 1.1_
 
-- [ ] 1.3 通知リポジトリ
+- [x] 1.3 通知リポジトリ
   - 重複排除付き挿入（未消去限定の部分一意インデックスを衝突対象とした `ON CONFLICT ... WHERE NOT dismissed DO NOTHING` で新規/既存無視を返し、消去済みの同一キー通知は新規挿入を妨げない）、受信者スコープ + 消去済み除外 + 通知 ID カーソル + 種別/account（解決済み `AccountRef` を受け取り、本層では ID 解決を行わない）フィルタの一覧取得、(id, recipient) 単一取得、dismiss、clear を実装する
   - 同一重複排除キーの二重挿入が冪等になり、消去済みにした通知と同一キーの新規挿入は新規作成として扱われ（取り消し→再実行の再通知）、消去済みが一覧から除外され、他者宛が単一取得で None になることをリポジトリ単体で確認できる状態
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 4.1, 4.2, 4.4, 8.1, 8.2_
@@ -103,6 +103,7 @@
 
 ## Implementation Notes
 
+- 1.3: `src/notifications/repository.rs` を追加。design.md の Service Interface（`insert_dedup`/`list`/`find_for_recipient`/`dismiss`/`clear`/`ListFilter`）に一致。`ON CONFLICT (recipient_id, kind, origin_kind, origin_id, COALESCE(status_id, 0)) WHERE NOT dismissed` は migration 0009 の `notifications_dedup_idx` 定義と厳密に一致させる必要がある（Postgres の ON CONFLICT 推論対象は既存インデックス定義と完全一致が必須）ことを確認済み。`find_for_recipient` は Requirement 4.4 の文言（「一覧取得・単一取得から...除外する」）どおり消去済み行も除外する。`list` は全件取得後インメモリページングで、`social_graph/repository.rs::list_inbound_requests` 等の既存踏襲パターン。
 - 1.2: `src/notifications/model.rs` を追加。`NotificationType`/`Notification`/`NotificationEvent` は design.md の型定義に完全一致（フィールド名・型を1対1で確認済み）。`crate::domain::{Id, AccountRef}` を再定義せず再利用。`src/statuses/notification_sink.rs`（task 9.2 が用意した暫定プレースホルダ、同一形状の `NotificationType`/`NotificationEvent`）は本タスクの境界（`model` のみ）外のため意図的に未着手・共存のまま — 移行は task 2.2/3.1 の責務。ユニットテストは `model.rs` 内インライン（`src/statuses/model.rs` 等、既存の `model.rs` すべてに共通する先例に合わせた。`model/tests.rs` はリポジトリ内に一つも存在しない）。
 - 1.1: `migrations/0009_notifications.sql` を追加。`research.md` の番号調整記録どおり `0009` は未使用で、既存の `0011`/`0012` と衝突しない（sqlx は埋め込み時に昇順で適用するのみで、履歴上の適用順は要求しないため安全）。`tests/notifications_migrations_it.rs` で実 Postgres 経由の RED→GREEN を確認し、`WHERE NOT dismissed` 部分一意インデックスの重複排除/再通知セマンティクスを実際の制約違反 INSERT + SQLSTATE 23505 で検証済み。
 - ワークスペース全体の `cargo test`（約1500件、デフォルト並列度）は、このサンドボックスのリソース制約下で実行するたびに異なる無関係テスト集合が単発失敗する（本タスクとは無関係な既存不安定性）。タスクスコープの検証は、対象テスト単体実行と隣接モジュール（`statuses::`）の反復実行で行うこと。フル `cargo test` の単発失敗のみを根拠に REJECTED としない — 対象テストの単体反復実行結果を優先する。
