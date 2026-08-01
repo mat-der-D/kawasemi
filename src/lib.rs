@@ -29,6 +29,7 @@ pub mod error;
 pub mod federation;
 pub mod media;
 pub mod migrate;
+pub mod notifications;
 pub mod oauth;
 pub mod runtime;
 pub mod server;

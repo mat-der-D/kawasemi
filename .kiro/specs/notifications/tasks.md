@@ -7,7 +7,7 @@
   - _Requirements: 8.1_
   - _Boundary: NotificationRepository_
 
-- [ ] 1.2 通知ドメイン型
+- [x] 1.2 通知ドメイン型
   - 通知 v1 種別の列挙（mention/follow/follow_request/favourite/reblog/poll/status/update）、通知本体（受信者・通知元 AccountRef・対象投稿任意・消去・作成時刻）、通知生成イベント（受信者・通知元・種別・対象投稿・発生時刻）を定義する
   - 範囲外の種別が型として表現できず、status を伴わない種別が対象投稿なしで表現できる状態でコンパイルが通る状態
   - _Requirements: 1.1, 1.5, 5.1, 6.1, 8.1_
@@ -103,5 +103,6 @@
 
 ## Implementation Notes
 
+- 1.2: `src/notifications/model.rs` を追加。`NotificationType`/`Notification`/`NotificationEvent` は design.md の型定義に完全一致（フィールド名・型を1対1で確認済み）。`crate::domain::{Id, AccountRef}` を再定義せず再利用。`src/statuses/notification_sink.rs`（task 9.2 が用意した暫定プレースホルダ、同一形状の `NotificationType`/`NotificationEvent`）は本タスクの境界（`model` のみ）外のため意図的に未着手・共存のまま — 移行は task 2.2/3.1 の責務。ユニットテストは `model.rs` 内インライン（`src/statuses/model.rs` 等、既存の `model.rs` すべてに共通する先例に合わせた。`model/tests.rs` はリポジトリ内に一つも存在しない）。
 - 1.1: `migrations/0009_notifications.sql` を追加。`research.md` の番号調整記録どおり `0009` は未使用で、既存の `0011`/`0012` と衝突しない（sqlx は埋め込み時に昇順で適用するのみで、履歴上の適用順は要求しないため安全）。`tests/notifications_migrations_it.rs` で実 Postgres 経由の RED→GREEN を確認し、`WHERE NOT dismissed` 部分一意インデックスの重複排除/再通知セマンティクスを実際の制約違反 INSERT + SQLSTATE 23505 で検証済み。
 - ワークスペース全体の `cargo test`（約1500件、デフォルト並列度）は、このサンドボックスのリソース制約下で実行するたびに異なる無関係テスト集合が単発失敗する（本タスクとは無関係な既存不安定性）。タスクスコープの検証は、対象テスト単体実行と隣接モジュール（`statuses::`）の反復実行で行うこと。フル `cargo test` の単発失敗のみを根拠に REJECTED としない — 対象テストの単体反復実行結果を優先する。
