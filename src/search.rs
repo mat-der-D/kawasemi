@@ -52,6 +52,21 @@
 //!   No derivation from upstream `statuses` happens here — that is task
 //!   2.2's (`hashtag_indexer.rs`) job, strictly downstream of this module.
 //!
+//! - Task 2.2 (`Boundary: HashtagIndexer`): the watermark-cursor-based
+//!   derivation/catch-up scan —
+//!   [`hashtag_indexer::catch_up_from_watermark`] reads
+//!   [`hashtag_repository::load_watermark`]'s cursor (`None` = backfill),
+//!   walks `statuses` rows newer than it in ascending `(created_at, id)`
+//!   batches, derives each one's already-extracted hashtags (statuses-core's
+//!   own `crate::statuses::tag_repository::tags_for_status`, read-only) into
+//!   `search_tags`/`search_status_tags` via
+//!   [`hashtag_repository::upsert_tag_usage`], and advances the watermark
+//!   via [`hashtag_repository::save_watermark`] once each batch fully
+//!   completes. See [`hashtag_indexer`]'s own doc comment for the full
+//!   signature/batch-shape reasoning. No wiring into `search_hashtags`/
+//!   `PgSearchBackend` happens here — that is task 3.2's job, strictly
+//!   downstream of this module.
+//!
 //! This file will eventually become the `SearchModule` composition point
 //! (design.md's File Structure Plan: "`src/search.rs` — SearchModule
 //! 組み立て...と公開・ルータ装着点") once later tasks (2.2-5.3:
@@ -62,6 +77,7 @@
 //! re-exports `model`'s/`ports`' types — no backend adapter, indexer,
 //! resolver, serializer, service, endpoint, or wiring code exists yet.
 
+pub mod hashtag_indexer;
 pub mod hashtag_repository;
 pub mod model;
 pub mod ports;

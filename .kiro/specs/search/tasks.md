@@ -35,7 +35,7 @@
   - _Requirements: 5.1, 5.2, 5.5, 8.2_
   - _Boundary: HashtagIndexRepository_
   - _Depends: 1.1, 1.2_
-- [ ] 2.2 ハッシュタグインデクサ（watermark カーソル方式の導出・キャッチアップ）を実装する
+- [x] 2.2 ハッシュタグインデクサ（watermark カーソル方式の導出・キャッチアップ）を実装する
   - `src/search/hashtag_indexer.rs` に `catch_up_from_watermark` を実装し、`load_watermark` で得た watermark（未保持時は全件走査＝バックフィル相当）より新しい `statuses` 行を statuses-core の投稿保持データから read-only で走査し、抽出済みハッシュタグを `search_tags`/`search_status_tags` へ upsert したのち `save_watermark` で watermark を進める。時刻/ID は `RuntimeContext` を用いる
   - 観測可能な完了条件: 既存投稿のハッシュタグがインデックスへ導出され、再実行で重複生成されず watermark 以降の新規投稿のみが処理され、upstream テーブルを変更しない統合テストが通る
   - _Requirements: 5.3_
