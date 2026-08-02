@@ -28,7 +28,7 @@
   - _Depends: 1.2_
 
 - [ ] 2. データ層: ハッシュタグ読み取りインデックス
-- [ ] 2.1 ハッシュタグインデックスリポジトリを実装する
+- [x] 2.1 ハッシュタグインデックスリポジトリを実装する
   - `src/search/hashtag_repository.rs` に `match_hashtags`（名前の前方/部分一致で `TagView` を返す）と `upsert_tag_usage`（`search_tags`/`search_status_tags` の upsert）を実装し、本 spec 所有テーブルのみを参照する
   - 同ファイルに `load_watermark`（`search_index_watermark` から最終処理済み `statuses.created_at`/`id` を読む。未保持は `None`）と `save_watermark`（同テーブルへ upsert）を実装する
   - 観測可能な完了条件: 名前一致で `TagView` が返り、`limit`/`offset` が反映され、(tag_id, status_id) 重複が一意化され、`save_watermark` 後に `load_watermark` が同じ値を返す統合テストが通る

@@ -41,16 +41,28 @@
 //!   exists yet — that is task 3.1's job, strictly downstream of this
 //!   port definition.
 //!
+//! - Task 2.1 (`Boundary: HashtagIndexRepository`): read/upsert access to
+//!   this spec's own hashtag read index —
+//!   [`hashtag_repository::match_hashtags`] (name prefix match ->
+//!   `Vec<`[`TagView`]`>`, `limit`/`offset` applied), and
+//!   [`hashtag_repository::load_watermark`]/
+//!   [`hashtag_repository::save_watermark`] (the `HashtagIndexer`'s, task
+//!   2.2, derivation-cursor read/upsert) against `search_tags` /
+//!   `search_status_tags` / `search_index_watermark` only (Requirement 8.2).
+//!   No derivation from upstream `statuses` happens here — that is task
+//!   2.2's (`hashtag_indexer.rs`) job, strictly downstream of this module.
+//!
 //! This file will eventually become the `SearchModule` composition point
 //! (design.md's File Structure Plan: "`src/search.rs` — SearchModule
-//! 組み立て...と公開・ルータ装着点") once later tasks (2.1-5.3:
-//! `pg_backend`, `hashtag_repository`, `hashtag_indexer`, `remote_resolver`,
-//! `hydrator`, `tag_serializer`, `result_serializer`, `service`,
-//! `endpoint`, and their wiring into `AppState`/bootstrap/server) land. For
-//! now it declares the `model`/`query_parser`/`ports` submodules and
-//! re-exports their types — no backend adapter, repository, indexer,
+//! 組み立て...と公開・ルータ装着点") once later tasks (2.2-5.3:
+//! `hashtag_indexer`, `pg_backend`, `remote_resolver`, `hydrator`,
+//! `tag_serializer`, `result_serializer`, `service`, `endpoint`, and their
+//! wiring into `AppState`/bootstrap/server) land. For now it declares the
+//! `model`/`query_parser`/`ports`/`hashtag_repository` submodules and
+//! re-exports `model`'s/`ports`' types — no backend adapter, indexer,
 //! resolver, serializer, service, endpoint, or wiring code exists yet.
 
+pub mod hashtag_repository;
 pub mod model;
 pub mod ports;
 pub mod query_parser;
