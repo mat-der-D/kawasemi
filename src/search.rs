@@ -21,6 +21,15 @@
 //!   shared primitives module, mirroring `src/notifications/model.rs`'s
 //!   and `src/statuses/model.rs`'s identical precedent) — see [`model`]'s
 //!   own doc comment.
+//! - Task 1.3 (`Boundary: QueryParser`): the raw-query discrimination and
+//!   normalization boundary — [`query_parser::parse_query`] classifies a
+//!   trimmed query string into a [`model::ParsedQuery`], in order:
+//!   `acct:user@domain` (WebFinger acct URI syntax), `@user@domain`
+//!   (Mastodon mention shorthand), an absolute `http`/`https` URL with a
+//!   present host, or else a plain-word query, rejecting empty/whitespace-
+//!   only input with a `422 Unprocessable Entity` `AppError` (Requirements
+//!   2.3, 6.1, 6.2) — see [`query_parser`]'s own doc comment for the full
+//!   normalization rules and edge-case resolutions.
 //!
 //! - Task 1.4 (`Boundary: SearchBackend`): the search backend abstraction
 //!   boundary — [`ports::SearchBackend`] (`search_accounts` /
