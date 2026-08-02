@@ -14,7 +14,7 @@
   - _Requirements: 1.3, 2.1, 2.2, 7.2_
   - _Boundary: model_
   - _Depends: 1.1_
-- [ ] 1.3 (P) クエリパーサを実装する
+- [x] 1.3 (P) クエリパーサを実装する
   - `src/search/query_parser.rs` に `parse_query` を実装し、`acct:user@domain` / `@user@domain` / URL（スキーム付き）/ プレーン語を `ParsedQuery` に判別・正規化し、空/空白のみは 422 相当の `AppError` を返す
   - 観測可能な完了条件: 4 種別の判別と空クエリ拒否を網羅する単体テストが通る
   - _Requirements: 2.3, 6.1, 6.2_

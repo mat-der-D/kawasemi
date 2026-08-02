@@ -34,7 +34,9 @@
 //! service, endpoint, or wiring code exists yet.
 
 pub mod model;
+pub mod query_parser;
 
 pub use model::{
     ParsedQuery, SearchMatches, SearchParams, SearchType, TagHistoryEntry, TagMatch, TagView,
 };
+pub use query_parser::parse_query;
