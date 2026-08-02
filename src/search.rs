@@ -22,21 +22,32 @@
 //!   and `src/statuses/model.rs`'s identical precedent) — see [`model`]'s
 //!   own doc comment.
 //!
+//! - Task 1.4 (`Boundary: SearchBackend`): the search backend abstraction
+//!   boundary — [`ports::SearchBackend`] (`search_accounts` /
+//!   `search_statuses` / `search_hashtags`, identifiers only, Requirement
+//!   7.2), its three request types ([`ports::AccountQuery`],
+//!   [`ports::StatusQuery`], [`ports::HashtagQuery`]), and the
+//!   swap-in test double [`ports::StubSearchBackend`] (Requirement 7.5).
+//!   No concrete standard-PostgreSQL implementation (`PgSearchBackend`)
+//!   exists yet — that is task 3.1's job, strictly downstream of this
+//!   port definition.
+//!
 //! This file will eventually become the `SearchModule` composition point
 //! (design.md's File Structure Plan: "`src/search.rs` — SearchModule
-//! 組み立て...と公開・ルータ装着点") once later tasks (1.3-5.3:
-//! `query_parser`, `ports`, `pg_backend`, `hashtag_repository`,
-//! `hashtag_indexer`, `remote_resolver`, `hydrator`, `tag_serializer`,
-//! `result_serializer`, `service`, `endpoint`, and their wiring into
-//! `AppState`/bootstrap/server) land. For this task (`Boundary: model`), it
-//! declares only the `model` submodule and re-exports its types — no
-//! parser, port, backend, repository, indexer, resolver, serializer,
-//! service, endpoint, or wiring code exists yet.
+//! 組み立て...と公開・ルータ装着点") once later tasks (2.1-5.3:
+//! `pg_backend`, `hashtag_repository`, `hashtag_indexer`, `remote_resolver`,
+//! `hydrator`, `tag_serializer`, `result_serializer`, `service`,
+//! `endpoint`, and their wiring into `AppState`/bootstrap/server) land. For
+//! now it declares the `model`/`query_parser`/`ports` submodules and
+//! re-exports their types — no backend adapter, repository, indexer,
+//! resolver, serializer, service, endpoint, or wiring code exists yet.
 
 pub mod model;
+pub mod ports;
 pub mod query_parser;
 
 pub use model::{
     ParsedQuery, SearchMatches, SearchParams, SearchType, TagHistoryEntry, TagMatch, TagView,
 };
+pub use ports::{AccountQuery, HashtagQuery, SearchBackend, StatusQuery, StubSearchBackend};
 pub use query_parser::parse_query;

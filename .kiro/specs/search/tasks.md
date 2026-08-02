@@ -20,7 +20,7 @@
   - _Requirements: 2.3, 6.1, 6.2_
   - _Boundary: QueryParser_
   - _Depends: 1.2_
-- [ ] 1.4 (P) 検索バックエンド抽象ポートを定義する
+- [x] 1.4 (P) 検索バックエンド抽象ポートを定義する
   - `src/search/ports.rs` に `SearchBackend` trait（`search_accounts` / `search_statuses` / `search_hashtags`、いずれも識別子のみ返す）と `AccountQuery` / `StatusQuery` / `HashtagQuery`、テスト用 `StubSearchBackend` の差し替え規約を定義する
   - 観測可能な完了条件: スタブ実装が trait を満たし、識別子のみを返す差し替えが可能で、呼び出し側がエンジン非依存に書ける単体テストが通る
   - _Requirements: 7.1, 7.2, 7.5_
@@ -125,4 +125,5 @@
 
 ## Implementation Notes
 
+- グループ1 (1.1-1.4) を通じて: `notifications`/`statuses`/`timelines` 等の既存テストで「無関係な事前失敗」の件数がラン毎に大きく変動する現象を確認（同一コード状態で 15/22/49/65 件など）。原因は `src/test_harness.rs` の共有テスト用 Postgres プールが `max_connections: 1` に設定されていることによる並列実行時のコネクション競合と推定される（`search` 配下のテストは DB を使わないため影響を受けない）。今後のタスクレビューで「事前失敗件数」を回帰の判定基準として使う場合は、この既知のフレーキー要因を差し引いて判断すること。search spec 自体の修正対象ではないため本タスクでは対応しない。
 - タスク 1.1: `tasks.md`/`design.md` が指定するマイグレーション番号 `0010` は実際には未使用の予約済み欠番だった（`migrations/` は 0001-0007/0009/0011/0012 まで既に埋まっており、0008/0010 は他 spec の design.md が並列生成時に重複して主張した未使用番号であることが `social-graph/tasks.md` の Implementation Notes で先に判明済み）。次の空き番号 `migrations/0013_search.sql` を採用した。番号以外は design.md の Physical Data Model ブロックと完全一致（`search_tags`/`search_status_tags`/`search_index_watermark`、`text_pattern_ops` 前方一致索引、シングルトン CHECK 制約、`CREATE EXTENSION` なし）。今後 search 内で新規マイグレーションが必要になった場合は 0014 以降を使うこと。
