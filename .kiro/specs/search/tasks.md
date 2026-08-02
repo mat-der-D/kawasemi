@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. 基盤: スキーマ・ドメイン型・解析・照合ポート
-- [ ] 1.1 検索用テーブルのマイグレーションを追加する
+- [x] 1.1 検索用テーブルのマイグレーションを追加する
   - `migrations/0010_search.sql` を作成し `search_tags`（`name` UNIQUE・使用集計）と `search_status_tags`（tag_id↔status_id）を定義し、前方一致索引（`text_pattern_ops`）と status_id 索引を設定する
   - 同マイグレーションに `search_index_watermark`（`id BOOLEAN PRIMARY KEY DEFAULT TRUE` + 単一行強制の CHECK 制約、`status_created_at`、`status_id`、`updated_at`）のシングルトンテーブルを追加し、ハッシュタグインデクサの導出カーソルを永続化できるようにする
   - 既定構成に `CREATE EXTENSION`（`pg_bigm` 等）を含めず、標準 PostgreSQL のみで成立させる。日本語拡張インデックスを後から独立マイグレーション（`CREATE EXTENSION` + GIN）で追加しても本テーブル・既定契約を破壊しない構造（スキーマコメントで後付け経路を明記）にする
@@ -122,3 +122,7 @@
   - _Requirements: 7.1, 7.3, 7.4, 7.5, 8.4_
   - _Boundary: search_backend_swap_it_
   - _Depends: 5.3_
+
+## Implementation Notes
+
+- タスク 1.1: `tasks.md`/`design.md` が指定するマイグレーション番号 `0010` は実際には未使用の予約済み欠番だった（`migrations/` は 0001-0007/0009/0011/0012 まで既に埋まっており、0008/0010 は他 spec の design.md が並列生成時に重複して主張した未使用番号であることが `social-graph/tasks.md` の Implementation Notes で先に判明済み）。次の空き番号 `migrations/0013_search.sql` を採用した。番号以外は design.md の Physical Data Model ブロックと完全一致（`search_tags`/`search_status_tags`/`search_index_watermark`、`text_pattern_ops` 前方一致索引、シングルトン CHECK 制約、`CREATE EXTENSION` なし）。今後 search 内で新規マイグレーションが必要になった場合は 0014 以降を使うこと。
