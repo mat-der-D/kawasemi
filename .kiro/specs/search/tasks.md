@@ -8,7 +8,7 @@
   - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、3 テーブル（`search_tags`/`search_status_tags`/`search_index_watermark`）と各索引・制約（`search_index_watermark` の単一行 CHECK を含む）が存在し、拡張未導入でも起動する統合確認が通る
   - _Requirements: 8.1, 8.2, 8.3_
   - _Boundary: Migration_
-- [ ] 1.2 (P) 検索ドメイン型を定義する
+- [x] 1.2 (P) 検索ドメイン型を定義する
   - `src/search/model.rs` に `SearchType` / `SearchParams` / `ParsedQuery` / `SearchMatches`（識別子のみ）/ `TagMatch` / `TagView` / `TagHistoryEntry` を定義し、`AccountRef`（accounts-and-instance）と core-runtime Id/時刻型を消費する
   - 観測可能な完了条件: 各型がコンパイルされ、`SearchMatches` がエンティティ JSON を持たず識別子のみで構成される単体テストが通る
   - _Requirements: 1.3, 2.1, 2.2, 7.2_
