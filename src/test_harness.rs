@@ -100,6 +100,7 @@ use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{self, FederationWiringConfig};
 use crate::media;
 use crate::migrate;
+use crate::notifications;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::server;
@@ -814,7 +815,7 @@ pub async fn spawn_test_app() -> TestApp {
         &statuses_module.relationship_query_registry(),
         accounts_module.ports(),
         accounts_module.service(),
-        notifications,
+        notifications.clone(),
     );
 
     // Assembles the timelines module bundle (task 5.2) the same way
@@ -830,6 +831,23 @@ pub async fn spawn_test_app() -> TestApp {
         media_module.store().clone(),
     );
 
+    // Assembles the notifications module bundle (task 4.2) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::notifications::build_notification_module`), sharing this
+    // instance's own `pool`/`runtime`/`config.server.domain`/
+    // `accounts_module`'s `AccountService`/`media_module`'s `LocalFsStore`,
+    // and this same `notifications` registry every upstream module above
+    // already shares — no background task to spawn (see `accounts_module`'s
+    // own identical precedent above).
+    let notification_module = notifications::build_notification_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+        notifications,
+    );
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
@@ -842,6 +860,7 @@ pub async fn spawn_test_app() -> TestApp {
         statuses_module,
         social_graph_module,
         timelines_module,
+        notification_module,
     );
     let router = server::build_router(state.clone());
 

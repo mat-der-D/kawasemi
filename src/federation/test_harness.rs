@@ -102,6 +102,7 @@ use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{self, FederationWiringConfig};
 use crate::media;
 use crate::migrate;
+use crate::notifications;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::server;
@@ -526,7 +527,7 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         &statuses_module.relationship_query_registry(),
         accounts_module.ports(),
         accounts_module.service(),
-        notifications,
+        notifications.clone(),
     );
 
     // Mirrors `crate::test_harness::spawn_test_app`'s own timelines wiring
@@ -541,6 +542,21 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         media_module.store().clone(),
     );
 
+    // Mirrors `crate::test_harness::spawn_test_app`'s own notifications
+    // wiring (task 4.2): builds the module the same way
+    // (`crate::notifications::build_notification_module`), sharing this
+    // paired instance's own `pool`/`runtime`/`config.server.domain`/
+    // `accounts_module`'s `AccountService`/`media_module`'s `LocalFsStore`,
+    // and this same `notifications` registry built above.
+    let notification_module = notifications::build_notification_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+        notifications,
+    );
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
@@ -553,6 +569,7 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         statuses_module,
         social_graph_module,
         timelines_module,
+        notification_module,
     );
     let router = server::build_router(state.clone());
 

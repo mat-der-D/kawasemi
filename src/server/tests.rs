@@ -45,6 +45,7 @@ use crate::error::{AppError, GENERIC_SERVER_MESSAGE};
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{FederationWiringConfig, build_federation_module};
 use crate::media;
+use crate::notifications;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::social_graph;
@@ -242,6 +243,19 @@ fn test_state(seed: u64) -> AppState {
         accounts_module.service(),
         media_module.store().clone(),
     );
+    // Mirrors the timelines-module construction immediately above: builds
+    // the notifications module bundle (task 4.2) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::notifications::build_notification_module`) — this bundle
+    // performs no I/O at construction time either.
+    let notification_module = notifications::build_notification_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+        NotificationSinkRegistry::new(),
+    );
     AppState::new(
         pool,
         runtime,
@@ -254,6 +268,7 @@ fn test_state(seed: u64) -> AppState {
         statuses_module,
         social_graph_module,
         timelines_module,
+        notification_module,
     )
 }
 

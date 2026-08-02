@@ -32,6 +32,7 @@ use crate::config::{
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{FederationModule, FederationWiringConfig, build_federation_module};
 use crate::media::{self, MediaModule};
+use crate::notifications::{NotificationModule, build_notification_module};
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::social_graph::{SocialGraphModule, build_social_graph_module};
@@ -318,6 +319,30 @@ fn sample_timelines_module(
     build_timelines_module(pool, runtime, accounts.service(), media.store().clone())
 }
 
+/// Builds a `NotificationModule` (task 4.2), mirroring
+/// `sample_timelines_module`'s own "no real I/O beyond what construction
+/// itself needs" property: `build_notification_module` only ever stores
+/// `pool`/`runtime`/config values, clones the caller-supplied `accounts`
+/// `Arc`/`media_store` handle, and calls `set_event_sink`/`set_sink` on
+/// already-constructed, `connect_lazy`-safe registries (no real I/O either)
+/// — so this is safe against the same `connect_lazy` pool this suite's
+/// other fixtures use.
+fn sample_notification_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    accounts: &AccountsModule,
+    media: &MediaModule,
+) -> NotificationModule {
+    build_notification_module(
+        pool,
+        runtime,
+        "state-test.notifications.internal".to_string(),
+        accounts.service(),
+        media.store().clone(),
+        NotificationSinkRegistry::new(),
+    )
+}
+
 /// Requirements 1.1, 3.3, 5.5, 5.6: downstream code must be able to retrieve
 /// the pool, the injection boundaries (via `RuntimeContext`), and the
 /// validated config values from `AppState`, unchanged from what was passed
@@ -351,6 +376,8 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         &accounts,
     );
     let timelines = sample_timelines_module(pool.clone(), runtime.clone(), &accounts, &media);
+    let notifications =
+        sample_notification_module(pool.clone(), runtime.clone(), &accounts, &media);
 
     let state = AppState::new(
         pool,
@@ -364,6 +391,7 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         statuses,
         social_graph,
         timelines,
+        notifications,
     );
 
     // Config values are retrievable and match what was supplied.
@@ -434,6 +462,8 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
         &accounts,
     );
     let timelines = sample_timelines_module(pool.clone(), runtime.clone(), &accounts, &media);
+    let notifications =
+        sample_notification_module(pool.clone(), runtime.clone(), &accounts, &media);
 
     let state = AppState::new(
         pool,
@@ -447,6 +477,7 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
         statuses,
         social_graph,
         timelines,
+        notifications,
     );
     assert_eq!(Arc::strong_count(&state.inner), 1);
 

@@ -102,6 +102,7 @@ use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{self, FederationWiringConfig};
 use crate::media;
 use crate::migrate::{self, MigrateError};
+use crate::notifications;
 use crate::oauth::OauthModule;
 use crate::runtime::{RuntimeContext, SnowflakeIdGenerator, SystemClock, SystemRng};
 use crate::server::{self, ServeError};
@@ -620,7 +621,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         &statuses_module.relationship_query_registry(),
         accounts_module.ports(),
         accounts_module.service(),
-        notifications,
+        notifications.clone(),
     );
 
     // Assembles the timelines module bundle (task 5.2, Requirements 8.1,
@@ -637,6 +638,28 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         media_module.store().clone(),
     );
 
+    // Assembles the notifications module bundle (task 4.2, Requirements
+    // 5.4, 5.5, 9.1) the same way `bootstrap()`'s production path assembles
+    // every other bundle above (`notifications::build_notification_module`),
+    // sharing this same `pool`/`runtime`/`cfg.server.domain`/
+    // `accounts_module`'s own `AccountService`/`media_module`'s own
+    // `LocalFsStore` handles (`NotificationService`'s own `account`/`status`
+    // embed dependencies), and this same `notifications` registry every
+    // upstream module above already shares — this call's own `set_sink`
+    // replaces its built-in `NoopSink` default with the real event sink
+    // (task 3.1), reaching every local-/remote-origin emit call site
+    // `statuses_module`/`social_graph_module` above already hold a clone of
+    // (Requirement 5.4). No background task to spawn here — mirrors
+    // `accounts_module`'s own "no resident worker" precedent.
+    let notification_module = notifications::build_notification_module(
+        pool.clone(),
+        runtime.clone(),
+        cfg.server.domain.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+        notifications,
+    );
+
     Ok(AppState::new(
         pool,
         runtime,
@@ -649,6 +672,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         statuses_module,
         social_graph_module,
         timelines_module,
+        notification_module,
     ))
 }
 

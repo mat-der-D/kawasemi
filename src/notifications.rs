@@ -63,22 +63,40 @@
 //!   converts `statuses::notification_sink`'s placeholder event/kind types
 //!   into this module's own and delegates onward. Registering either into
 //!   a live `AppState`/`statuses::notification_sink::NotificationSinkRegistry`
-//!   is task 4.2's job, not this one's — see [`event_sink`]'s own doc
-//!   comment.
-//!
-//! This file will eventually become the `NotificationModule` composition
-//! point (design.md's File Structure Plan: "`src/notifications.rs` —
-//! NotificationModule 組み立て・公開・ルータ装着点・EventSink/DeliverySink
-//! 登録") once later tasks (2.x-4.x: `generator`, `event_sink`, `service`,
-//! `endpoints`, and their wiring) land. Declaring `pub mod ports;`/
-//! `pub mod filter;` here (tasks 2.2/2.3, boundaries `ports`/
-//! `NotificationFilter`) is the same minimal, precedented "add this task's
-//! new submodule + its public re-exports, nothing else" touch tasks
-//! 1.2/1.3/2.1 already made — no `AppState`/bootstrap/router composition or
-//! any other task's boundary is touched here. See this task's own status
-//! report for why this narrow addition was necessary despite this file
-//! being named as a boundary exclusion.
+//!   was left to task 4.2 — see [`event_sink`]'s own doc comment.
+//! - Task 4.1 (`Boundary: NotificationEndpoints`): the four HTTP handlers
+//!   ([`endpoints::list_notifications`]/[`endpoints::show_notification`]/
+//!   [`endpoints::clear_notifications`]/[`endpoints::dismiss_notification`])
+//!   and their router-local state bundle
+//!   ([`endpoints::NotificationEndpointsState`]) — see [`endpoints`]'s own
+//!   doc comment. Not yet mounted onto any real router or declared as part
+//!   of this module's own tree (task 4.1's own explicit boundary excluded
+//!   `pub mod endpoints;` from this file) until this task (4.2) added it
+//!   below.
+//! - Task 4.2 (`Boundary: NotificationModule`): this file's own composition
+//!   point — [`build_notification_module`] assembles this spec's own
+//!   [`filter::NotificationFilter`]/[`generator::NotificationGenerator`],
+//!   registers the real (non-`NoopSink`) event sink pair task 3.1 built
+//!   (both into this module's own [`ports::NotificationPortsRegistry`] and,
+//!   critically, into the *upstream*-owned
+//!   `statuses::notification_sink::NotificationSinkRegistry` every existing
+//!   local-/remote-origin emit call site already holds a clone of —
+//!   replacing its built-in `NoopSink` default, Requirement 5.4), leaves
+//!   [`ports::NotificationPortsRegistry`]'s `delivery_sink` slot at its
+//!   default [`ports::NoopSink`] (Requirement 5.5 — a future streaming/
+//!   web-push spec's own bootstrap swaps this in later), and bundles the
+//!   result as [`NotificationModule`], which `src/state.rs` now stores and
+//!   `src/server.rs`'s `FromRef<AppState> for
+//!   endpoints::NotificationEndpointsState` bridge derives every mounted
+//!   notification endpoint's own state from. `pub mod endpoints;` (added
+//!   below) is this task's own minimal addition making task 4.1's
+//!   already-reviewed module reachable from the crate's module tree at all.
+//!   See this file's own "module wiring" section below for
+//!   [`NotificationModule`]/[`build_notification_module`]'s full doc
+//!   comments, and `src/state.rs`/`src/bootstrap.rs`/`src/server.rs`'s own
+//!   doc comments at each of their call sites.
 
+pub mod endpoints;
 pub mod event_sink;
 pub mod filter;
 pub mod generator;
@@ -101,3 +119,163 @@ pub use serializer::{
     to_notification_json,
 };
 pub use service::NotificationService;
+
+// ---- Task 4.2 (Boundary: NotificationModule): module wiring -------------
+
+#[cfg(test)]
+mod tests;
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use sqlx::PgPool;
+
+use crate::accounts::account_service::AccountService;
+use crate::error::AppError;
+use crate::federation::signatures::ReqwestFederationHttpClient;
+use crate::media::LocalFsStore;
+use crate::runtime::RuntimeContext;
+use crate::social_graph::FilterQuery;
+use crate::statuses::notification_sink::NotificationSinkRegistry;
+
+/// Bridges [`NotificationGenerator`]'s fixed, construction-time
+/// `Arc<dyn NotificationDeliverySink>` dependency onto
+/// [`NotificationPortsRegistry`]'s own swappable `delivery_sink` slot (see
+/// that type's own doc comment, "Registry shape: one handle, two
+/// independent replaceable slots"), so a downstream streaming/web-push
+/// spec's future `NotificationPortsRegistry::set_delivery_sink` call —
+/// against the very same registry instance [`NotificationModule::ports`]
+/// hands back, since `AppState` stores only one instance of it — takes
+/// effect for this already-constructed [`NotificationGenerator`] too, not
+/// only for a hypothetical caller that happens to read the registry
+/// directly. Without this indirection, the registry's own `delivery_sink`
+/// slot living inside `AppState` would be functionally inert: nothing in
+/// this crate would ever consult it, and "下流が後で差し替え可能"
+/// (design.md's own completion text for this task) would not actually hold.
+struct DeliverySinkBridge {
+    registry: NotificationPortsRegistry,
+}
+
+impl NotificationDeliverySink for DeliverySinkBridge {
+    fn deliver<'a>(
+        &'a self,
+        notification: &'a Notification,
+    ) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
+        Box::pin(async move { self.registry.deliver(notification).await })
+    }
+}
+
+/// The notifications module bundle (design.md's exact `NotificationModule`
+/// component; task 4.2, `Boundary: NotificationModule`, Requirements 5.4,
+/// 5.5, 9.1): the shared [`NotificationService`] handle `src/server.rs`'s
+/// `FromRef<AppState> for endpoints::NotificationEndpointsState` bridge
+/// derives every mounted notification endpoint's own state from, plus the
+/// [`NotificationPortsRegistry`] handle a future streaming/web-push spec's
+/// own bootstrap reaches (mirroring
+/// `crate::accounts::AccountsModule::ports`'s identical "bundle, don't
+/// build; accessors return `Arc`/cheap clones" shape) to register its real
+/// [`NotificationDeliverySink`] implementation, replacing the default
+/// [`NoopSink`] this task initializes it with. Built by
+/// [`build_notification_module`].
+pub struct NotificationModule {
+    service: Arc<NotificationService>,
+    ports: NotificationPortsRegistry,
+}
+
+impl NotificationModule {
+    /// The shared `NotificationService` handle.
+    pub fn service(&self) -> Arc<NotificationService> {
+        Arc::clone(&self.service)
+    }
+
+    /// The shared [`NotificationPortsRegistry`] handle — cheap to clone
+    /// (mirrors `crate::accounts::AccountsModule::ports()`'s identical
+    /// shape). A future streaming/web-push spec's own bootstrap calls
+    /// `.set_delivery_sink(...)` on the clone returned here to swap in its
+    /// real [`NotificationDeliverySink`] implementation, reaching the
+    /// already-constructed [`NotificationGenerator`] this module wires (via
+    /// [`DeliverySinkBridge`]) without needing to rebuild this module.
+    pub fn ports(&self) -> NotificationPortsRegistry {
+        self.ports.clone()
+    }
+}
+
+/// Assembles the [`NotificationModule`] bundle (task 4.2, Requirements 5.4,
+/// 5.5, 9.1): builds this spec's own repository-backed
+/// [`filter::NotificationFilter`] (from social-graph's [`FilterQuery`], the
+/// same construction `social_graph::providers::FilterQuery::new` documents),
+/// the single [`generator::NotificationGenerator`] generation point (its
+/// delivery sink bridged through a freshly built
+/// [`NotificationPortsRegistry`] via [`DeliverySinkBridge`], defaulting to
+/// [`NoopSink`] until a future streaming/web-push spec's own bootstrap
+/// replaces it — Requirement 5.5), and the real (non-`NoopSink`)
+/// [`event_sink::GeneratorEventSink`]/[`event_sink::StatusesEventSinkAdapter`]
+/// pair (task 3.1). This function registers that real event sink into
+/// *both* this module's own [`NotificationPortsRegistry`] (kept in sync,
+/// even though nothing else in this crate currently reads that particular
+/// slot — see that registry's own doc comment: "the swap-in registry handle
+/// a later task (4.2) inserts into AppState") and — the actually-consumed
+/// wiring point — `notification_sink_registry`, the *upstream*-owned
+/// `crate::statuses::notification_sink::NotificationSinkRegistry`
+/// `StatusService`/`InteractionService`/`inbound_handlers.rs`/
+/// `social_graph::transitions` already hold a clone of, replacing its
+/// built-in `NoopSink` default (Requirement 5.4's "上流既定 no-op を差し替
+/// え").
+///
+/// `accounts`/`media_store` are the exact handles [`NotificationService`]
+/// needs for its own `account`/`status` embed rendering (mirrors
+/// `crate::timelines::build_timelines_module`'s identical "share, don't
+/// rebuild" call convention) — callers (`src/bootstrap.rs`,
+/// `src/test_harness.rs`, `src/federation/test_harness.rs`) pass
+/// `accounts_module.service()`/`media_module.store().clone()` directly,
+/// after those modules are already built. `notification_sink_registry` must
+/// be the *same* instance already handed to
+/// `crate::statuses::build_statuses_module`/
+/// `crate::social_graph::register_downstream_handlers` (task 10.2's own
+/// shared-registry convention, see `crate::statuses::build_statuses_module`'s
+/// own doc comment "notifications") — a clone reaches the identical shared
+/// slot, so this call's own `set_sink` replaces the default every existing
+/// local-/remote-origin emit call site already holds a handle to, without
+/// touching any of their call sites.
+pub fn build_notification_module(
+    pool: PgPool,
+    runtime: RuntimeContext,
+    domain: impl Into<String>,
+    accounts: Arc<AccountService<LocalFsStore, ReqwestFederationHttpClient>>,
+    media_store: LocalFsStore,
+    notification_sink_registry: NotificationSinkRegistry,
+) -> NotificationModule {
+    let filter = NotificationFilter::new(FilterQuery::new(pool.clone(), runtime.clone()));
+
+    let ports = NotificationPortsRegistry::new();
+    let delivery_bridge: Arc<dyn NotificationDeliverySink> = Arc::new(DeliverySinkBridge {
+        registry: ports.clone(),
+    });
+
+    let generator = Arc::new(NotificationGenerator::new(
+        pool.clone(),
+        filter,
+        delivery_bridge,
+        runtime.clone(),
+    ));
+
+    // Requirement 5.4: replaces the upstream-owned NotificationSinkRegistry's
+    // built-in NoopSink default with the real event sink (task 3.1),
+    // reaching every local-/remote-origin emit call site that already holds
+    // a clone of `notification_sink_registry`.
+    let event_sink: Arc<dyn NotificationEventSink> =
+        Arc::new(GeneratorEventSink::new(Arc::clone(&generator)));
+    ports.set_event_sink(Arc::clone(&event_sink));
+    notification_sink_registry.set_sink(Arc::new(StatusesEventSinkAdapter::new(event_sink)));
+
+    let service = Arc::new(NotificationService::new(
+        pool,
+        runtime,
+        domain,
+        accounts,
+        media_store,
+    ));
+
+    NotificationModule { service, ports }
+}

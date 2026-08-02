@@ -66,6 +66,10 @@ use crate::federation::{
     nodeinfo_document, object_get, outbox_get, shared_inbox, webfinger,
 };
 use crate::media::{self, LocalFsStore, MediaEndpointsState};
+use crate::notifications::endpoints::{
+    self as notifications_endpoints, NOTIFICATION_DISMISS_PATH, NOTIFICATION_SHOW_PATH,
+    NOTIFICATIONS_CLEAR_PATH, NOTIFICATIONS_LIST_PATH, NotificationEndpointsState,
+};
 use crate::oauth::apps_endpoint::{self, AppsEndpointState};
 use crate::oauth::authorize_endpoint::{self, AuthorizeEndpointState};
 use crate::oauth::middleware::AuthState;
@@ -379,6 +383,28 @@ impl FromRef<AppState> for TimelineEndpointsState {
     }
 }
 
+/// Bridges `AppState` to [`NotificationEndpointsState`] (task 4.2,
+/// `_Boundary: NotificationModule_`), mirroring
+/// [`ConcreteStatusesEndpointsState`]'s own `FromRef` bridge above:
+/// `AppState::notifications()`'s already-built `NotificationService` handle
+/// (task 4.2's own `NotificationModule`) is an `Arc` clone, never freshly
+/// constructed here. `actor_directory`/`pool` are the two collaborators
+/// `resolve_account_id_filter` (task 4.1) needs for its own `account_id`
+/// resolution — drawn from `AppState::actor()`/`AppState::pool()` directly,
+/// the same already-existing accessors every other bridge above already
+/// reuses, rather than duplicating either handle inside
+/// `NotificationModule` itself.
+impl FromRef<AppState> for NotificationEndpointsState {
+    fn from_ref(state: &AppState) -> Self {
+        NotificationEndpointsState {
+            service: state.notifications().service(),
+            actor_directory: state.actor().directory().clone(),
+            pool: state.pool().clone(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
 /// social-graph's route group (task 5.2, `_Boundary: SocialGraphModule_`,
 /// design.md's `SocialGraphEndpoints` API Contract table): every
 /// follow/follow_requests/mute/block path `src/social_graph/endpoints.rs`
@@ -446,6 +472,39 @@ fn timelines_router() -> Router<AppState> {
             get(timelines_endpoints::public_timeline),
         )
         .route(TAG_TIMELINE_PATH, get(timelines_endpoints::tag_timeline))
+}
+
+/// notifications's route group (task 4.2, `_Boundary: NotificationModule_`,
+/// design.md's `NotificationEndpoints` API Contract table): every
+/// list/show/clear/dismiss path task 4.1's `src/notifications/endpoints.rs`
+/// implements, mounted onto its four real handlers. Kept as a separate
+/// `.merge()`-able group mirroring [`timelines_router`]/
+/// [`social_graph_router`]'s own precedent — `endpoints.rs`'s own doc
+/// comment ("Not wired into the module tree yet") explicitly directs this,
+/// and (mirroring `timelines_router`'s/`social_graph_router`'s own "no
+/// per-route rate-limit layer" precedent) applies no rate-limit layer of its
+/// own — [`build_router`]'s single, crate-wide [`rate_limit_layer`] already
+/// covers every route merged here automatically (Requirement 9.4, per
+/// `endpoints.rs`'s own doc comment, "Rate-limiting: no per-route layer
+/// here").
+fn notifications_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            NOTIFICATIONS_LIST_PATH,
+            get(notifications_endpoints::list_notifications),
+        )
+        .route(
+            NOTIFICATION_SHOW_PATH,
+            get(notifications_endpoints::show_notification),
+        )
+        .route(
+            NOTIFICATIONS_CLEAR_PATH,
+            post(notifications_endpoints::clear_notifications),
+        )
+        .route(
+            NOTIFICATION_DISMISS_PATH,
+            post(notifications_endpoints::dismiss_notification),
+        )
 }
 
 /// Path of the minimal liveness route this task adds (Requirement 1.1).
@@ -732,6 +791,11 @@ pub fn build_router(state: AppState) -> Router {
         // `statuses_router`/`accounts_router`/`media_router` are, immediately
         // above — no `state`-derived sizing is needed here either.
         .merge(timelines_router())
+        // task 4.2: merged the same way `timelines_router`/
+        // `social_graph_router`/`statuses_router`/`accounts_router`/
+        // `media_router` are, immediately above — no `state`-derived sizing
+        // is needed here either.
+        .merge(notifications_router())
         .layer(rate_limit_layer(
             rate_limit_clock,
             RateLimitPolicy::new(RATE_LIMIT_PER_WINDOW, RATE_LIMIT_WINDOW),

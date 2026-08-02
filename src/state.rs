@@ -36,6 +36,7 @@ use crate::actor::ActorModule;
 use crate::config::AppConfig;
 use crate::federation::FederationModule;
 use crate::media::MediaModule;
+use crate::notifications::NotificationModule;
 use crate::oauth::OauthModule;
 use crate::runtime::RuntimeContext;
 use crate::social_graph::SocialGraphModule;
@@ -90,6 +91,16 @@ struct AppStateInner {
     /// spec reuses via `AppState::timelines().matcher()` — see
     /// `crate::timelines::TimelinesModule`'s own doc comment.
     timelines: TimelinesModule,
+    /// notifications's module bundle (task 4.2, Requirements 5.4, 5.5,
+    /// 9.1): the shared `NotificationService` handle `src/server.rs`'s
+    /// `FromRef<AppState> for
+    /// crate::notifications::endpoints::NotificationEndpointsState` bridge
+    /// derives every mounted notification endpoint's own state from, and
+    /// the `NotificationPortsRegistry` public seam a downstream `streaming`/
+    /// `web-push` spec reuses via `AppState::notifications().ports()` to
+    /// register its own real `NotificationDeliverySink` implementation —
+    /// see `crate::notifications::NotificationModule`'s own doc comment.
+    notifications: NotificationModule,
 }
 
 /// Immutable, cheaply-cloneable shared handle bundling the database
@@ -146,6 +157,7 @@ impl AppState {
         statuses: StatusesModule,
         social_graph: SocialGraphModule,
         timelines: TimelinesModule,
+        notifications: NotificationModule,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -160,6 +172,7 @@ impl AppState {
                 statuses,
                 social_graph,
                 timelines,
+                notifications,
             }),
         }
     }
@@ -263,5 +276,17 @@ impl AppState {
     /// `state.timelines().matcher()`.
     pub fn timelines(&self) -> &TimelinesModule {
         &self.inner.timelines
+    }
+
+    /// The shared notifications module bundle (task 4.2, Requirements 5.4,
+    /// 5.5, 9.1): `src/server.rs`'s `FromRef<AppState> for
+    /// crate::notifications::endpoints::NotificationEndpointsState` bridge
+    /// derives every mounted notification endpoint's own state from this
+    /// handle, and a downstream `streaming`/`web-push` spec reaches the
+    /// `NotificationPortsRegistry` public seam through
+    /// `state.notifications().ports()` to register its own real
+    /// `NotificationDeliverySink` implementation.
+    pub fn notifications(&self) -> &NotificationModule {
+        &self.inner.notifications
     }
 }
