@@ -90,7 +90,7 @@
   - _Requirements: 2.3, 2.4, 9.1, 9.2, 9.3_
   - _Boundary: SearchEndpoint_
   - _Depends: 5.1_
-- [ ] 5.3 検索モジュールを bootstrap と AppState へ配線する
+- [x] 5.3 検索モジュールを bootstrap と AppState へ配線する
   - `src/search/mod.rs`（`SearchModule`）を実装し、`src/state.rs`/`src/bootstrap.rs`/`src/server.rs`（core-runtime）を更新して、既定 `PgSearchBackend` を `SearchBackend` として配線・`HashtagIndexer` を初期化・`/api/v2/search` ルータを横断レイヤー（認証・エラー・レート制限）適用点へ装着し、`SearchService` を `AppState` に格納する。差し替え点を 1 箇所に集約する
   - 観測可能な完了条件: 起動後に `/api/v2/search` が一連で機能し、既定バックエンドが必須拡張なしで配線され、`X-RateLimit-*` 付与・レート制限装着点に乗ることが確認できる
   - _Requirements: 7.3, 7.4, 8.1, 8.4, 9.4_

@@ -39,6 +39,7 @@ use crate::media::MediaModule;
 use crate::notifications::NotificationModule;
 use crate::oauth::OauthModule;
 use crate::runtime::RuntimeContext;
+use crate::search::SearchModule;
 use crate::social_graph::SocialGraphModule;
 use crate::statuses::StatusesModule;
 use crate::timelines::TimelinesModule;
@@ -101,6 +102,12 @@ struct AppStateInner {
     /// register its own real `NotificationDeliverySink` implementation —
     /// see `crate::notifications::NotificationModule`'s own doc comment.
     notifications: NotificationModule,
+    /// search's module bundle (task 5.3, Requirements 7.3, 7.4, 8.1, 8.4,
+    /// 9.4): the shared `SearchService` handle `src/server.rs`'s
+    /// `FromRef<AppState> for crate::search::endpoint::SearchEndpointsState<..>`
+    /// bridge derives the mounted `GET /api/v2/search` endpoint's own state
+    /// from — see `crate::search::SearchModule`'s own doc comment.
+    search: SearchModule,
 }
 
 /// Immutable, cheaply-cloneable shared handle bundling the database
@@ -158,6 +165,7 @@ impl AppState {
         social_graph: SocialGraphModule,
         timelines: TimelinesModule,
         notifications: NotificationModule,
+        search: SearchModule,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -173,6 +181,7 @@ impl AppState {
                 social_graph,
                 timelines,
                 notifications,
+                search,
             }),
         }
     }
@@ -288,5 +297,13 @@ impl AppState {
     /// `NotificationDeliverySink` implementation.
     pub fn notifications(&self) -> &NotificationModule {
         &self.inner.notifications
+    }
+
+    /// The shared search module bundle (task 5.3, Requirements 7.3, 7.4,
+    /// 8.1, 8.4, 9.4): `src/server.rs`'s `FromRef<AppState> for
+    /// crate::search::endpoint::SearchEndpointsState<..>` bridge derives the
+    /// mounted `GET /api/v2/search` endpoint's own state from this handle.
+    pub fn search(&self) -> &SearchModule {
+        &self.inner.search
     }
 }

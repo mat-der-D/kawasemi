@@ -60,6 +60,7 @@ use crate::accounts::{self, AccountsEndpointsState};
 use crate::actor::ActorDirectory;
 use crate::api::ratelimit::{RateLimitPolicy, rate_limit_layer};
 use crate::config::ServerConfig;
+use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{
     ApGetState, ConcreteBlockPolicy, ConcreteReceivedActivityStore, ConcreteVerifier, InboxState,
     NodeInfoState, OutboxState, WebfingerState, actor_get, actor_inbox, nodeinfo_discovery,
@@ -74,6 +75,8 @@ use crate::oauth::apps_endpoint::{self, AppsEndpointState};
 use crate::oauth::authorize_endpoint::{self, AuthorizeEndpointState};
 use crate::oauth::middleware::AuthState;
 use crate::oauth::token_endpoint::{self, TokenEndpointState};
+use crate::search::endpoint::{self as search_endpoint, SEARCH_PATH, SearchEndpointsState};
+use crate::search::pg_backend::PgSearchBackend;
 use crate::social_graph::activity_builder::PgRemoteActorLookup;
 use crate::social_graph::endpoints as social_graph_endpoints;
 use crate::social_graph::{
@@ -87,7 +90,9 @@ use crate::statuses::endpoints::{
     STATUS_UNREBLOG_PATH, STATUSES_PATH,
 };
 use crate::statuses::visibility::RelationshipQueryRegistry;
-use crate::statuses::{ConcreteHttpSink, ConcreteLocalSink, ConcreteStatusesEndpointsState};
+use crate::statuses::{
+    ConcreteHttpSink, ConcreteLocalSink, ConcreteStatusesEndpointsState, ProdRemoteActorResolver,
+};
 use crate::telemetry;
 use crate::timelines::endpoints::{
     self as timelines_endpoints, HOME_TIMELINE_PATH, PUBLIC_TIMELINE_PATH, TAG_TIMELINE_PATH,
@@ -405,6 +410,32 @@ impl FromRef<AppState> for NotificationEndpointsState {
     }
 }
 
+/// Names [`search_endpoint::search`]'s own four generic type parameters
+/// (`B, H, R, M`) with this instance's one concrete instantiation
+/// (`crate::search::SearchModule`'s own `ProdSearchService` alias, see that
+/// module's own doc comment for why this is resolved to exactly one
+/// concrete type at the composition root), mirroring [`SA`]/[`SD`]/[`SL`]/
+/// [`SH`]/[`SR`]/[`SM`]'s identical rationale for [`statuses_router`], above.
+type SeB = PgSearchBackend;
+type SeH = ReqwestFederationHttpClient;
+type SeR = ProdRemoteActorResolver;
+type SeM = ActorDirectory;
+
+/// Bridges `AppState` to
+/// [`SearchEndpointsState<SeB, SeH, SeR, SeM>`] (task 5.3, `_Boundary:
+/// SearchModule, Bootstrap, AppState, Server_`), mirroring
+/// [`NotificationEndpointsState`]'s own `FromRef` bridge immediately above:
+/// `AppState::search()`'s already-built `SearchService` handle (task 5.3's
+/// own `SearchModule`) is an `Arc` clone, never freshly constructed here.
+impl FromRef<AppState> for SearchEndpointsState<SeB, SeH, SeR, SeM> {
+    fn from_ref(state: &AppState) -> Self {
+        SearchEndpointsState {
+            search_service: state.search().search_service(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
 /// social-graph's route group (task 5.2, `_Boundary: SocialGraphModule_`,
 /// design.md's `SocialGraphEndpoints` API Contract table): every
 /// follow/follow_requests/mute/block path `src/social_graph/endpoints.rs`
@@ -505,6 +536,27 @@ fn notifications_router() -> Router<AppState> {
             NOTIFICATION_DISMISS_PATH,
             post(notifications_endpoints::dismiss_notification),
         )
+}
+
+/// search's route (task 5.3, `_Boundary: SearchModule, Bootstrap, AppState,
+/// Server_`, design.md's API Contract table): `GET /api/v2/search`, mounted
+/// onto the real handler task 5.2's `src/search/endpoint.rs` implements
+/// (that module's own doc comment: "No `pub fn router(...)` in this
+/// module... task 5.3 ... is unblocked to build `search_router()` there
+/// exactly the way it builds every other module's router"), monomorphized
+/// over this instance's one concrete type argument list ([`SeB`]/[`SeH`]/
+/// [`SeR`]/[`SeM`], above). Kept as a separate `.merge()`-able group
+/// mirroring [`notifications_router`]'s own precedent — no real
+/// per-instance config is needed to build it either, and (mirroring
+/// [`notifications_router`]'s own "no per-route rate-limit layer" precedent)
+/// applies no rate-limit layer of its own: [`build_router`]'s single,
+/// crate-wide [`rate_limit_layer`] already covers every route merged here
+/// automatically (Requirement 9.4).
+fn search_router() -> Router<AppState> {
+    Router::new().route(
+        SEARCH_PATH,
+        get(search_endpoint::search::<SeB, SeH, SeR, SeM>),
+    )
 }
 
 /// Path of the minimal liveness route this task adds (Requirement 1.1).
@@ -796,6 +848,15 @@ pub fn build_router(state: AppState) -> Router {
         // `media_router` are, immediately above — no `state`-derived sizing
         // is needed here either.
         .merge(notifications_router())
+        // task 5.3: merged the same way `notifications_router`/
+        // `timelines_router`/`social_graph_router`/`statuses_router`/
+        // `accounts_router`/`media_router` are, immediately above — no
+        // `state`-derived sizing is needed here either. Merging `/api/v2/search`
+        // at this same point (before the rate-limit/`TraceLayer` layers
+        // below) is exactly what makes it inherit `X-RateLimit-*`/tracing
+        // the same way every other endpoint on this router already does
+        // (Requirement 9.4) — see `search_router`'s own doc comment.
+        .merge(search_router())
         .layer(rate_limit_layer(
             rate_limit_clock,
             RateLimitPolicy::new(RATE_LIMIT_PER_WINDOW, RATE_LIMIT_WINDOW),

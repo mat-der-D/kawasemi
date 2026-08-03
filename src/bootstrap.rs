@@ -105,6 +105,7 @@ use crate::migrate::{self, MigrateError};
 use crate::notifications;
 use crate::oauth::OauthModule;
 use crate::runtime::{RuntimeContext, SnowflakeIdGenerator, SystemClock, SystemRng};
+use crate::search;
 use crate::server::{self, ServeError};
 use crate::social_graph;
 use crate::state::AppState;
@@ -660,6 +661,38 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         notifications,
     );
 
+    // Assembles the search module bundle (task 5.3, Requirements 7.3, 7.4,
+    // 8.1, 8.4, 9.4) the same way `bootstrap()`'s production path assembles
+    // every other bundle above (`search::build_search_module`): wires the
+    // default, extension-free `PgSearchBackend` (Requirement 7.3) against
+    // this same `pool`/`runtime` every other composition-root component
+    // shares, sharing `actor_module`'s own `ActorDirectory` handle
+    // (mirroring `statuses_remote_actor_resolver`'s own identical
+    // `directory` argument above) while building its own, separately
+    // constructed `ReqwestFederationHttpClient`/`RemoteAccountFetcher`
+    // instance (mirroring `accounts_module`'s/`statuses_remote_actor_fetcher`'s
+    // own "never the same `Arc` another spec's own client uses" precedent —
+    // see `crate::search::build_search_module`'s own doc comment), and
+    // `accounts_module`'s own `AccountService`/`AccountPortsRegistry`,
+    // `media_module`'s own `LocalFsStore`, and `statuses_module`'s own live
+    // `RelationshipQueryRegistry` — the same three handles
+    // `crate::notifications::build_notification_module`/
+    // `statuses::register_account_ports` above already share. Must run
+    // after `accounts_module`/`media_module`/`statuses_module` (for
+    // `service()`/`ports()`/`store()`/`relationship_query_registry()`) are
+    // already built, immediately above. No background task to spawn here —
+    // mirrors `accounts_module`'s own "no resident worker" precedent.
+    let search_module = search::build_search_module(
+        pool.clone(),
+        runtime.clone(),
+        cfg.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        accounts_module.service(),
+        accounts_module.ports(),
+        media_module.store().clone(),
+        statuses_module.relationship_query_registry(),
+    );
+
     Ok(AppState::new(
         pool,
         runtime,
@@ -673,6 +706,7 @@ async fn build_state() -> Result<AppState, BootstrapError> {
         social_graph_module,
         timelines_module,
         notification_module,
+        search_module,
     ))
 }
 

@@ -103,6 +103,7 @@ use crate::migrate;
 use crate::notifications;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
+use crate::search;
 use crate::server;
 use crate::social_graph;
 use crate::state::AppState;
@@ -848,6 +849,25 @@ pub async fn spawn_test_app() -> TestApp {
         notifications,
     );
 
+    // Assembles the search module bundle (task 5.3) the same way
+    // `bootstrap()`'s production path does (`crate::search::build_search_module`),
+    // sharing this instance's own `pool`/`runtime`/`config.server.domain`/
+    // `actor_module`'s `ActorDirectory`/`accounts_module`'s
+    // `AccountService`/`AccountPortsRegistry`/`media_module`'s
+    // `LocalFsStore`/`statuses_module`'s `RelationshipQueryRegistry` — no
+    // background task to spawn (see `accounts_module`'s own identical
+    // precedent above).
+    let search_module = search::build_search_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        accounts_module.service(),
+        accounts_module.ports(),
+        media_module.store().clone(),
+        statuses_module.relationship_query_registry(),
+    );
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
@@ -861,6 +881,7 @@ pub async fn spawn_test_app() -> TestApp {
         social_graph_module,
         timelines_module,
         notification_module,
+        search_module,
     );
     let router = server::build_router(state.clone());
 

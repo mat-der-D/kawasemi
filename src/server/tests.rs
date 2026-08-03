@@ -48,6 +48,7 @@ use crate::media;
 use crate::notifications;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
+use crate::search;
 use crate::social_graph;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::telemetry::{REQUEST_ID_FIELD, REQUEST_SPAN_NAME};
@@ -256,6 +257,21 @@ fn test_state(seed: u64) -> AppState {
         media_module.store().clone(),
         NotificationSinkRegistry::new(),
     );
+    // Mirrors the notifications-module construction immediately above:
+    // builds the search module bundle (task 5.3) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::search::build_search_module`) — this bundle performs no I/O
+    // at construction time either.
+    let search_module = search::build_search_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        accounts_module.service(),
+        accounts_module.ports(),
+        media_module.store().clone(),
+        statuses_module.relationship_query_registry(),
+    );
     AppState::new(
         pool,
         runtime,
@@ -269,6 +285,7 @@ fn test_state(seed: u64) -> AppState {
         social_graph_module,
         timelines_module,
         notification_module,
+        search_module,
     )
 }
 

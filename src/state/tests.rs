@@ -35,6 +35,7 @@ use crate::media::{self, MediaModule};
 use crate::notifications::{NotificationModule, build_notification_module};
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
+use crate::search::{SearchModule, build_search_module};
 use crate::social_graph::{SocialGraphModule, build_social_graph_module};
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::{StatusesModule, build_statuses_module};
@@ -343,6 +344,35 @@ fn sample_notification_module(
     )
 }
 
+/// Builds a `SearchModule` (task 5.3), mirroring `sample_notification_module`'s
+/// own "no real I/O beyond what construction itself needs" property:
+/// `build_search_module`'s own constructors (`PgSearchBackend::new`,
+/// `SearchHydrator::new`, `RemoteResolver::new`, `ProdRemoteActorResolver::new`,
+/// `StatusIngestService::new`, `RemoteAccountFetcher::new`) only ever store
+/// `pool`/`runtime`/config values and clone the caller-supplied
+/// `directory`/`accounts`/`media` handles (never dial the database or the
+/// network itself), so this is safe against the same `connect_lazy` pool
+/// this suite's other fixtures use.
+fn sample_search_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    directory: Arc<crate::actor::ActorDirectory>,
+    accounts: &AccountsModule,
+    media: &MediaModule,
+    statuses: &StatusesModule,
+) -> SearchModule {
+    build_search_module(
+        pool,
+        runtime,
+        "state-test.search.internal".to_string(),
+        directory,
+        accounts.service(),
+        accounts.ports(),
+        media.store().clone(),
+        statuses.relationship_query_registry(),
+    )
+}
+
 /// Requirements 1.1, 3.3, 5.5, 5.6: downstream code must be able to retrieve
 /// the pool, the injection boundaries (via `RuntimeContext`), and the
 /// validated config values from `AppState`, unchanged from what was passed
@@ -378,6 +408,14 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
     let timelines = sample_timelines_module(pool.clone(), runtime.clone(), &accounts, &media);
     let notifications =
         sample_notification_module(pool.clone(), runtime.clone(), &accounts, &media);
+    let search = sample_search_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        &accounts,
+        &media,
+        &statuses,
+    );
 
     let state = AppState::new(
         pool,
@@ -392,6 +430,7 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
         social_graph,
         timelines,
         notifications,
+        search,
     );
 
     // Config values are retrievable and match what was supplied.
@@ -464,6 +503,14 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
     let timelines = sample_timelines_module(pool.clone(), runtime.clone(), &accounts, &media);
     let notifications =
         sample_notification_module(pool.clone(), runtime.clone(), &accounts, &media);
+    let search = sample_search_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        &accounts,
+        &media,
+        &statuses,
+    );
 
     let state = AppState::new(
         pool,
@@ -478,6 +525,7 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
         social_graph,
         timelines,
         notifications,
+        search,
     );
     assert_eq!(Arc::strong_count(&state.inner), 1);
 
