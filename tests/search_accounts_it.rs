@@ -153,6 +153,32 @@ async fn search_accounts_matches_local_account_by_display_name_substring() {
     app.cleanup().await;
 }
 
+/// A local account is also matched by a partial, case-insensitive
+/// `local_actors.handle` substring, even when the handle does not appear
+/// anywhere in the account's `display_name` (Requirement 3.1's own "表示
+/// 名・ユーザー名・ハンドル（`acct`）に対する一致" wording). This closes the
+/// CONCERN recorded in `.kiro/specs/search/tasks.md`'s task 3.1
+/// Implementation Notes ("ローカルアカウント一致対象は... `account_profiles.
+/// display_name` のみとした"): a local user must be findable by their
+/// `@handle` the same way a known remote account is findable by its
+/// `username`, not only via their display name.
+#[tokio::test]
+async fn search_accounts_matches_local_account_by_handle_substring() {
+    let app = spawn_test_app().await;
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
+    let actor = insert_actor_fixture(&app, "zephyrquokka").await;
+    insert_account_profile_for(&app, actor.id, "Totally Unrelated Display Name").await;
+
+    let matches = backend
+        .search_accounts(&query("zephyrquokka", 50, 0))
+        .await
+        .expect("search_accounts must succeed");
+
+    assert_eq!(matches, vec![AccountRef::Local(actor.id)]);
+
+    app.cleanup().await;
+}
+
 /// A known remote account is matched by a partial, case-insensitive
 /// `username` substring (Requirement 3.1), returning a bare
 /// `AccountRef::Remote`.

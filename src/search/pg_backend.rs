@@ -22,20 +22,30 @@
 //! `src/search/hashtag_repository.rs`, or `src/search/hashtag_indexer.rs`.
 //!
 //! ## SQL query surface (design.md's own "`PgSearchBackend` が依存する
-//! upstream カラム" table, authoritative over a broader reading of
-//! Requirement 3.1's prose)
-//! design.md's own upstream-column table lists exactly five columns this
-//! module may reference: `account_profiles.display_name` (local accounts),
-//! `remote_accounts.username`/`domain`/`display_name` (known remote
-//! accounts), and `statuses.content` (post bodies) — explicitly closing with
-//! "上記以外のカラムは `PgSearchBackend` の SQL 照合が参照しない". Requirement
-//! 3.1's own prose ("表示名・ユーザー名・ハンドル（acct）に対する一致") could be
-//! read as also wanting a *local* account's username/handle
-//! (`local_actors.handle`, actor-model's own table) to participate in the
-//! match, but design.md's table is this task's authoritative SQL contract
-//! and does not name `local_actors` at all — a local account is therefore
-//! matched here only by its `account_profiles.display_name`. Flagged as a
-//! CONCERN in this task's status report for reviewer confirmation.
+//! upstream カラム" table)
+//! design.md's own upstream-column table lists the columns this module may
+//! reference: `account_profiles.display_name` and `local_actors.handle`
+//! (local accounts), `remote_accounts.username`/`domain`/`display_name`
+//! (known remote accounts), and `statuses.content` (post bodies).
+//! Requirement 3.1's prose ("表示名・ユーザー名・ハンドル（acct）に対する一致")
+//! requires a *local* account's handle (`local_actors.handle`, actor-model's
+//! own table, `UNIQUE`-constrained) to participate in the match the same way
+//! a known remote account's `username` does — task 3.1's original
+//! implementation narrowed local-account matching to
+//! `account_profiles.display_name` only, per design.md's table at the time,
+//! and flagged this as a CONCERN (see `.kiro/specs/search/tasks.md`
+//! Implementation Notes, task 3.1 and its follow-up correction entry). A
+//! feature-level validation pass determined the narrowing was a genuine
+//! functional gap against requirements.md 3.1 (a local user could not be
+//! found by their own `@handle` unless it happened to also appear in their
+//! display name), so `search_accounts` below now additionally matches
+//! `local_actors.handle` via a `LEFT JOIN` from `account_profiles` (`LEFT`,
+//! not inner, so an `account_profiles` row with no corresponding
+//! `local_actors` row — as some of this module's own tests fixture directly
+//! — still matches on `display_name` alone; `account_profiles.actor_id` and
+//! `local_actors.id` are both primary keys, so the join can never multiply a
+//! single account into more than one output row). design.md's table has
+//! been updated accordingly.
 //!
 //! `remote_accounts` carries no single `acct` column (`username`/`domain`
 //! are stored separately) — design.md's own note says so explicitly
@@ -166,20 +176,23 @@ impl PgSearchBackend {
 }
 
 impl SearchBackend for PgSearchBackend {
-    /// Matches local accounts (`account_profiles.display_name`) and known
-    /// remote accounts (`remote_accounts.username`/`domain`/`display_name`,
-    /// plus the synthesized `username@domain` acct form) whose relevant
-    /// column(s) contain `q.term`, case-insensitively (`ILIKE`), returning
-    /// bare [`AccountRef`]s with `limit`/`offset` applied to the combined
-    /// result set — see this module's own doc comment for the full SQL
-    /// query surface and dedup reasoning.
+    /// Matches local accounts (`account_profiles.display_name` or
+    /// `local_actors.handle`) and known remote accounts
+    /// (`remote_accounts.username`/`domain`/`display_name`, plus the
+    /// synthesized `username@domain` acct form) whose relevant column(s)
+    /// contain `q.term`, case-insensitively (`ILIKE`), returning bare
+    /// [`AccountRef`]s with `limit`/`offset` applied to the combined result
+    /// set — see this module's own doc comment for the full SQL query
+    /// surface and dedup reasoning.
     async fn search_accounts(&self, q: &AccountQuery) -> Result<Vec<AccountRef>, AppError> {
         let pattern = format!("%{}%", q.term);
 
         let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT 'local' AS kind, actor_id AS id \
+            "SELECT 'local' AS kind, account_profiles.actor_id AS id \
                FROM account_profiles \
-              WHERE display_name ILIKE $1 \
+               LEFT JOIN local_actors ON local_actors.id = account_profiles.actor_id \
+              WHERE account_profiles.display_name ILIKE $1 \
+                 OR local_actors.handle ILIKE $1 \
              UNION ALL \
              SELECT 'remote' AS kind, id \
                FROM remote_accounts \
