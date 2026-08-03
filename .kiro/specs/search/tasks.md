@@ -116,7 +116,7 @@
   - _Requirements: 2.2, 2.4, 6.1, 6.2, 6.3, 6.4, 6.5, 9.1, 9.2_
   - _Boundary: search_resolve_it, search_type_scope_it_
   - _Depends: 5.3_
-- [ ] 6.4 (P) 検索バックエンド差し替えの統合テスト
+- [x] 6.4 (P) 検索バックエンド差し替えの統合テスト
   - `SearchBackend` を `StubSearchBackend` に差し替え、`SearchService`・結果組み立て・エンドポイントを変更せずに動作することと、呼び出し側が特定エンジン実装に依存しないことを検証する
   - 観測可能な完了条件: 既定 `PgSearchBackend` をスタブへ差し替えても API 契約・結果組み立てが不変で、差し替え点が配線 1 箇所であることが確認できる
   - _Requirements: 7.1, 7.3, 7.4, 7.5, 8.4_
