@@ -137,6 +137,7 @@ pub mod model;
 pub mod pg_backend;
 pub mod ports;
 pub mod query_parser;
+pub mod remote_resolver;
 pub mod result_serializer;
 pub mod tag_serializer;
 
@@ -146,5 +147,6 @@ pub use model::{
 };
 pub use ports::{AccountQuery, HashtagQuery, SearchBackend, StatusQuery, StubSearchBackend};
 pub use query_parser::parse_query;
+pub use remote_resolver::{RemoteResolver, Resolved};
 pub use result_serializer::SearchResultSerializer;
 pub use tag_serializer::TagSerializer;
