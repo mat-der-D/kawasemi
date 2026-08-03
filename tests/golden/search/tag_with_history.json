@@ -1,0 +1,16 @@
+{
+  "history": [
+    {
+      "accounts": "5",
+      "day": "1700000000",
+      "uses": "12"
+    },
+    {
+      "accounts": "2",
+      "day": "1699913600",
+      "uses": "3"
+    }
+  ],
+  "name": "fediverse",
+  "url": "https://kawasemi.example/tags/fediverse"
+}

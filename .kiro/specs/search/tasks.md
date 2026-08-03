@@ -57,7 +57,7 @@
   - _Depends: 2.1, 2.2, 3.1_
 
 - [ ] 4. 具体化・解決・シリアライズ
-- [ ] 4.1 (P) Tag / SearchResults シリアライザを実装する
+- [x] 4.1 (P) Tag / SearchResults シリアライザを実装する
   - `src/search/tag_serializer.rs` と `src/search/result_serializer.rs` を実装し、Tag（`name`/`url`/`history`）と SearchResults（`accounts`/`statuses`/`hashtags`、空種別は `[]` 非 null、上流 Account/Status 出力は再シリアライズせず格納）を生成し、api-foundation 契約ハーネスへゴールデン登録する
   - 観測可能な完了条件: 空種別が `[]` になり、Account/Status が上流出力のまま格納され、ゴールデンが決定的に再現される契約テストが通る
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
@@ -130,3 +130,5 @@
 - タスク 3.1: `PgSearchBackend::search_accounts` のローカルアカウント一致対象は design.md の「`PgSearchBackend` が依存する upstream カラム」表に厳密に従い `account_profiles.display_name` のみとした（`local_actors` のユーザー名/ハンドル列は表に存在せず、表は「上記以外のカラムは参照しない」と明言）。requirements.md 3.1 の「表示名・ユーザー名・ハンドル（acct）」という文言はより広い読み方も可能だが、本タスクでは design.md の upstream カラム表を権威あるソースとして扱った（レビューで許容済み、CONCERN として明記）。将来この境界を見直す場合は design.md の当該表と requirements.md 3.1 の整合を先に取ること。
 - タスク 3.1: `PgSearchBackend::search_statuses` は `viewer`/可視性を一切フィルタしない（`ports.rs` の `StatusQuery` doc comment と design.md の記述どおり、候補抽出のみを担い最終可視性はタスク 4.2 の `SearchHydrator` が再適用する設計）。タスク 4.2 実装時にこの前提（`PgSearchBackend` からは不可視投稿を含む候補が返り得る）を踏まえること。
 - タスク 3.1: 投稿検索のオーバーフェッチマージンは design.md が具体値を指定していないため実装定数 `STATUS_OVERFETCH_MARGIN = 20`（SQL `LIMIT` は `max(limit*2, limit+20)`、`OFFSET` は要求値のまま）をコード中に明文化して採用した。タスク 4.2 の `SearchHydrator` 側の切り詰めロジックはこの規約を前提にできる。
+- タスク 4.1: `tests/search_contract_it.rs`（design.md File Structure Plan・`Boundary: search_contract_it`）は本タスクでは作成しなかった。同ファイル/境界はタスク 6.1 所有（`_Depends: 5.3_`、`SearchService`/`SearchEndpoint`/`AppState` 配線完了後）であり、本タスクのゴールデンは notifications タスク 2.1 vs 5.1・accounts-and-instance タスク 3.5 vs 7.3・statuses-core タスク 8.2 と同じ「純粋関数の単体ゴールデンを先に登録し、フルパイプラインの契約テストは配線完了後の別タスクに委ねる」既存慣行に従い `src/search/tag_serializer/tests.rs` / `src/search/result_serializer/tests.rs` に `crate::contract::assert_golden` で登録した。
+- タスク 4.1: `TagSerializer::build_tag` の `url` はリクエストごとの `X-Forwarded-*` を考慮しない固定 `https://{domain}` オリジン（コンストラクタ供給）から構築した。design.md の `build_tag(&self, tag: &TagView)` シグネチャにはリクエスト/オリジン引数がなく、既存の `NotificationService::origin` と同一の前提（「この深さではライブなリクエストごとのオリジンを取得できない」）に倣った判断（レビューで許容済み）。

@@ -90,15 +90,32 @@
 //!   "`search_hashtags`: on-demand catch-up then read-index match" section)
 //!   for the full reasoning.
 //!
+//! - Task 4.1 (`Boundary: TagSerializer, SearchResultSerializer`): the
+//!   Tag / SearchResults JSON rendering boundary —
+//!   [`tag_serializer::TagSerializer::build_tag`] renders a [`model::TagView`]
+//!   into the Tag JSON contract (`name`/`url`/`history`), making
+//!   `TagView::url`'s domain-relative path absolute from a configured
+//!   server `domain` (Requirement 1.3); and
+//!   [`result_serializer::SearchResultSerializer::build_search_results`]
+//!   assembles the SearchResults envelope (`accounts`/`statuses`/
+//!   `hashtags`) from already-rendered JSON, embedding upstream
+//!   Account/Status JSON verbatim (never re-serialized, Requirement 1.2)
+//!   and always producing `[]` — never `null` — for an empty type
+//!   (Requirement 1.4). Both register goldens with `crate::contract::
+//!   assert_golden` (Requirement 1.5). See each module's own doc comment
+//!   for the full reasoning. `SearchHydrator` (task 4.2, concretizing
+//!   `SearchMatches` identifiers into the JSON these two modules consume)
+//!   is not implemented yet.
+//!
 //! This file will eventually become the `SearchModule` composition point
 //! (design.md's File Structure Plan: "`src/search.rs` — SearchModule
-//! 組み立て...と公開・ルータ装着点") once later tasks (4.1-5.3:
-//! `remote_resolver`, `hydrator`, `tag_serializer`, `result_serializer`,
-//! `service`, `endpoint`, and their wiring into `AppState`/bootstrap/server)
-//! land. For now it declares the `model`/`query_parser`/`ports`/
-//! `hashtag_repository`/`hashtag_indexer`/`pg_backend` submodules and
+//! 組み立て...と公開・ルータ装着点") once later tasks (4.2-5.3:
+//! `remote_resolver`, `hydrator`, `service`, `endpoint`, and their wiring
+//! into `AppState`/bootstrap/server) land. For now it declares the
+//! `model`/`query_parser`/`ports`/`hashtag_repository`/`hashtag_indexer`/
+//! `pg_backend`/`tag_serializer`/`result_serializer` submodules and
 //! re-exports `model`'s/`ports`' types — no remote resolver, hydrator,
-//! serializer, service, endpoint, or wiring code exists yet.
+//! service, endpoint, or wiring code exists yet.
 
 pub mod hashtag_indexer;
 pub mod hashtag_repository;
@@ -106,9 +123,13 @@ pub mod model;
 pub mod pg_backend;
 pub mod ports;
 pub mod query_parser;
+pub mod result_serializer;
+pub mod tag_serializer;
 
 pub use model::{
     ParsedQuery, SearchMatches, SearchParams, SearchType, TagHistoryEntry, TagMatch, TagView,
 };
 pub use ports::{AccountQuery, HashtagQuery, SearchBackend, StatusQuery, StubSearchBackend};
 pub use query_parser::parse_query;
+pub use result_serializer::SearchResultSerializer;
+pub use tag_serializer::TagSerializer;
