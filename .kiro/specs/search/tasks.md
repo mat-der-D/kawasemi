@@ -77,7 +77,7 @@
   - _Depends: 1.3_
 
 - [ ] 5. サービス・エンドポイント・配線
-- [ ] 5.1 検索サービスを実装する
+- [x] 5.1 検索サービスを実装する
   - `src/search/service.rs` に `search` を実装し、解析（空クエリ 422）→ `type` 絞り（他種別は空配列）→ `resolve=true` かつ認証時のみ `RemoteResolver` 呼び出し（`resolve=false`/未認証はローカル既知のみ）→ `SearchBackend` 照合（`limit`/`offset`/`account_id`/`following`/`exclude_unreviewed` 受理）→ `SearchHydrator` 具体化 → `SearchResultSerializer` 組み立て、を結線する
   - 検索処理（解析・照合・リモート解決・具体化・組み立て）の失敗・部分失敗を、クエリ種別・対象種別・失敗箇所を含む構造化診断（秘匿値を除く）として core-runtime 観測性に出力する
   - 観測可能な完了条件: type 絞り・空クエリ拒否・resolve 分岐・限定種別の空配列が一連で機能し、呼び出し側がエンジン非依存（`SearchBackend` 経由）で、失敗時に種別・箇所を含む診断が出力される統合テストが通る

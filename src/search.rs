@@ -120,15 +120,43 @@
 //!   reasoning. `RemoteResolver` (task 4.3), `SearchService`/`SearchEndpoint`
 //!   (task 5.x), and `SearchModule` wiring are not implemented yet.
 //!
+//! - Task 4.3 (`Boundary: RemoteResolver`): the `acct:`/URL remote-
+//!   resolution orchestration boundary —
+//!   [`remote_resolver::RemoteResolver::resolve_remote`] classifies a
+//!   [`model::ParsedQuery::Acct`]/[`model::ParsedQuery::Url`], drives
+//!   outbound WebFinger (acct) or federation fetch + JSON-LD safe expansion
+//!   (URL), and delegates to accounts-and-instance's `RemoteAccountFetcher`/
+//!   statuses-core's `StatusIngestService` for normalization/ingestion,
+//!   normalizing every failure to [`remote_resolver::Resolved::None`]
+//!   rather than an `Err` (Requirements 6.1, 6.2, 6.4). See
+//!   [`remote_resolver`]'s own doc comment for the full reasoning.
+//!   `SearchService`/`SearchEndpoint` (task 5.x) and `SearchModule` wiring
+//!   are not implemented yet.
+//!
+//! - Task 5.1 (`Boundary: SearchService`): the unified-search business
+//!   aggregation — [`service::SearchService::search`] wires together
+//!   [`query_parser::parse_query`] (empty `q` -> 422), `type` dispatch
+//!   (unrequested types return `[]`, Requirement 2.2), gated remote
+//!   resolution (`resolve=true` and `Acct`/`Url` only, Requirements 6.1,
+//!   6.3, 6.5), [`ports::SearchBackend`] matching (engine-agnostic —
+//!   `SearchService` is generic over `B: SearchBackend`, Requirement 7.1),
+//!   [`hydrator::SearchHydrator`] concretization, and
+//!   [`result_serializer::SearchResultSerializer`] assembly, logging a
+//!   structured diagnostic (query kind / target kind / failure point, no
+//!   secrets) on any stage's failure (Requirement 9.5). See [`service`]'s
+//!   own doc comment for the full reasoning. `SearchEndpoint` (task 5.2)
+//!   and `SearchModule`/`AppState`/bootstrap/router wiring (task 5.3) are
+//!   not implemented yet.
+//!
 //! This file will eventually become the `SearchModule` composition point
 //! (design.md's File Structure Plan: "`src/search.rs` — SearchModule
-//! 組み立て...と公開・ルータ装着点") once later tasks (4.3-5.3:
-//! `remote_resolver`, `service`, `endpoint`, and their wiring into
-//! `AppState`/bootstrap/server) land. For now it declares the
-//! `model`/`query_parser`/`ports`/`hashtag_repository`/`hashtag_indexer`/
-//! `pg_backend`/`tag_serializer`/`result_serializer`/`hydrator` submodules
-//! and re-exports `model`'s/`ports`'/`hydrator`'s types — no remote
-//! resolver, service, endpoint, or wiring code exists yet.
+//! 組み立て...と公開・ルータ装着点") once the remaining tasks (5.2-5.3:
+//! `endpoint` and its wiring into `AppState`/bootstrap/server) land. For now
+//! it declares the `model`/`query_parser`/`ports`/`hashtag_repository`/
+//! `hashtag_indexer`/`pg_backend`/`tag_serializer`/`result_serializer`/
+//! `hydrator`/`remote_resolver`/`service` submodules and re-exports each
+//! one's public types — no endpoint or `AppState`/bootstrap/router wiring
+//! code exists yet.
 
 pub mod hashtag_indexer;
 pub mod hashtag_repository;
@@ -139,6 +167,7 @@ pub mod ports;
 pub mod query_parser;
 pub mod remote_resolver;
 pub mod result_serializer;
+pub mod service;
 pub mod tag_serializer;
 
 pub use hydrator::SearchHydrator;
@@ -149,4 +178,5 @@ pub use ports::{AccountQuery, HashtagQuery, SearchBackend, StatusQuery, StubSear
 pub use query_parser::parse_query;
 pub use remote_resolver::{RemoteResolver, Resolved};
 pub use result_serializer::SearchResultSerializer;
+pub use service::SearchService;
 pub use tag_serializer::TagSerializer;
