@@ -37,9 +37,8 @@
 //!   7.2), its three request types ([`ports::AccountQuery`],
 //!   [`ports::StatusQuery`], [`ports::HashtagQuery`]), and the
 //!   swap-in test double [`ports::StubSearchBackend`] (Requirement 7.5).
-//!   No concrete standard-PostgreSQL implementation (`PgSearchBackend`)
-//!   exists yet — that is task 3.1's job, strictly downstream of this
-//!   port definition.
+//!   The concrete standard-PostgreSQL implementation (`PgSearchBackend`)
+//!   is implemented separately by task 3.1 below.
 //!
 //! - Task 2.1 (`Boundary: HashtagIndexRepository`): read/upsert access to
 //!   this spec's own hashtag read index —
@@ -63,9 +62,8 @@
 //!   [`hashtag_repository::upsert_tag_usage`], and advances the watermark
 //!   via [`hashtag_repository::save_watermark`] once each batch fully
 //!   completes. See [`hashtag_indexer`]'s own doc comment for the full
-//!   signature/batch-shape reasoning. No wiring into `search_hashtags`/
-//!   `PgSearchBackend` happens here — that is task 3.2's job, strictly
-//!   downstream of this module.
+//!   signature/batch-shape reasoning. The wiring into `search_hashtags`/
+//!   `PgSearchBackend` is implemented separately by task 3.2 below.
 //!
 //! - Task 3.1 (`Boundary: PgSearchBackend`): the standard-PostgreSQL default
 //!   [`ports::SearchBackend`] implementation —
@@ -77,13 +75,24 @@
 //!   partial match, optional `account_id` scope, design.md's overfetch
 //!   convention), both `limit`/`offset`-aware and extension-free
 //!   (Requirements 3.1, 3.4, 4.1, 4.3, 4.4, 4.5, 4.6, 7.2). `search_hashtags`
-//!   is a documented `unimplemented!()` placeholder — that is task 3.2's
-//!   job, strictly downstream of this module. See [`pg_backend`]'s own doc
-//!   comment for the full SQL query surface and its CONCERNs.
+//!   is implemented separately by task 3.2 below. See [`pg_backend`]'s own
+//!   doc comment for the full SQL query surface and its CONCERNs.
+//!
+//! - Task 3.2 (`Boundary: PgSearchBackend`, `search_hashtags`):
+//!   [`pg_backend::PgSearchBackend::search_hashtags`] wires this spec's
+//!   read-index boundary together — on every call it first runs
+//!   [`hashtag_indexer::catch_up_from_watermark`] to bring `search_tags`/
+//!   `search_status_tags` up to date, then matches `q.term` against the
+//!   now-caught-up index via [`hashtag_repository::match_hashtags`]
+//!   (Requirements 5.1, 5.3, 5.5), mapping each returned [`model::TagView`]
+//!   down to the bare [`model::TagMatch`] this port's return type requires
+//!   (Requirement 7.2). See [`pg_backend`]'s own doc comment (the
+//!   "`search_hashtags`: on-demand catch-up then read-index match" section)
+//!   for the full reasoning.
 //!
 //! This file will eventually become the `SearchModule` composition point
 //! (design.md's File Structure Plan: "`src/search.rs` — SearchModule
-//! 組み立て...と公開・ルータ装着点") once later tasks (3.2-5.3:
+//! 組み立て...と公開・ルータ装着点") once later tasks (4.1-5.3:
 //! `remote_resolver`, `hydrator`, `tag_serializer`, `result_serializer`,
 //! `service`, `endpoint`, and their wiring into `AppState`/bootstrap/server)
 //! land. For now it declares the `model`/`query_parser`/`ports`/
