@@ -59,6 +59,7 @@
 ### Allowed Dependencies
 
 - core-runtime: `AppState` / `RuntimeContext`（`Clock` / `IdGenerator` / `Rng`）/ `PgPool` / `AppError` / 構造化ログ / マイグレーション基盤 / テストハーネス（`spawn_test_app`）/ axum・tower・tokio 基盤。加えて、共有ドメインプリミティブモジュール（core-runtime が正準所有）の `Visibility` enum と `AccountRef` を消費する（本 spec はこれらを再定義せず import する）。
+- actor-model: `ActorDirectory`（`resolve_actor_by_id` 等）/ `Handle` / `ActorType` / `NewActor` / `ResolvedActor` を消費する（`ActorHandleLookup` が投稿者・言及先・配送宛先アクターの解決に使用。accounts-and-instance / federation-core と同型の消費、実装済みだが本 spec 初版の Allowed Dependencies に記載漏れがあった — 2026-07-29 run-level `kiro-validate-impl` の design alignment 検証で判明し追記）。
 - api-foundation: Bearer 認証（`RequestActorContext` = 単一アクター + `ScopeSet`、`authenticate` / `require_scope`）/ `Scope`（`read:statuses` / `write:statuses` / `write:favourites` / `write:bookmarks` / `read:bookmarks` 等の内包判定）/ `MastodonError`（互換エラー本文・ステータス対応）/ ページネーション（`PageParams` / `Cursor` / `Page<T>` / `build_link_header`）/ `X-RateLimit-*` レイヤー / 契約ハーネス（`assert_golden` / `register_fixture`）。
 - federation-core: `DeliveryService::deliver(DeliveryRequest)`（配送共通パス）/ `InboundActivityHandler` + `InboundActivityDispatcher::register`（受信委譲）/ `ActorUrls`（オブジェクト/コレクション URL）/ `JsonLdCodec`（@context 付与・安全展開）/ `ParsedActivity` / `InboundContext`。
 - media-pipeline: MediaAttachment シリアライズと `find_owned(media_id, actor_id)`（所有スコープ取得）。
@@ -76,7 +77,7 @@
 - 正規 Activity 生成（`StatusActivityBuilder`）の Activity 形（投票の `Create{Note, name=...}` ワイヤ形を含む）・配送依頼契約の変更。
 - 受信ハンドラが処理する Activity 種別集合・状態反映規約の変更。
 - 冪等キーの一意化規約・再送応答契約の変更。
-- 上流（core-runtime / api-foundation / federation-core / media-pipeline / accounts-and-instance）の消費契約変更（上流発の再検証）。
+- 上流（core-runtime / actor-model / api-foundation / federation-core / media-pipeline / accounts-and-instance）の消費契約変更（上流発の再検証）。
 
 ## Architecture
 
@@ -174,8 +175,8 @@ migrations/
 └── 0007_statuses.sql            # statuses / status_edits / favourites / reblogs / bookmarks / pins / polls / poll_options / poll_votes / status_idempotency_keys（仮番号。research.md の調整事項参照）
 
 src/
+├── statuses.rs                  # StatusesModule 組み立て（サービス/リポジトリのハンドル束ね）・ルータ装着点・受信ハンドラ登録の公開
 └── statuses/
-    ├── mod.rs                   # StatusesModule 組み立て（サービス/リポジトリのハンドル束ね）・ルータ装着点・受信ハンドラ登録の公開
     ├── model.rs                 # Status, StatusEdit, Favourite, Reblog, Bookmark, Pin, Poll, PollOption, PollVote, IdempotencyRecord 等のドメイン型（Visibility / AccountRef は core-runtime の domain-primitives を import）
     ├── status_repository.rs     # StatusRepository（投稿の挿入・可視スコープ取得・削除・編集・context 走査・カウンタ更新）
     ├── interaction_repository.rs # InteractionRepository（favourite/reblog/bookmark/pin の記録・取消・存在判定・一覧）
@@ -206,7 +207,7 @@ tests/
 - `src/state.rs`（core-runtime）— `AppState` に `StatusesModule`（各サービス/リポジトリのハンドル）を追加。
 - `src/bootstrap.rs`（core-runtime）— プール確立・api-foundation・federation-core・media-pipeline モジュール構築後に `StatusesModule` を構築し、`DeliveryService` への依頼経路を結線、受信ハンドラを `InboundActivityDispatcher` へ登録、`AppState` に格納。
 - `src/server.rs`（core-runtime）— 投稿/投票/ブックマークのルータを土台ルータへ装着し、api-foundation 横断レイヤー（認証・エラー・レート制限）が適用される装着点に乗せる。
-- `src/config/mod.rs`（core-runtime）— 投稿最大文字数・投票選択肢上限/最小締切・冪等キー保持方針等の運用関連設定項目を追加。
+- `src/config.rs`（core-runtime）— 投稿最大文字数・投票選択肢上限/最小締切・冪等キー保持方針等の運用関連設定項目を追加。
 
 > 各ファイルは単一責務。投稿本体（status）・操作（interaction）・投票（poll）・可視性/配送（visibility/addressing/activity_builder）・シリアライズ（serializer）・受信（inbound）を分離し、core-runtime の Composition Root へ一方向に配線する。
 

@@ -1,4 +1,4 @@
-//! OAuth module tree (design.md's File Structure Plan, `src/oauth/`).
+//! OAuth module tree (design.md's File Structure Plan, `src/oauth.rs` + `src/oauth/`).
 //!
 //! Scope: this file declares the submodules and re-exports task 2.1's
 //! domain types for `crate::oauth::*` callers, plus task 2.2's real scope
@@ -12,7 +12,7 @@
 //! established for `ScopeSet`).
 //!
 //! [`OauthModule`] (task 7.1, design.md's File Structure Plan comment for
-//! this file: "`mod.rs` # OauthModule 組み立て（サービス/リポジトリ/ミドル
+//! this file: "`oauth.rs` # OauthModule 組み立て（サービス/リポジトリ/ミドル
 //! ウェアのハンドル束ね）と公開") is the composition-root bundle
 //! `crate::state::AppState` holds: it builds the one shared
 //! [`service::OauthService`] handle plus the credential/key material every

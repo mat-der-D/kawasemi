@@ -126,15 +126,15 @@ migrations/
 └── 0002_actors.sql              # owners / local_actors / actor_signing_keys と各種一意制約
 
 src/
+├── actor.rs                      # モジュール公開・ActorModule 組み立て（サービス/ディレクトリのハンドル束ね）
 ├── actor/
-│   ├── mod.rs                   # モジュール公開・ActorModule 組み立て（サービス/ディレクトリのハンドル束ね）
 │   ├── model.rs                 # Owner, LocalActor, ActorType, ActorState, Handle(値オブジェクト), 参照型(ResolvedActor/ActorSummary/ActorPublicKey)
 │   ├── owner.rs                 # OwnerRepository（オーナー作成・取得）
 │   ├── repository.rs            # ActorRepository（作成・状態更新・ハンドル/ID/オーナー別取得）
 │   ├── service.rs               # ActorService（アクター作成=鍵生成連動・無効化・状態遷移）
 │   ├── directory.rs             # ActorDirectory（下流向け参照: 管理層一覧 / プロトコル層 解決・公開鍵）
+│   ├── keys.rs                  # keys サブモジュール公開
 │   └── keys/
-│       ├── mod.rs               # keys サブモジュール公開
 │       ├── material.rs          # 鍵ペア生成（注入 Rng で RSA 生成）・公開鍵/秘密鍵 PEM エンコード
 │       ├── cipher.rs            # KeyCipher 境界（秘密鍵 AEAD 封緘）本番/決定的実装
 │       ├── repository.rs        # ActorSigningKeyRepository（鍵の作成・有効鍵取得・失効・全件ロード）
@@ -153,7 +153,7 @@ tests/
 - `src/state.rs`（core-runtime）— `AppState` に `ActorModule`（`ActorService` / `SigningKeyService` / `ActorDirectory` のハンドル）を追加。
 - `src/bootstrap.rs`（core-runtime）— プール確立後に `KeyCache` を DB からロードし `DbSigningKeyProvider` を構築、`RuntimeContext` に注入。`ActorModule` を組み立てて `AppState` に格納。
 - `src/runtime/signing_key.rs`（core-runtime）— 本番 `SigningKeyProvider` の差込点に `DbSigningKeyProvider` を受け入れる構成（テスト用固定鍵実装は維持）。
-- `src/config/mod.rs`（core-runtime）— 起動設定に鍵暗号鍵（KEK）の `Secret<T>` 項目を1つ追加。
+- `src/config.rs`（core-runtime）— 起動設定に鍵暗号鍵（KEK）の `Secret<T>` 項目を1つ追加。
 
 > 各ファイルは単一責務。`keys/` 配下は「生成・封緘・永続化・サービス・キャッシュ・供給」を分離し、core-runtime の同期 trait に整合させる。
 

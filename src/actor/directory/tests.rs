@@ -287,6 +287,64 @@ async fn resolve_actor_by_handle_reports_deactivated_state() {
     app.cleanup().await;
 }
 
+/// Requirements 3.1, 3.2 (federation-core task 4.3's narrow addition, see
+/// this module's own doc comment): `resolve_actor_by_id` returns the
+/// matching actor's data projected into the owner-free `ResolvedActor`
+/// shape, mirroring `resolve_actor_by_handle`'s own contract but keyed by
+/// `Id`.
+#[tokio::test]
+async fn resolve_actor_by_id_returns_resolved_actor_for_a_known_id() {
+    let app = spawn_test_app().await;
+    let directory = ActorDirectory::new(app.pool.clone());
+
+    let owner_id = app.runtime.ids.next_id();
+    let actor_id = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+    create_owner_fixture(&app.pool, owner_id, now).await;
+    let actor = insert_actor_fixture(
+        &app.pool,
+        owner_id,
+        actor_id,
+        "id_lookup_alice",
+        ActorState::Active,
+        now,
+    )
+    .await;
+
+    let resolved = directory
+        .resolve_actor_by_id(actor_id)
+        .await
+        .expect("resolve_actor_by_id must succeed")
+        .expect("the just-inserted actor must be resolvable by id");
+
+    assert_eq!(resolved.id, actor.id);
+    assert_eq!(resolved.handle, actor.handle);
+    assert_eq!(resolved.actor_type, actor.actor_type);
+    assert_eq!(resolved.display_name, actor.display_name);
+    assert_eq!(resolved.summary, actor.summary);
+    assert_eq!(resolved.state, actor.state);
+
+    app.cleanup().await;
+}
+
+/// `resolve_actor_by_id` returns `Ok(None)` (not an error) for an `Id`
+/// nothing was ever created under — mirrors
+/// `resolve_actor_by_handle_returns_none_for_an_unknown_handle`.
+#[tokio::test]
+async fn resolve_actor_by_id_returns_none_for_an_unknown_id() {
+    let app = spawn_test_app().await;
+    let directory = ActorDirectory::new(app.pool.clone());
+
+    let unknown_id = app.runtime.ids.next_id();
+    let resolved = directory
+        .resolve_actor_by_id(unknown_id)
+        .await
+        .expect("resolve_actor_by_id must succeed even when nothing matches");
+    assert!(resolved.is_none());
+
+    app.cleanup().await;
+}
+
 /// Requirements 3.1, 8.3: `actor_public_key` returns the actor's active
 /// signing key's public material, projected into the owner-free
 /// `ActorPublicKey` shape.

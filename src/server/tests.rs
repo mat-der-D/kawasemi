@@ -32,17 +32,27 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 
 use super::*;
+use crate::accounts;
+use crate::accounts::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::actor::build_actor_module;
 use crate::actor::keys::cache::KeyCache;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::config::{
-    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, OauthConfig, OwnerConfig, Secret,
-    ServerConfig,
+    ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, MediaConfig,
+    OauthConfig, OwnerConfig, Secret, ServerConfig,
 };
 use crate::error::{AppError, GENERIC_SERVER_MESSAGE};
+use crate::federation::signatures::ReqwestFederationHttpClient;
+use crate::federation::{FederationWiringConfig, build_federation_module};
+use crate::media;
+use crate::notifications;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
+use crate::search;
+use crate::social_graph;
+use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::telemetry::{REQUEST_ID_FIELD, REQUEST_SPAN_NAME};
+use crate::timelines;
 
 const LAZY_TEST_DB_URL: &str = "postgres://lazy-user:lazy-pw@127.0.0.1:5432/lazy-test-db";
 
@@ -90,6 +100,40 @@ fn test_state(seed: u64) -> AppState {
         oauth: OauthConfig {
             token_hash_key: Secret::new(TEST_TOKEN_HASH_KEY),
         },
+        federation: FederationConfig {
+            secure_mode: false,
+            public_key_cache_ttl: Duration::from_secs(24 * 60 * 60),
+            received_activity_retention_days: 14,
+        },
+        // media-pipeline task 1.2: fixed, non-production values mirroring
+        // `load_config_from`'s own defaults (`src/config.rs`) — this test
+        // harness constructs `AppConfig` directly rather than through TOML/
+        // env parsing, the same way every other startup-config group above
+        // is fixed here rather than loaded.
+        media: MediaConfig {
+            storage_root: std::path::PathBuf::from("media_storage"),
+            max_upload_size_bytes: 10 * 1024 * 1024,
+            thumbnail_target_width: 400,
+            thumbnail_target_height: 400,
+            supported_formats: vec![
+                "image/jpeg".to_string(),
+                "image/png".to_string(),
+                "image/gif".to_string(),
+                "image/webp".to_string(),
+            ],
+            worker_concurrency: 2,
+            max_retry_attempts: 5,
+            lease_duration: Duration::from_secs(5 * 60),
+        },
+        // statuses-core task 7.2: fixed, non-production values mirroring
+        // `load_config_from`'s own defaults, the same convention every other
+        // startup-config group above already follows in this fixture.
+        statuses: crate::config::StatusesConfig {
+            max_content_chars: 500,
+            poll_max_options: 4,
+            poll_min_expiration: Duration::from_secs(5 * 60),
+            idempotency_key_retention_days: 7,
+        },
     };
     let pool = PgPoolOptions::new()
         .max_connections(config.database.max_connections)
@@ -106,7 +150,143 @@ fn test_state(seed: u64) -> AppState {
         config.owner.clone(),
         false,
     );
-    AppState::new(pool, runtime, config, actor_module, oauth_module)
+    // Mirrors `sample_federation_module` in `src/state/tests.rs`: constructs
+    // a real `FederationModule` against the same `connect_lazy` pool (never
+    // dials it), and deliberately never calls `.spawn()` on the returned
+    // background-tasks handle — this suite asserts on router/`TraceLayer`
+    // behavior, not federation-core's own delivery/pruning loops.
+    let (federation_module, _background_tasks_not_spawned) = build_federation_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor_module.directory()),
+        FederationWiringConfig::production(
+            config.server.domain.clone(),
+            false,
+            time::Duration::hours(24),
+            time::Duration::days(14),
+        ),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        |_dispatcher| {
+            // No downstream `InboundActivityHandler` registration needed —
+            // this suite asserts on router/`TraceLayer` behavior, not
+            // inbound dispatch (statuses-core's task 7.2 added this
+            // parameter; see `build_federation_module`'s own doc comment).
+        },
+    );
+    // Mirrors the federation-module construction immediately above: builds a
+    // real `MediaModule` against the same `connect_lazy` pool (never dials
+    // it) and deliberately never calls `.spawn()` on the returned
+    // background-workers handle — this suite asserts on router/`TraceLayer`
+    // behavior, not the resident `ProcessingWorker` pool's live behavior.
+    let (media_module, _background_workers_not_spawned) =
+        media::build_media_module(pool.clone(), runtime.clone(), config.media.clone());
+    // Mirrors the media-module construction immediately above: builds the
+    // accounts-and-instance module bundle (task 5.1) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::accounts::build_accounts_module`) — this bundle performs no
+    // I/O at construction time either (only its later method calls query the
+    // pool), so it stays safe against this suite's `connect_lazy` pool.
+    let accounts_module = accounts::build_accounts_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        media_module.store().clone(),
+        media_module.service(),
+        config.media.clone(),
+    );
+    // Mirrors the accounts-module construction immediately above: builds the
+    // statuses-core module bundle (task 7.2) the same way `bootstrap()`'s
+    // production path does (`crate::statuses::build_statuses_module`),
+    // sharing this instance's own `pool`/`runtime`/`config.server.domain`/
+    // `federation_module`'s own `Arc<ConcreteDeliveryService>` — this bundle
+    // performs no I/O at construction time either.
+    let statuses_module = crate::statuses::build_statuses_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(federation_module.delivery_service()),
+        NotificationSinkRegistry::new(),
+    );
+    // Mirrors the statuses-module construction immediately above: builds the
+    // social-graph module bundle (task 5.2) the same way `bootstrap()`'s
+    // production path does (`crate::social_graph::build_social_graph_module`)
+    // — this bundle performs no I/O at construction time either (it only
+    // stores pool/runtime/config values and registers already-constructed,
+    // `connect_lazy`-safe registries).
+    let social_graph_remote_actor_fetcher = Arc::new(RemoteAccountFetcher::new(
+        pool.clone(),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    ));
+    let social_graph_module = social_graph::build_social_graph_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        social_graph_remote_actor_fetcher,
+        Arc::clone(federation_module.delivery_service()),
+        federation_module.block_policy(),
+        &statuses_module.relationship_query_registry(),
+        accounts_module.ports(),
+        accounts_module.service(),
+        NotificationSinkRegistry::new(),
+    );
+    // Mirrors the social-graph-module construction immediately above: builds
+    // the timelines module bundle (task 5.2) the same way `bootstrap()`'s
+    // production path does (`crate::timelines::build_timelines_module`) —
+    // this bundle performs no I/O at construction time either.
+    let timelines_module = timelines::build_timelines_module(
+        pool.clone(),
+        runtime.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+    );
+    // Mirrors the timelines-module construction immediately above: builds
+    // the notifications module bundle (task 4.2) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::notifications::build_notification_module`) — this bundle
+    // performs no I/O at construction time either.
+    let notification_module = notifications::build_notification_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+        NotificationSinkRegistry::new(),
+    );
+    // Mirrors the notifications-module construction immediately above:
+    // builds the search module bundle (task 5.3) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::search::build_search_module`) — this bundle performs no I/O
+    // at construction time either.
+    let search_module = search::build_search_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        accounts_module.service(),
+        accounts_module.ports(),
+        media_module.store().clone(),
+        statuses_module.relationship_query_registry(),
+    );
+    AppState::new(
+        pool,
+        runtime,
+        config,
+        actor_module,
+        oauth_module,
+        federation_module,
+        media_module,
+        accounts_module,
+        statuses_module,
+        social_graph_module,
+        timelines_module,
+        notification_module,
+        search_module,
+    )
 }
 
 /// Speaks a minimal raw HTTP/1.1 GET request over a fresh `TcpStream` and

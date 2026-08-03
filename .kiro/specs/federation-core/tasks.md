@@ -1,31 +1,31 @@
 # Implementation Plan
 
 - [ ] 1. 基盤: スキーマ・直列化・URL・低位境界
-- [ ] 1.1 連合用テーブルのマイグレーションを追加する
+- [x] 1.1 連合用テーブルのマイグレーションを追加する
   - `migrations/0008_federation.sql` を作成し `delivery_jobs` / `received_activities` / `remote_public_keys` / `instance_signature_capabilities` を定義する
   - 配送ジョブの期限索引と、`target_inbox` × Activity id の重複排除一意索引、状態カラム（pending/in_progress/done/failed）を設定する
   - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、4テーブルと各索引・制約が存在する
   - _Requirements: 11.1, 11.4, 7.4_
   - _Boundary: Migration_
-- [ ] 1.2 (P) JSON-LD コーデックを実装する
+- [x] 1.2 (P) JSON-LD コーデックを実装する
   - ActivityPub `@context` 付与の直列化、未知プロパティで失敗しない安全展開、必須プロパティ（type/id）欠落検出、`application/activity+json`・`application/ld+json` のメディアタイプ判定を実装する
   - 観測可能な完了条件: 未知プロパティ入り文書を解釈でき、必須欠落は検証エラーになり、直列化出力に `@context` が含まれる単体テストが通る
   - _Requirements: 9.1, 9.2, 9.3, 9.4_
   - _Boundary: JsonLdCodec_
   - _Depends: 1.1_
-- [ ] 1.3 (P) アクター URL ビルダーを実装する
+- [x] 1.3 (P) アクター URL ビルダーを実装する
   - サーバードメイン設定からアクター/inbox/outbox/shared inbox/オブジェクト/コレクション URL と keyId URL を構築する
   - 観測可能な完了条件: 同一ハンドルに対し一貫した URL 群と keyId が生成される単体テストが通る
   - _Requirements: 6.1, 8.1_
   - _Boundary: ActorUrls_
   - _Depends: 1.1_
-- [ ] 1.4 (P) 送信ネットワーク境界とダイジェストを実装する
+- [x] 1.4 (P) 送信ネットワーク境界とダイジェストを実装する
   - `FederationHttpClient` port（送信・取得）と本文 SHA-256 ダイジェストの算出・検証を実装し、本番実装と決定的モック実装を差し替え可能にする
   - 観測可能な完了条件: モック HTTP クライアントで送信/取得を差し替えられ、ダイジェスト不一致が検出される単体テストが通る
   - _Requirements: 2.7, 1.3, 2.5_
   - _Boundary: FederationHttpClient, Digest_
   - _Depends: 1.1_
-- [ ] 1.5 (P) 署名スイート抽象を実装する
+- [x] 1.5 (P) 署名スイート抽象を実装する
   - `SignatureSuite` を draft-cavage / RFC 9421 の両形式で実装し、署名対象構築・署名ヘッダ組み立て・解析・受信形式検出を提供する
   - 観測可能な完了条件: 各形式で署名対象とヘッダを構築・解析でき、受信ヘッダから形式を検出できる単体テストが通る
   - _Requirements: 1.4, 2.2_
@@ -33,27 +33,27 @@
   - _Depends: 1.4_
 
 - [ ] 2. コア: 署名送受信と公開鍵
-- [ ] 2.1 公開鍵リゾルバを実装する
+- [x] 2.1 公開鍵リゾルバを実装する
   - keyId から公開鍵素材（公開鍵 PEM・所有アクター URI）を取得して `remote_public_keys` にキャッシュし、有効キャッシュ時はネットワーク取得を行わず、force 指定で再取得する
   - キャッシュの有効性を設定値 `federation.public_key_cache_ttl`（既定 24 時間）で判定し、`fetched_at` から TTL を超えたキャッシュは陳腐として扱い次回検証時に再取得する
   - 観測可能な完了条件: 初回取得後はキャッシュから返り、force 再取得でネットワーク取得が走り、TTL 超過後の解決要求では再度ネットワーク取得が走る統合テストが通る
   - _Requirements: 2.3, 2.4_
   - _Boundary: PublicKeyResolver_
   - _Depends: 1.4_
-- [ ] 2.2 (P) リクエスト署名器を実装する
+- [x] 2.2 (P) リクエスト署名器を実装する
   - core-runtime 署名鍵供給境界からアクター有効鍵を取得し、keyId 設定・本文ダイジェスト同梱・指定形式での署名付与を行い、鍵欠落時は署名を中止してエラーを返す
   - 観測可能な完了条件: 署名付きリクエストが生成され、有効鍵が無いアクターでは署名がエラーになる単体テストが通る
   - _Requirements: 1.1, 1.2, 1.3, 1.5_
   - _Boundary: RequestSigner_
   - _Depends: 1.5_
-- [ ] 2.3 署名検証器を実装する
+- [x] 2.3 署名検証器を実装する
   - 受信署名の形式検出→署名対象再構築→公開鍵検証→本文ダイジェスト検証を行い、署名欠落/不正/期限切れ/鍵取得失敗を検証失敗とし、検証失敗時はキャッシュ無効化＋一度再取得する。検証器自体をモック可能境界として trait 化する
   - 公開鍵解決がネットワーク/DB 呼び出しを伴う非同期処理であるため、検証処理自体を非同期関数として提供し、本 spec の他の port（`FederationHttpClient` 等）と非同期性を統一する
   - 観測可能な完了条件: 正当署名で署名者 URI を返し、改ざん・欠落・鍵取得失敗が検証失敗になり、両形式で検証が成立する統合テストが通る
   - _Requirements: 2.1, 2.2, 2.5, 2.6, 7.1_
   - _Boundary: SignatureVerifier_
   - _Depends: 2.1, 2.2_
-- [ ] 2.4 署名形式ネゴシエータを実装する
+- [x] 2.4 署名形式ネゴシエータを実装する
   - host 既知形式（無ければ既定）で署名送信し、署名関連拒否時に他形式で再送、送達成功形式を `instance_signature_capabilities` に記録し以降優先する double-knocking を実装する
   - 観測可能な完了条件: 未知 host で片形式→拒否→他形式再送が起き、成功後は記録形式が優先される単体/統合テストが通る
   - _Requirements: 3.1, 3.2, 3.3_
@@ -61,40 +61,40 @@
   - _Depends: 2.2_
 
 - [ ] 3. コア: 受信構成要素と配送構成要素
-- [ ] 3.1 (P) 受信重複排除ストアを実装する
+- [x] 3.1 (P) 受信重複排除ストアを実装する
   - Activity id を `received_activities` に記録し、新規判定（新規 true / 既知 false）を提供する
   - 設定値 `federation.received_activity_retention_days`（既定 14 日）を超えて経過した記録行を周期的に削除するプルーニングを提供する
   - 観測可能な完了条件: 同一 Activity id の二度目が既知と判定され、保持日数を超えた行がプルーニング実行後に削除される統合テストが通る
   - _Requirements: 7.4_
   - _Boundary: ReceivedActivityStore_
   - _Depends: 1.1_
-- [ ] 3.2 (P) 受信ディスパッチ境界とブロック委譲境界を実装する
+- [x] 3.2 (P) 受信ディスパッチ境界とブロック委譲境界を実装する
   - 種別→`InboundActivityHandler` の `InboundActivityDispatcher` レジストリと、既定 no-op の `BlockPolicy` 委譲境界を実装し、未登録種別を安全に扱う
   - `BlockPolicy` は宛先コンテキスト（アクター個別 inbox 宛は宛先ローカルアクターの URI が判明した状態、shared inbox 宛は宛先が未確定な状態）を受け取る destination-aware 契約とし、既定実装はいずれの宛先コンテキストでも常に非ブロック（false）を返す
   - 観測可能な完了条件: スタブハンドラを登録すると対応種別がそれへ委譲され、既定ブロックポリシーがアクター宛・shared inbox 宛いずれの宛先コンテキストでも常に非ブロックを返すテストが通る
   - _Requirements: 7.3, 7.5, 12.1, 12.3_
   - _Boundary: InboundActivityDispatcher, BlockPolicy_
   - _Depends: 1.2_
-- [ ] 3.3 (P) 配送キューを実装する
+- [x] 3.3 (P) 配送キューを実装する
   - 配送ジョブの永続化（enqueue）・期限到来ジョブの排他取得（claim_due）・完了/再スケジュール/恒久失敗の状態遷移を実装し、再試行間隔を指数的に広げる
   - 観測可能な完了条件: enqueue 後に claim_due で取得でき、reschedule で次回試行時刻が後ろ倒しされ、上限到達で failed に遷移する統合テストが通る
   - _Requirements: 11.1, 11.2, 11.3, 11.5_
   - _Boundary: DeliveryQueue_
   - _Depends: 1.1_
-- [ ] 3.4 (P) 宛先ターゲットリゾルバを実装する
+- [x] 3.4 (P) 宛先ターゲットリゾルバを実装する
   - recipient を actor-model のハンドル解決で local/remote 物理ターゲットへ分類し、同一 shared inbox を 1 ターゲットへ重複排除する
   - 観測可能な完了条件: ローカル/リモート混在 recipient が正しく分類され、同一 shared inbox 宛が 1 件に畳まれる単体テストが通る
   - _Requirements: 10.3, 10.4, 11.4_
   - _Boundary: RecipientTargetResolver_
   - _Depends: 1.3_
-- [ ] 3.5 (P) ローカルオブジェクト/outbox の下流供給委譲境界を実装する
+- [x] 3.5 (P) ローカルオブジェクト/outbox の下流供給委譲境界を実装する
   - ローカルオブジェクト/コレクション URL を所有判定し AP JSON 表現を返す `ObjectDocumentProvider` の multi-provider レジストリ（登録順に最初に一致したプロバイダへ委譲、不一致・未登録は None）を実装する
   - 指定アクターの outbox ページに収録する Activity を供給する `OutboxSource` のレジストリ（登録された全ソースから該当ページ分を収集）を実装する
   - 両レジストリとも下流未登録の間は安全な既定応答（`ObjectDocumentProvider` は常に None、`OutboxSource` は常に空ページ）を返す既定実装を提供する
   - 観測可能な完了条件: プロバイダ未登録時に解決要求が None を返し、スタブプロバイダ登録後はその URL 空間の解決結果が返り、複数の `OutboxSource` を登録すると収集結果が束ねられる単体テストが通る
   - _Requirements: 6.2, 6.6, 8.1, 8.2, 8.3_
   - _Boundary: ObjectDocumentProvider, OutboxSource_
-- [ ] 3.6 (P) ActivityPub ドキュメントビルダーを実装する
+- [x] 3.6 (P) ActivityPub ドキュメントビルダーを実装する
   - アクター表現（id・inbox・outbox・公開鍵, owner 非露出）を actor-model のアクター解決・公開鍵供給と JSON-LD コーデックで構築する
   - outbox 順序付きコレクションのページの入れ物（構造・ページング）を構築し、収録する Activity 本体は `OutboxSource` レジストリから収集して範囲外 Activity を除外する
   - 観測可能な完了条件: アクター表現に公開鍵が含まれ owner が含まれず、outbox がページ単位の順序付きコレクションとして構築され収録項目が `OutboxSource` の供給内容と一致する単体テストが通る
@@ -103,20 +103,20 @@
   - _Depends: 1.2, 1.3, 3.5_
 
 - [ ] 4. 統合: 受信パイプラインと配送抽象
-- [ ] 4.1 受信パイプラインサービスを実装する
+- [x] 4.1 受信パイプラインサービスを実装する
   - `InboxService` でリモート受信フルパイプライン（署名検証→必須プロパティ検証→ブロック判定→重複排除→ディスパッチ）と、署名検証を除く同一意味論経路（process_local）を実装し、各拒否を意味論処理より前に行う
   - リモート受信は URL（アクター個別 inbox / shared inbox）から宛先コンテキストを組み立てて `BlockPolicy` へ渡し、in-process の `process_local` は宛先ローカルアクターが確定済みのため常にアクター宛の宛先コンテキストで判定する
   - 観測可能な完了条件: 検証失敗が認証失敗・ブロック署名者が拒否・必須欠落が不正・重複が再処理なしになり、リモート経路とローカル経路が同一のブロック判定・重複排除・ディスパッチ処理に合流する統合テストが通る
   - _Requirements: 6.4, 7.1, 7.2, 7.3, 7.4, 9.3, 12.1, 12.2_
   - _Boundary: InboxService_
   - _Depends: 2.3, 3.1, 3.2_
-- [ ] 4.2 配送サービスと配送シンクを実装する
+- [x] 4.2 配送サービスと配送シンクを実装する
   - `DeliveryService` の共通部（正規 Activity 生成・検証・宛先解決）を分岐前に一度だけ実行し、`LocalDeliverySink`（InboxService::process_local への in-process 受け渡し）と `HttpDeliverySink`（配送キュー投入）に物理配送のみを分岐させる
   - 観測可能な完了条件: 同一配送依頼で local 経路と remote 経路が同一の正規 Activity を扱い、local はキューを介さず受信意味論経路へ、remote はキューへ投入される統合テストが通る
   - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5, 11.1_
   - _Boundary: DeliveryService, DeliverySink_
   - _Depends: 3.3, 3.4, 4.1_
-- [ ] 4.3 配送ワーカーを実装する
+- [x] 4.3 配送ワーカーを実装する
   - 配送キューから期限到来ジョブを取り出し、署名形式ネゴシエータ経由で署名付き HTTP 送信を行い、一時失敗はバックオフ再試行・上限到達は恒久失敗記録とする
   - 観測可能な完了条件: ワーカーがジョブを送信して done にし、一時失敗で再スケジュール、上限で failed に遷移する統合テストが通る
   - _Requirements: 1.1, 3.1, 3.2, 3.3, 11.2, 11.3, 11.5_
@@ -124,27 +124,27 @@
   - _Depends: 2.4, 3.3_
 
 - [ ] 5. 統合: エンドポイントと配線
-- [ ] 5.1 (P) WebFinger と NodeInfo エンドポイントを実装する
+- [x] 5.1 (P) WebFinger と NodeInfo エンドポイントを実装する
   - WebFinger で `acct:` を解析し自ドメイン照合のうえ複数ローカルアクターを owner 非露出で解決し self link を JRD で返す。NodeInfo でディスカバリリンクと最小公開統計（ソフトウェア名・バージョン・ActivityPub）を返し内部情報を出さない
   - 観測可能な完了条件: 複数アクターがそれぞれ JRD で解決され、他ドメイン照会は非解決・不在は未検出、NodeInfo に内部情報が含まれない統合テストが通る
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3_
   - _Boundary: webfinger, nodeinfo_
   - _Depends: 3.6_
-- [ ] 5.2 (P) ActivityPub GET と outbox エンドポイントを実装する
+- [x] 5.2 (P) ActivityPub GET と outbox エンドポイントを実装する
   - アクター/オブジェクト/コレクション GET を content negotiation で activity+json で返し、セキュアモード時は authorized fetch（署名検証）を要求して未署名/検証失敗には表現を返さず、非 AP Accept は表現を返さず、不在は未検出とする。outbox をページ単位の順序付きコレクションで返す
   - アクター URL 以外（オブジェクト/コレクション）の GET は `ObjectDocumentProvider` レジストリへ委譲し、None は未検出として応答する。outbox の収録項目は `OutboxSource` レジストリから収集し、下流未登録の間は空コレクションを返す
   - 観測可能な完了条件: AP Accept で activity+json が返り owner を含まず、非 AP Accept は AP 表現を返さず、セキュアモードで未署名 GET が拒否され、outbox がページで返り、下流未登録のオブジェクト URL は未検出、outbox は空コレクションになる統合テストが通る
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.6, 8.1, 8.2, 9.4_
   - _Boundary: ap_get, outbox_
   - _Depends: 3.6, 4.1_
-- [ ] 5.3 inbox / shared inbox エンドポイントを実装する
+- [x] 5.3 inbox / shared inbox エンドポイントを実装する
   - inbox（アクター毎）と shared inbox の POST を受信パイプラインへ接続し、検証失敗は認証失敗応答、受理は 202、重複は再処理なしの受領応答とする
   - アクター個別 inbox は URL 上の宛先アクターをブロック判定の宛先コンテキストとして渡し、shared inbox は宛先未確定の宛先コンテキストを渡す
   - 観測可能な完了条件: 署名付き Activity が 202 で受理されディスパッチされ、検証失敗が認証失敗応答になり、アクター個別 inbox と shared inbox のそれぞれで異なる宛先コンテキストが `BlockPolicy` に渡ることが確認できる統合テストが通る
   - _Requirements: 7.1, 7.2_
   - _Boundary: inbox_
   - _Depends: 4.1_
-- [ ] 5.4 連合モジュールを bootstrap と AppState へ配線する
+- [x] 5.4 連合モジュールを bootstrap と AppState へ配線する
   - core-runtime 起動設定にセキュアモードフラグ・配送リトライ方針・公開鍵キャッシュ TTL（`federation.public_key_cache_ttl`）・受信 Activity 保持日数（`federation.received_activity_retention_days`）を追加し、各 port（HTTP クライアント・公開鍵リゾルバ・既定ブロックポリシー・ディスパッチャ・既定 `ObjectDocumentProvider`/`OutboxSource`）を構築・配線して連合ルータを土台ルータへ装着する
   - 配送ワーカーと受信 Activity プルーニング周期タスクを起動し、配送サービスとディスパッチャを `AppState` に格納する
   - 観測可能な完了条件: 起動後に WebFinger・AP GET・inbox・配送が一連で機能し、下流がディスパッチャ・`ObjectDocumentProvider`・`OutboxSource` へ登録、配送サービスへ配送依頼できる
@@ -153,27 +153,48 @@
   - _Depends: 3.5, 4.2, 4.3, 5.1, 5.2, 5.3_
 
 - [ ] 6. 検証
-- [ ] 6.1 (P) 署名送受信の統合テスト
+- [x] 6.1 (P) 署名送受信の統合テスト
   - 送信側署名を受信側で検証成功、改ざん/欠落の拒否、両形式での成立、double-knock 再送と形式記録、公開鍵キャッシュ/再取得をモック HTTP で決定的に検証する
   - 観測可能な完了条件: 上記シナリオがグリーンで、改ざん署名が拒否され double-knock が片形式拒否後に他形式で成功する
   - _Requirements: 1.1, 2.1, 2.2, 2.6, 2.7, 3.1, 3.2, 3.3_
   - _Boundary: signatures_it_
   - _Depends: 5.4_
-- [ ] 6.2 (P) 受信・配送キューの統合テスト
+- [x] 6.2 (P) 受信・配送キューの統合テスト
   - inbox 受信のディスパッチ受け渡し・重複再処理なし、アクター個別 inbox 宛のブロック署名者拒否、shared inbox 宛は既定契約どおり一括拒否されないこと、配送キューの即時復帰・ワーカー送信・バックオフ再試行・恒久失敗・shared inbox 重複排除を検証する
   - 観測可能な完了条件: アクター個別 inbox 宛のブロック署名者が拒否され、shared inbox 宛の同一署名者は既定 `BlockPolicy` の下で受理され、重複 Activity が再処理されず、配送が再試行・恒久失敗・重複排除のとおり振る舞う
   - _Requirements: 7.3, 7.4, 11.1, 11.2, 11.3, 11.4, 11.5, 12.1, 12.2_
   - _Boundary: inbox_delivery_it_
   - _Depends: 5.4_
-- [ ] 6.3 (P) WebFinger/NodeInfo/AP GET の統合テスト
+- [x] 6.3 (P) WebFinger/NodeInfo/AP GET の統合テスト
   - 複数アクター WebFinger 解決・他ドメイン非解決・未検出、NodeInfo の内部情報非露出、AP GET の owner 非露出・content negotiation・セキュアモード authorized fetch・未検出、下流未登録時の `ObjectDocumentProvider`（オブジェクト URL 未検出）・`OutboxSource`（空 outbox）の既定応答を検証する
   - 観測可能な完了条件: 上記がグリーンで、AP 表現に owner が含まれずセキュアモードで未署名 GET が拒否され、下流未登録のオブジェクト URL が未検出、outbox が空コレクションとして返る
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 8.1, 8.2, 8.3, 9.1, 9.4_
   - _Boundary: webfinger_nodeinfo_it_
   - _Depends: 5.4_
-- [ ] 6.4 連合往復とローカル/HTTP 結果同値の検証
+- [x] 6.4 連合往復とローカル/HTTP 結果同値の検証
   - 2 インスタンスを決定的注入境界で起動する `spawn_federation_pair` を実装し、A→B 署名付き Activity 往復で受信検証・ディスパッチ受け渡しを検証し、同一 Activity をローカル配送（in-process）と HTTP 配送で実行して登録スタブハンドラの業務処理結果が同値であることを検証する
   - 観測可能な完了条件: A→B 往復が成立し、ローカル配送結果と HTTP 配送結果が同一の業務処理結果になることがテストで確認できる
   - _Requirements: 10.5, 13.1, 13.2, 13.3, 13.4_
   - _Boundary: FederationTestHarness, federation_pair_it_
   - _Depends: 5.4_
+
+## Implementation Notes
+- 5.4: `FederationModule`/`build_federation_module` (`src/federation/module.rs`, new) picks one concrete production type per non-`dyn`-safe port (`HttpSignatureVerifier<DbFederationPublicKeyResolver<ReqwestFederationHttpClient>>`, `NoopBlockPolicy`, `DbReceivedActivityStore`) and mounts the live router accordingly. `FederationConfig` (secure_mode/public_key_cache_ttl/received_activity_retention_days) added to `AppConfig` in `src/config.rs`; no delivery-retry-policy config field was added — `DeliveryWorker`/`backoff_delay` (`outbound/queue.rs`, `outbound/worker.rs`, both out of this task's boundary) have no constructor injection point for it, and none of this task's cited requirements (7.3/10.1/11.1/11.2) map to retry policy specifically (that's Requirement 11.3, already satisfied structurally by task 4.3). **`InboundActivityDispatcher` registration is NOT live-mutable after `AppState` construction**, unlike `ObjectDocumentProvider`/`OutboxSource` (which this task made genuinely `Arc<RwLock<Vec<_>>>`-backed and `&self`-registerable) — `InboxService<V,B,D>` (`inbound/service.rs`, out of boundary) stores its dispatcher as a plain owned field with no accessor, so no same-boundary path exists to make it live-mutable; wrapping it at the `module.rs` call site in `Arc<Mutex<_>>` doesn't typecheck against `InboxService::new`'s owned-value parameter. Verified structurally forced by review, not a workaround-able oversight. **Any future federation-core-dependent spec that needs to register an `InboundActivityHandler` must extend `build_federation_module` directly** (a marked `// DOWNSTREAM DISPATCHER REGISTRATION POINT` comment marks the spot) and must therefore include `FederationModule`/`src/federation/module.rs` in its own task's `_Boundary:_` — it cannot rely on `AppState`-mediated live registration the way `ObjectDocumentProvider`/`OutboxSource` support. `src/federation/endpoints/document.rs` (task 3.5/3.6's boundary file) was touched to make those two registries interior-mutable (`Vec` → `Arc<RwLock<Vec<_>>>`, `register(&mut self)` → `register(&self)`, added `Clone`) — verified behavior-preserving (only signature/mut-binding changes, resolve/collect/ordering semantics untouched). Two independent `HttpSignatureVerifier` instances are constructed (one moved into `InboxService`, one for `ApGetState`'s authorized-fetch path) but share the same `Arc<DbFederationPublicKeyResolver<_>>`/cache, so no divergence risk. `RecipientTargetResolver`/`HttpDeliverySink` each get a fresh `ActorDirectory::new(pool.clone())` rather than reusing `AppState`'s shared instance, since `LocalActorLookup` is implemented only for owned `ActorDirectory` (task 3.4's boundary) — harmless, `ActorDirectory` holds only a `PgPool` handle, no cache. `object_get` is mounted on a wildcard catch-all (`/{*path}`) since `ObjectKind` has no fixed enumeration; verified safe against axum/matchit's static/named-param-before-wildcard precedence. Delivery-worker poll interval (5s prod / 200ms test) and received-Activity pruning interval (1h prod / 5s test) are hardcoded constructor values, not config — no requirement mandates configurability. `ReqwestFederationHttpClient` has no request timeout (pre-existing, task 2.1's boundary, out of scope here) — a slow/hanging remote inbox could tie up a delivery-worker poll iteration; flagged for a future task.
+- 5.3: `InboxState<V, B, D>` mirrors 5.2's generic-over-verifier-type pattern (`InboxService<V, B, D>`'s three type params are all non-`dyn`-compatible `async fn` traits per task 4.1's note) — task 5.4 must mount `actor_inbox::<ConcreteTypes>`/`shared_inbox::<ConcreteTypes>` with one concrete production type triple, same constraint as 5.2's `ApGetState<V>`. A syntactically-invalid `{handle}` path segment on the per-actor route returns 404 *before* calling `InboxService::process_inbound` (before signature verification) — the ordering is inverted relative to `ap_get.rs`'s secure-mode-check-before-syntax-check, but round-1 review verified this creates no oracle: `process_verified` has no actor-existence check anywhere in its pipeline (`BlockPolicy`/dedup/dispatch all key off the signer's identity or the activity itself, never the destination handle's existence), so a syntactically-valid-but-unregistered handle is processed identically to a registered one — the 404 leaks only handle-syntax validity. An empty POST body maps to `IncomingRequest.body = None`, which lands in `InboxService::process_inbound`'s own `422` "no body to validate" bucket (`service.rs:251-256`) rather than `parse_activity`'s JSON-syntax `400` bucket. No actor-existence check is performed at all beyond handle syntax (matches `outbox.rs`'s established precedent) — a POST to a syntactically-valid but unregistered actor's inbox is processed exactly like a registered one, verified harmless by reading the full pipeline. `src/federation.rs` also gained top-level re-exports for `InboxOutcome`/`InboxService` that task 4.1 had omitted — a legitimate gap-fill, not scope creep, since `federation.rs` is this task's own declared boundary file.
+- 5.2: Authorized fetch (6.4) reuses `SignatureVerifier::verify_request` directly (not `InboxService::process_inbound`, which runs dedup/dispatch/block-policy machinery inappropriate for a bodyless GET) — a narrower reuse than design.md's literal "このサービスの検証経路を共用" wording suggests, but consistent with its intent. `ApGetState<V>` is generic over the verifier type rather than `Arc<dyn SignatureVerifier>` — `SignatureVerifier::verify_request`'s returned future has no `Send` bound provable through a `dyn` object, so axum's `Handler` trait bound cannot be satisfied through dynamic dispatch; task 5.4 must mount `actor_get::<ConcreteVerifierType>`/`object_get::<ConcreteVerifierType>` with one concrete production verifier type. Non-AP `Accept` (including a missing header) → `406 Not Acceptable`, per design.md's own API Contract table. Ordering is content-negotiation → authorized fetch → existence lookup, keyed off the raw request path (not a post-lookup canonical URL), so an unauthenticated secure-mode request can't be used as an existence oracle. `outbox_get` deliberately has NO authorized-fetch/secure-mode gate — design.md's own API Contract table lists `401(secure)` only for the actor/object GET rows, not outbox; round-2 review confirmed this reading against the literal table. Round-1 review found the object-endpoint secure-mode gate was implemented but not test-proven (only the actor endpoint had that coverage); round-2 remediation added `object_get_in_secure_mode_rejects_an_unsigned_get`/`object_get_in_secure_mode_accepts_a_validly_signed_get` to `tests/ap_get_outbox_it.rs`, verified by the reviewer via an actual mutation test (temporarily removing the gate and confirming the new test fails).
+- 5.1: `endpoints/mod.rs` already existed at this level (design.md's own File Structure Plan uses `mod.rs` throughout `federation/`, already in effect since tasks 1.x–4.x despite structure.md's "no mod.rs" steering rule) — this task continues that established precedent rather than introducing new drift. WebFinger/NodeInfo handlers are deliberately left unwired from the live router (task 5.4 owns wiring); `tests/webfinger_nodeinfo_it.rs` builds its own local `axum::Router` around just these handlers via `tower::ServiceExt::oneshot`. `WebfingerState.domain` duplicates a string `ActorUrls` holds privately (no accessor exists there; adding one was judged out of this task's boundary). NodeInfo document intentionally emits only `version`/`software`/`protocols` (Requirement 5.2's literal minimal set), omitting the full upstream NodeInfo envelope (`usage`/`openRegistrations`/`services`/`metadata`) — fabricating those fields would risk violating 5.3's "no internal info" constraint.
+- 1.1: design.md の物理データモデルは移行ファイル名を `0008_federation.sql` と記載しているが、実際には `migrations/0004_federation.sql` として作成した。`migrations/` は `0001`〜`0003`（core-runtime/actor-model/api-foundation、roadmap.md の依存順）までしか存在せず、federation-core はロードマップ順で4番目に実装されるため実際の次番号は 0004。design.md 側の番号（0004〜0008、spec 間で不整合）は `/kiro-spec-batch` の並列生成時に割り当てられた値であり、実装順を反映していない（federation-core に依存する accounts-and-instance/statuses-core/social-graph がより小さい番号を持つ点からも裏付けられる）。sqlx のマイグレータはデフォルトで版番号の昇順以外の追記を拒否するため、以降のタスクでマイグレーションファイルを追加する際は、design.md の番号をそのまま使わず `migrations/` の実際の内容を確認して次の連番を採番すること。テーブル/カラム/索引/制約の中身は design.md の `0008_federation.sql` ブロックをそのまま踏襲している。
+- 1.5: `SignatureSuite`（`src/federation/signatures/suite.rs`）は draft-cavage / RFC 9421 双方の署名対象文字列構築・ヘッダ組み立て・解析・形式検出のみを扱う純粋な文字列/フォーマット層で、実際の RSA 署名・検証は行わない（2.2/2.3 の責務）。design.md にない `SignableRequest::key_id` フィールドを追加した（RFC 9421 の `@signature-params` 行に keyid/alg を署名対象として含めるため。`assemble_headers` の `key_id` 引数と一致させる契約は `debug_assert_eq!` で明文化）。RFC 9421 側のダイジェスト成分は RFC 9530 Content-Digest 構造化フィールドではなく、1.4 の既存 `Digest`（`Digest: SHA-256=...`）をそのまま `digest` コンポーネント名で流用している（2.2/2.3 実装時に留意）。`created`/`expires` パラメータは意図的に省略（`SignatureSuite` は clock を持たないため。代わりに `date` ヘッダを鮮度検証に使う想定）。`build_signing_input` が対象とするヘッダ/コンポーネント集合は固定（design.md のシグネチャに呼び出し側からの一覧指定引数が無いため）— 2.3（`SignatureVerifier`）は受信側の `Signature-Input`/`headers=` パラメータが宣言する成分集合と実装側の固定集合が食い違うケースへの対処を検討すること。
+- 2.1: `FederationHttpClient`（`http_client.rs`）は `#[allow(async_fn_in_trait)]` の素の `async fn` で定義されており、`Arc<dyn FederationHttpClient>` は E0038（dyn非互換）でコンパイルできない。`DbFederationPublicKeyResolver`（`key_resolver.rs`）はジェネリック `H: FederationHttpClient` を `Arc<H>` で保持する形にして回避した — 2.2（`RequestSigner`）・2.3（`SignatureVerifier`）・2.4（`SignatureNegotiator`）が `FederationHttpClient` を保持する際も同様にジェネリックにするか、`Arc<dyn Trait>` 越しに使う必要が生じた場合は当該トレイトを `Box`/`Pin<Box<dyn Future>>` で明示的にボックス化するかを検討すること（`#[async_trait]` マクロの追加も選択肢だが未採用）。`PublicKeyResolver` トレイト自身も同じ理由で `#[allow(async_fn_in_trait)]` の素の `async fn` とした（`Arc<dyn PublicKeyResolver>` が必要になる 2.3 側で同じ問題が再発する点に留意）。TTL（`federation.public_key_cache_ttl`、既定 24 時間）は `DbFederationPublicKeyResolver::new` のコンストラクタ引数（`cache_ttl: time::Duration`）のままで、config 配線は 5.4（`_Boundary: FederationModule, Bootstrap, AppState, Config_`）まで未実施 — `DEFAULT_PUBLIC_KEY_CACHE_TTL` 定数を 5.4 側が既定値として参照すること。DB アクセスは `sqlx::query`/`query_as`（マクロ非使用、`.sqlx/` キャッシュ無し）で `actor/keys/repository.rs` と同じ慣習に従っている。
+- 2.2: design.md の `RequestSigner` Key Dependencies 表に `ActorDirectory` が載っていないが、`actor: &Handle` から `SigningKeyProvider` の `KeyRef(Id)` を組み立てるには `Handle -> Id` 解決が必須で、それを提供する経路は spec 全体で `actor/directory.rs` の `ActorDirectory::resolve_actor_by_handle`（actor-model 所有、federation-core から依存可能）しか存在しない（表の欠落と判断、3.4 `RecipientTargetResolver` も同種の依存を明記している点と整合）。`resolve_actor_by_handle` が非同期のため、design.md のシグネチャ（同期 `fn sign_request`）から逸脱して `async fn sign_request` とした（`PublicKeyResolver` 等、本 spec の他の Crypto 層と非同期性を統一）。未登録アクター／有効鍵なしは同一に「署名中止・`req` 無変更・エラー」として扱う（Requirement 1.5）。RSA 署名は PKCS#1 v1.5 + SHA-256（`rsa-sha256`、両形式共通）。`rsa` 0.9.10 が要求する `digest` 0.10.x とワークスペース直接依存の `sha2 = "0.11.0"`（`digest` 0.11.x）が非互換のため `rsa::Pkcs1v15Sign::new::<Sha256>()` は使えず、`Pkcs1v15Sign { hash_len: Some(32), prefix: <SHA-256 の DigestInfo 前置バイト列> }` を手動構築している（前置バイト列はレビューで独立検証済み、正しい）。2.3（`SignatureVerifier`）・2.4（`SignatureNegotiator`）が RSA 署名/検証や `sha2`/`digest` を扱う際はこの制約を踏まえること。HTTP `Date` ヘッダは本 crate に前例が無かったため `time::macros::format_description!` で IMF-fixdate を自前実装した（`signer.rs` 内 `http_date`）。
+- 2.3: `signer.rs`（2.2）の `SHA256_PKCS1V15_PREFIX`/`sha256_pkcs1v15_padding`/`HTTP_DATE_FORMAT` はモジュール非公開のため、`signer.rs` を変更せず `verifier.rs` に同一内容を複製した（レビューでバイト一致を確認済み）。将来 2.4（`SignatureNegotiator`）や配送ワーカー等でも同じ RSA/HTTP-date ヘルパが必要になった場合、3 箇所目の複製ではなく共有ヘルパへの抽出（例: `signatures/crypto_shared.rs` 等）を検討すること。受信署名の `covered_components`（送信者申告値）と `SignatureSuite::build_signing_input` が実ヘッダから再計算する集合は**順序込みの完全一致**を要求し、不一致は検証失敗（Requirement 2.6 の「不正」）とした — draft-cavage/RFC 9421 いずれも署名対象文字列にこのリストを逐語的に埋め込むため、順序を含めて一致しない限り「送信者が実際に署名した文字列」を再構築できない。鮮度判定の許容窓は `DEFAULT_SIGNATURE_MAX_AGE = Duration::hours(1)`（design.md に数値指定なし、`PublicKeyResolver` の TTL と同様コンストラクタ引数化、5.4 で config 化予定）。`Date` ヘッダは `covered_components` に含まれるか否かに関わらず必須（鮮度判定の時間的基準点がないため）。検証失敗時のキャッシュ無効化＋再取得は「暗号検証（署名不一致）」のときのみ発火し、鍵解決自体の失敗ではリトライしない（`PublicKeyResolver::resolve_public_key(key_id, force=true)` を1回だけ呼ぶ）。
+- 2.4: design.md の `SignatureNegotiator` は他コンポーネント（`PublicKeyResolver`/`SignatureVerifier`/`FederationHttpClient`）と異なり `pub trait ... { async fn ... }` ではなく素の `pub async fn negotiate_and_send(...)` 一行のみで記述されているため、意図的にトレイト化せず具象構造体（`SignatureNegotiator<H: FederationHttpClient>`、`Arc<H>` 保持）として実装した（テスト可能性はジェネリクスで確保、`key_resolver.rs` と同じ方針）。「署名関連拒否」は本 spec 自身の受信側エラーマッピング規約（401=署名/認証失敗、403=ブロック対象署名者）を送信側に逆適用し、**HTTP 401 のみ**が他形式での再送をトリガーする（403 は署名形式を変えても送信者身元は変わらないため無意味、と判断）。再送は他方の形式へちょうど1回のみ（ループしない、`SignatureFormat` は2値のみなので `other_format` は全域関数）。`instance_signature_capabilities.format` の DB 文字列は `'draft_cavage' | 'rfc9421'`（migration のコメントに準拠）。転送層エラー（`FederationHttpClient::send` の `Err`）は「署名関連」ではないため再送しない。
+- 3.1: `ReceivedActivityStore`（`inbound/dedup.rs`）は `key_resolver.rs`（2.1）と同じ「config 未配線・コンストラクタ引数」方針を踏襲し、`federation.received_activity_retention_days`（既定 14 日）を config から読まず `DbReceivedActivityStore::new` の `retention: time::Duration` 引数として受け取る（`DEFAULT_RECEIVED_ACTIVITY_RETENTION = Duration::days(14)` を 5.4 が既定値として参照）。`record_if_new` は SELECT-then-INSERT ではなく `INSERT ... ON CONFLICT (activity_id) DO NOTHING` + `rows_affected()` の単一アトミック文で判定する（同一 Activity の並行配送に対する競合を避けるため）。実装ラウンドで `cargo fmt`（引数無し・全リポジトリ対象）を実行し、api-foundation/oauth 側の無関係ファイル6件に空白のみの整形差分を誤って持ち込んだ（レビューで検出・`git checkout --` で復元）。以降のタスクでは `cargo fmt -- <このタスクで変更した具体的なファイルパス>` のように対象ファイルを明示し、リポジトリ全体には及ぼさないこと。
+- 3.2: design.md の `InboundActivityHandler::handle` は素の `async fn` として記載されているが、`InboundActivityDispatcher::register(handler: Arc<dyn InboundActivityHandler>)` が要求する `dyn` ディスパッチ（型消去された `Vec<Arc<dyn InboundActivityHandler>>` multimap）と両立しない（素の `async fn` を持つトレイトは E0038 でオブジェクト安全でない）。`handle` のシグネチャを手動デシュガー形式 `fn handle<'a>(&'a self, ...) -> Pin<Box<dyn Future<Output = Result<HandleOutcome, AppError>> + Send + 'a>>` に変更して回避した（`async-trait` マクロと同じ変換を手書きしたもの、新規依存追加なし）。呼び出し側（`dispatch` 内のファンアウトループ）は変わらず `.await` するだけで、実装側だけ `Box::pin(async move { .. })` で包む必要がある。4.1（`InboxService`）や下流 spec（social-graph/statuses-core）が `InboundActivityHandler` を実装する際もこの形式に従うこと。`requirements.md` の Requirement 7 は 7.1–7.5 までで、design.md が言及する "7.6"（複数ハンドラ/ファンアウト）に対応する要件番号が `requirements.md` 側に存在しない（spec 生成時の齟齬、将来の spec メンテナンスで解消が必要、本タスクの実装自体には影響なし）。
+- 3.4: design.md は `Recipient` 型のリテラル定義を与えていない（`DeliveryRequest.recipients: Vec<Recipient>` / `resolve(recipients: &[Recipient])` という使用箇所のみ）。`Handle`（`actor/model.rs`）はローカルアクター専用の検証済み識別子（ASCII 英数字/`_` のみ）でありリモート IRI を保持できないこと、および本 spec がリモートアクターのプロフィール/inbox 発見を所有しない（requirements.md Boundary Context）ことから、`enum Recipient { Local(Handle), Remote { inbox: String, shared_inbox: Option<String> } }` として実装した（リモート宛の inbox/shared_inbox は呼び出し側が既に解決済みの値として渡す前提）。`ActorDirectory` はトレイトを持たない具象構造体のため、`resolve_actor_by_handle` のみを narrow に切り出した `LocalActorLookup` トレイト（`BlockPolicy`/`DeliveryQueue` と同じ委譲境界パターン）を新設し、`ActorDirectory` に実装した。`ActorUrls`（design.md のコンポーネント表では P0 依存とされる）は実装上まったく不要と判明した（`DeliveryTarget::Local` は `Handle` のみ、`Remote` の URL は呼び出し側供給のため自ドメインからの URL 構築が発生しない）— 2.2 の逆パターン（表にあるが実装で不要）として記録。ローカル recipient の handle が解決できない場合は「一部の宛先が黙って欠落する」ことを避けるため `resolve()` 全体を `AppError::client(404)` で失敗させる設計とした（部分スキップではなく全体失敗）。重複排除キーは「`shared_inbox` があればそれ、無ければ自身の `inbox`」を効果アドレスとして `HashSet` で判定し、異なる recipient 間で個別 inbox と shared inbox が偶然一致するケースも正しく畳まれることを確認済み。
+- 3.5: `ObjectDocumentProvider`/`OutboxSource` レジストリ（`endpoints/document.rs`）は design.md に `PageCursor` のリテラル定義が無いため、`PageCursor(pub Option<String>)`（`None`=先頭ページ、`Some(token)`=不透明な継続トークン）として実装した（`outbox_page`/`build_outbox_page` のシグネチャが `page: PageCursor` を必須引数としており `Option<PageCursor>` ではないため、「カーソル無し」を型内部に持たせる必要がある）。このレジストリ自身はトークンの中身を一切解釈しない（実際のページング意味論は 3.6 `ActivityPubDocumentBuilder` と将来の `OutboxSource` 実装側の責務）。design.md が名指しする `NoopObjectDocumentProvider`/`EmptyOutboxSource` という具体型は導入しなかった — 空の `Vec` ベースレジストリ自体が「未登録なら None／空ページ」という既定動作を自然に満たすため、別途プレースホルダ型を作る必要はないと判断（design.md の記述はレジストリの既定挙動を指しているとして解釈した）。`ObjectDocumentRegistry::resolve` は登録順（`Vec<Arc<dyn ObjectDocumentProvider>>`、ハッシュマップではない）に `can_resolve` を試し最初の一致で確定する。`document.rs` は 3.6 でも同一ファイルに `ActivityPubDocumentBuilder` が追記される予定（design.md のファイル構成計画どおり）。
+- 3.6: `ActivityPubDocumentBuilder`（`endpoints/document.rs`、3.5 と同一ファイルに追記）は `ActorDirectory` を新規トレイト化せず直接依存した（3.4 の `LocalActorLookup` とは異なる判断 — `actor_public_key` 呼び出しのみで足り、`spawn_test_app()` の実 Postgres 経由でテスト可能なため）。`publicKey.owner` フィールドは ActivityPub 標準の自己参照（アクター自身の URL）であり、Requirement 6.5 の「オーナー情報」（運用者/管理者の身元）とは別概念であることを明示的にコメント・テストで区別した。outbox の複数 `OutboxSource` 束ねは各 Activity の `published` 文字列フィールドの辞書式比較でソートする（`Z` 終端・同一精度の RFC 3339 であれば文字列比較で時系列順と一致するが、タイムゾーンオフセット混在や秒未満桁数混在では破綻し得る既知の制約 — MVP として許容、テストは正規化済みタイムスタンプのみをカバー）。複数ソースの `next` カーソル合成は「登録順で最初に non-None を返したものを採用」という MVP 挙動とした（本格的な複数ソース間カーソル合成は将来の課題）。`@context` は `jsonld/context.rs` の `ACTIVITYSTREAMS_CONTEXT` 定数を再利用（`with_activitystreams_context` 関数は非公開のため `serde_json::Map` へ直接スタンプする形を取ったが、定数自体は共有しておりドリフトしない）。
+- 4.1: `InboxService`（`inbound/service.rs`）は design.md の Service Interface が `process_inbound(&self, req: IncomingRequest)`（単一引数）と記載する一方、Components 表の Key Dependencies 一覧に `ActorUrls` が挙げられておらず、かつ 5.3 のタスク文自身が「アクター個別 inbox は URL 上の宛先アクターを `LocalRecipientContext::Actor` として渡し、shared inbox は `LocalRecipientContext::SharedInbox` を渡す」と URL→宛先コンテキスト変換の責務をエンドポイントハンドラ（5.3、未実装）側に割り当てているため、`process_inbound(&self, req: IncomingRequest, destination: LocalRecipientContext)` として `destination` を明示的な第二引数にした（`InboxService` 自身が `ActorUrls` の URL 形状規約に依存して再解析する必要をなくす判断。レビューで独立検証済み）。`process_inbound`／`process_local` はともに非公開の単一メソッド `process_verified`（ブロック判定→重複排除→ディスパッチ）に合流させて 10.3/10.5 相当の収束を構造的に担保している。`InboxOutcome` は `Accepted`/`Duplicate` の2値のみを持ち、401/422/403 の各拒否は本 spec の他コンポーネント（`SignatureVerifier`/`parse_activity` 等）と同じ規約に合わせ `Result` の `Err(AppError)`（ステータス付き）として表現した（`InboxOutcome` に拒否用バリアントは追加していない）。**環境上の注意**: このタスクのレビュー中に `src/api/ratelimit/tests.rs` / `src/bootstrap.rs` / `src/oauth/middleware.rs` / `src/oauth/middleware/tests.rs` / `src/state/tests.rs` / `tests/api_foundation_wiring_it.rs` の6ファイルに空白のみの整形差分が繰り返し再発したが、原因は本タスクの実装者ではなく `.claude/hooks/cargo-test-stop.sh`（`.claude/settings.json` の `Stop` フック）が全エージェントの turn 終了ごとに無条件で `cargo fmt --all`（リポジトリ全体・パス指定なし）を実行するためと特定した（同一チェックアウトを共有する並行サブエージェントの turn でも発火する）。3.1 の注記が「実装者が引数無し `cargo fmt` を実行した」と記録しているのも、実際にはこの共有フックが原因だった可能性がある。以降のタスクでこの6ファイルが同種の空白差分で再度汚れているのを見つけた場合、`cargo fmt --check -- <該当ファイル>` で意味論的差分が無いことを確認したうえで `git checkout -- <該当ファイル>` で復元してよく、実装者自身の境界違反として扱う必要はない（意味論的な差分が含まれる場合はもちろん通常どおり境界違反として扱う）。
+- 4.2: `DeliveryService`（`outbound/delivery.rs`）と `DeliverySink`（`outbound/sink.rs`）は design.md が具体的なフィールドを定義していない `CanonicalActivity` 型を新設して実装した（3.4 の `Recipient`・3.5 の `PageCursor` と同種の「design.md が使用箇所のみ示し定義を委ねているパターン」）。`deliver()` は分岐前に `jsonld::serialize`→`jsonld::parse_activity` で正規 Activity を一度だけ生成・検証し、`RecipientTargetResolver::resolve` で宛先解決も一度だけ行ったうえで、生成した単一の `CanonicalActivity` を `&` 参照でターゲットごとの `DeliverySink::dispatch` へ渡す（`LocalDeliverySink` は `ParsedActivity` 側、`HttpDeliverySink` は `serde_json::Value` 側を参照するが、いずれも同一インスタンスの異なるビューであり独立再構築ではない）。`deliver()` のターゲット反復は fail-fast（最初の `dispatch` 失敗で即座に打ち切り、後続ターゲットへは配送しない）とした — design.md の `deliver() -> Result<(), AppError>` がターゲット単位の結果を返さないこと、および 3.4 `RecipientTargetResolver::resolve` 自身が「一部失敗で全体失敗」という同種の規約を既に採用していることと整合する解釈（レビューで承認済み）。`LocalDeliverySink::dispatch` は `InboxService::process_local` へ渡す `VerifiedSigner` を送信元ローカルアクター自身の `ActorUrls::actor_url`/`key_id` から純粋な文字列組み立てのみで合成する（暗号検証は一切行わない、合成シグナラであることを明示）。`HttpDeliverySink::dispatch` は `sender: &Handle` からの `Id` 解決を `LocalActorLookup` 経由でターゲットごとに毎回行う（design.md の `DeliverySink::dispatch` シグネチャが `sender` を `&Handle` のまま受け取り事前解決済み `Id` を渡さないため）— 同一 `deliver()` 呼び出し内で同一 `Handle` が異なる `Id` に解決されることはない（副作用のない読み取りのみ）ため正しさに影響はないが、リモート宛先が多いリクエストでは冗長な解決が繰り返される点は将来の最適化余地として記録する。本タスクの「観測可能な完了条件」が要求する統合テスト（同一 `deliver()` 呼び出しで local/remote 両経路が同一の正規 Activity を扱うことの証明）は、レビュー1回目で欠落が指摈され、`sink/tests.rs` に実物の `InboxService`/`LocalDeliverySink` と実物の `DeliveryQueue` 実装（`MockDeliveryQueue`）/`HttpDeliverySink` を1つの実 `DeliveryService` に組み上げ、混在 recipient（local + remote）で `deliver()` を一度だけ呼ぶテストとして追加された（`delivery_service_with_real_sinks_converges_local_and_remote_on_the_same_canonical_activity`）。4.3（`DeliveryWorker`）は本タスクではまだ未実装・未配線（`worker.rs` は存在しない）。
+- 4.3: `DeliveryWorker`（`outbound/worker.rs`）を実装するにあたり、`DeliveryJob.sender_actor_id`（`Id`）から `SignatureNegotiator::negotiate_and_send`/`RequestSigner::sign_request` が要求する `actor: &Handle` を得る経路が spec 全体に存在しないことが判明した（design.md の Allowed Dependencies が列挙する `ActorDirectory` のメソッドは `resolve_actor_by_handle`（Handle→ResolvedActor）と `actor_public_key`（Id→ActorPublicKey）のみで、逆方向の Id→Handle 解決が無い。ストレージ層には `actor/repository.rs::find_by_id` が既に存在するが `ActorDirectory` の公開 API からは到達不能）。`ActorDirectory::resolve_actor_by_id(&self, id: Id) -> Result<Option<ResolvedActor>, AppError>` を `resolve_actor_by_handle` と同一契約（owner 非露出の `ResolvedActor`、未知 id は `Ok(None)`、エラーにしない）で新設し、既存の `repository::find_by_id` に委譲する形で実装した（`actor_public_key`/`resolve_actor_by_handle` 自体のシグネチャ・挙動は無変更、純追加でリグレッションなし。api-foundation タスク4.1 の `sole_owner` 追加や 3.4 の `LocalActorLookup` 新設と同種の「既存の再利用可能ポートへの狭い追加」判断、レビューで承認済み）。`DeliveryWorker` は自身のテストが `DeliveryQueue`/`SignatureNegotiator` 検証に実 Postgres を要するため、3.4 の `LocalActorLookup` のような DB 回避用の狭いローカルトレイトは新設せず `ActorDirectory` を直接保持する。解決不能な送信元アクター（アクター削除。現行 actor-model には削除経路が無く構造的に到達不能なはずだが防御的に処理）は `mark_failed` へ即座に遷移させ、再試行上限のカウントを消費させない（バックオフや署名形式再交渉では解決できない失敗のため）。`attempts` は `claim_due` が返す時点では「今回の試行前」のカウントで、`reschedule`/`backoff_delay` へ渡すのは「今回の試行を経てインクリメント後」のカウントである（3.3 の既存契約どおり）— `new_attempts = job.attempts + 1` を計算し `DEFAULT_MAX_DELIVERY_ATTEMPTS` 以上になった場合のみ `mark_failed`、それ未満は `reschedule` とする境界値の扱いをレビューで数値検証済み。`negotiate_and_send` が返す非 2xx 応答（401 を含む、ネゴシエータ内部で二重ノック済みでも尚失敗したもの）と transport 層 `Err` はいずれも一律「一時失敗（再試行対象）」として扱い、ステータスコード別の恒久拒否クラスは設けていない（Requirements 11.3/11.5 がその区別を要求していないことと整合）。`host_from_url`（inbox URL からホスト名を抽出する内部ヘルパ）は `signatures/signer.rs` に既存の非公開実装がありモジュール外から再利用できないため、`worker.rs` 内に独立した3つ目の複製を持つ（共有ヘルパへの抽出は将来課題として記録するに留めた）。
+- 3.3: `DeliveryQueue`（`outbound/queue.rs`）は design.md の `claim_due`/`reschedule` シグネチャがタイムスタンプを呼び出し側から明示的に受け取る形（このキュー自体は `Clock` を持たない）ため、再試行間隔の指数バックオフ計算は純粋関数 `backoff_delay(attempts) -> Duration`（`DEFAULT_DELIVERY_BASE_DELAY=30s` を `2^attempts` で倍加、`DEFAULT_DELIVERY_MAX_DELAY=6h` で飽和、`attempts=i32::MAX` でもオーバーフローしない）として提供し、実際に `reschedule` を呼ぶ側（4.3 `DeliveryWorker`）が利用する想定。同様に上限到達判定も本タスクの責務外とし、`DEFAULT_MAX_DELIVERY_ATTEMPTS=10` を 4.3 が参照する既定値として文書化するに留め、`mark_failed` は常に呼び出し側が明示的に呼ぶ（キュー自身は attempts を見て自動遷移しない）。`claim_due` は `UPDATE ... WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING ...` の単一アトミック文で「取得」と「in_progress への遷移」を同時に行う（設計の「排他更新」要件、design.md 885行目）。`mark_done`/`mark_failed` の design.md シグネチャにはタイムスタンプ引数が無いため、この2メソッドの `updated_at` 列のみ Postgres の `now()` を使う例外とした（`next_attempt_at` のようにアプリのロジックが読み戻して判定に使う値ではないため、決定性違反の実害は無いと判断）。`enqueue` が `delivery_jobs_dedup_idx`（同一 target_inbox + activity id）の一意制約に衝突した場合は `AppError::client(StatusCode::CONFLICT, ...)` を返す（実際に二重投入を防ぐのは 3.4 `RecipientTargetResolver` の責務で、本タスクでは衝突時にパニックしないことのみ保証）。

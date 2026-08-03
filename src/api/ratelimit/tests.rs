@@ -95,7 +95,10 @@ async fn normal_response_carries_ratelimit_headers_with_exact_clock_derived_rese
     let calls = Arc::new(AtomicUsize::new(0));
     let router = test_router(rate_limit_layer(clock, policy), calls.clone());
 
-    let response = router.oneshot(probe_request()).await.expect("no infallible error");
+    let response = router
+        .oneshot(probe_request())
+        .await
+        .expect("no infallible error");
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(header_str(&response, "x-ratelimit-limit"), "5");
@@ -106,7 +109,11 @@ async fn normal_response_carries_ratelimit_headers_with_exact_clock_derived_rese
         "X-RateLimit-Reset must equal FixedClock's now() + window, exactly \
          (Requirement 8.2: computed from the Clock boundary, not wall-clock)"
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "inner handler must run for an admitted request");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "inner handler must run for an admitted request"
+    );
 }
 
 #[tokio::test]
@@ -126,7 +133,10 @@ async fn remaining_decrements_across_repeated_requests_in_the_same_window() {
             .await
             .expect("no infallible error");
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(header_str(&response, "x-ratelimit-remaining"), expected_remaining);
+        assert_eq!(
+            header_str(&response, "x-ratelimit-remaining"),
+            expected_remaining
+        );
     }
 }
 
@@ -201,7 +211,10 @@ struct SteppingClock {
 
 impl SteppingClock {
     fn new(times: Vec<time::OffsetDateTime>) -> Self {
-        assert!(!times.is_empty(), "SteppingClock needs at least one scripted time");
+        assert!(
+            !times.is_empty(),
+            "SteppingClock needs at least one scripted time"
+        );
         SteppingClock {
             times,
             index: std::sync::atomic::AtomicUsize::new(0),
@@ -286,7 +299,10 @@ async fn generous_single_owner_style_limit_still_emits_full_header_shape() {
     let calls = Arc::new(AtomicUsize::new(0));
     let router = test_router(rate_limit_layer(clock, policy), calls);
 
-    let response = router.oneshot(probe_request()).await.expect("no infallible error");
+    let response = router
+        .oneshot(probe_request())
+        .await
+        .expect("no infallible error");
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(header_str(&response, "x-ratelimit-limit"), "10000");

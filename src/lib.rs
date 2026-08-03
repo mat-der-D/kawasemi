@@ -17,6 +17,7 @@
 //! now calls `kawasemi::bootstrap::bootstrap()` instead of declaring its own
 //! `mod bootstrap;`.
 
+pub mod accounts;
 pub mod actor;
 pub mod api;
 pub mod bootstrap;
@@ -25,10 +26,17 @@ pub mod contract;
 pub mod db;
 pub mod domain;
 pub mod error;
+pub mod federation;
+pub mod media;
 pub mod migrate;
+pub mod notifications;
 pub mod oauth;
 pub mod runtime;
+pub mod search;
 pub mod server;
+pub mod social_graph;
 pub mod state;
+pub mod statuses;
 pub mod telemetry;
 pub mod test_harness;
+pub mod timelines;

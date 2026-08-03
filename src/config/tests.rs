@@ -618,3 +618,323 @@ fn token_hash_key_debug_output_does_not_leak_the_key_material() {
     assert!(!formatted.contains(VALID_TOKEN_HASH_KEY_HEX));
     assert!(!formatted.contains("11aa22bb"));
 }
+
+// --- media-pipeline task 1.2: `media.*` startup config ---
+//
+// Unlike `actor.kek`/`owner.password`/`oauth.token_hash_key`, no `media.*`
+// field is required (see `MediaConfig`'s own doc comment in `config.rs` for
+// why every field has a safe default) — so, following `FederationConfig`'s
+// own precedent, there is no "missing required media field" test here: it
+// would have nothing to assert beyond a fabricated requirement this spec
+// does not have.
+
+#[test]
+fn media_config_defaults_when_not_supplied() {
+    // Requirements 1.4, 4.2, 5.2, 6.1: every `media.*` field is defaultable,
+    // and a minimal config (only the genuinely required fields from other
+    // specs) must still boot with sensible media defaults.
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+    ]);
+    let config = load_config_from(None, &overrides).expect("media defaults alone must load");
+
+    assert_eq!(config.media.storage_root, PathBuf::from("media_storage"));
+    assert_eq!(config.media.max_upload_size_bytes, 10 * 1024 * 1024);
+    assert_eq!(config.media.thumbnail_target_width, 400);
+    assert_eq!(config.media.thumbnail_target_height, 400);
+    assert_eq!(
+        config.media.supported_formats,
+        vec![
+            "image/jpeg".to_string(),
+            "image/png".to_string(),
+            "image/gif".to_string(),
+            "image/webp".to_string(),
+        ]
+    );
+    assert_eq!(config.media.worker_concurrency, 2);
+    assert_eq!(config.media.max_retry_attempts, 5);
+    assert_eq!(config.media.lease_duration, Duration::from_secs(5 * 60));
+}
+
+#[test]
+fn media_config_loads_explicit_values_from_toml() {
+    // Requirements 1.4, 4.2, 5.2, 6.1: every field can be explicitly
+    // supplied and overrides its default.
+    let toml = format!(
+        r#"
+[server]
+domain = "example.com"
+
+[database]
+url = "postgres://user:pass@localhost/db"
+
+[actor]
+kek = "{VALID_KEK_HEX}"
+
+[owner]
+password = "{VALID_OWNER_PASSWORD}"
+
+[oauth]
+token_hash_key = "{VALID_TOKEN_HASH_KEY_HEX}"
+
+[media]
+storage_root = "/srv/kawasemi/media"
+max_upload_size_bytes = 5242880
+thumbnail_target_width = 320
+thumbnail_target_height = 240
+supported_formats = "image/png, image/webp"
+worker_concurrency = 4
+max_retry_attempts = 8
+lease_duration_secs = 600
+"#
+    );
+    let config = load_config_from(Some(&toml), &HashMap::new())
+        .expect("fully specified media TOML must load");
+
+    assert_eq!(
+        config.media.storage_root,
+        PathBuf::from("/srv/kawasemi/media")
+    );
+    assert_eq!(config.media.max_upload_size_bytes, 5_242_880);
+    assert_eq!(config.media.thumbnail_target_width, 320);
+    assert_eq!(config.media.thumbnail_target_height, 240);
+    assert_eq!(
+        config.media.supported_formats,
+        vec!["image/png".to_string(), "image/webp".to_string()]
+    );
+    assert_eq!(config.media.worker_concurrency, 4);
+    assert_eq!(config.media.max_retry_attempts, 8);
+    assert_eq!(config.media.lease_duration, Duration::from_secs(600));
+}
+
+#[test]
+fn media_env_var_overrides_toml_for_same_field() {
+    // Requirement 2.2's env-over-TOML precedence, extended to `media.*`.
+    let toml = format!(
+        r#"
+[server]
+domain = "example.com"
+
+[database]
+url = "postgres://user:pass@localhost/db"
+
+[actor]
+kek = "{VALID_KEK_HEX}"
+
+[owner]
+password = "{VALID_OWNER_PASSWORD}"
+
+[oauth]
+token_hash_key = "{VALID_TOKEN_HASH_KEY_HEX}"
+
+[media]
+storage_root = "/from/toml"
+"#
+    );
+    let overrides = env(&[("KAWASEMI_MEDIA_STORAGE_ROOT", "/from/env")]);
+    let config = load_config_from(Some(&toml), &overrides)
+        .expect("media config with one env override must load");
+
+    assert_eq!(config.media.storage_root, PathBuf::from("/from/env"));
+}
+
+#[test]
+fn malformed_media_storage_root_empty_is_reported_as_malformed() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+        ("KAWASEMI_MEDIA_STORAGE_ROOT", "   "),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("blank storage root must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["media.storage_root"]);
+    assert!(err.missing_fields().next().is_none());
+}
+
+#[test]
+fn malformed_media_max_upload_size_bytes_zero_is_reported_as_malformed() {
+    // Requirement 1.4: a zero-byte ceiling would reject every upload, which
+    // is never the intent of a size limit.
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+        ("KAWASEMI_MEDIA_MAX_UPLOAD_SIZE_BYTES", "0"),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("zero upload size must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["media.max_upload_size_bytes"]);
+}
+
+#[test]
+fn malformed_media_max_upload_size_bytes_non_numeric_is_reported_as_malformed() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+        ("KAWASEMI_MEDIA_MAX_UPLOAD_SIZE_BYTES", "huge"),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("non-numeric upload size must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["media.max_upload_size_bytes"]);
+}
+
+#[test]
+fn malformed_media_thumbnail_dimensions_zero_are_reported_as_malformed() {
+    // Requirement 6.1: a zero-pixel thumbnail target is degenerate.
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+        ("KAWASEMI_MEDIA_THUMBNAIL_TARGET_WIDTH", "0"),
+        ("KAWASEMI_MEDIA_THUMBNAIL_TARGET_HEIGHT", "0"),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("zero thumbnail dimensions must fail");
+
+    let mut malformed: Vec<&str> = err.malformed_fields().collect();
+    malformed.sort_unstable();
+    assert_eq!(
+        malformed,
+        vec![
+            "media.thumbnail_target_height",
+            "media.thumbnail_target_width",
+        ]
+    );
+}
+
+#[test]
+fn malformed_media_supported_formats_empty_is_reported_as_malformed() {
+    // Requirement 1.4: an empty accepted-format list would reject every
+    // upload, which is never the intent of the "unsupported format" check.
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+        ("KAWASEMI_MEDIA_SUPPORTED_FORMATS", "  , , "),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("empty format list must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["media.supported_formats"]);
+}
+
+#[test]
+fn media_supported_formats_are_split_and_trimmed_from_comma_separated_list() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+        (
+            "KAWASEMI_MEDIA_SUPPORTED_FORMATS",
+            " image/jpeg ,image/png,  image/gif  ",
+        ),
+    ]);
+    let config = load_config_from(None, &overrides).expect("valid format list must load");
+
+    assert_eq!(
+        config.media.supported_formats,
+        vec![
+            "image/jpeg".to_string(),
+            "image/png".to_string(),
+            "image/gif".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn malformed_media_worker_concurrency_zero_is_reported_as_malformed() {
+    // Requirement 4.2: a zero-worker pool would mean the processing job
+    // queue is never consumed, which is never a valid startup intent.
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+        ("KAWASEMI_MEDIA_WORKER_CONCURRENCY", "0"),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("zero worker concurrency must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["media.worker_concurrency"]);
+}
+
+#[test]
+fn malformed_media_max_retry_attempts_non_numeric_is_reported_as_malformed() {
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+        ("KAWASEMI_MEDIA_MAX_RETRY_ATTEMPTS", "many"),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("non-numeric retry attempts must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["media.max_retry_attempts"]);
+}
+
+#[test]
+fn malformed_media_lease_duration_non_numeric_is_reported_as_malformed() {
+    // Requirement 4.2: `lease_duration` (task text: "処理ジョブのリース期間")
+    // must reject a non-numeric value the same way other `_secs` duration
+    // fields do (mirrors `malformed_numeric_fields_are_reported_as_malformed`
+    // above for `server.shutdown_grace_secs`).
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+        ("KAWASEMI_MEDIA_LEASE_DURATION_SECS", "forever"),
+    ]);
+    let err = load_config_from(None, &overrides).expect_err("non-numeric lease duration must fail");
+
+    let malformed: Vec<&str> = err.malformed_fields().collect();
+    assert_eq!(malformed, vec!["media.lease_duration_secs"]);
+}
+
+#[test]
+fn media_lease_duration_default_is_well_above_a_typical_processing_duration() {
+    // Task 1.2's own text: the lease duration default must be "well above
+    // the expected processing time" so a healthy worker never has its job
+    // reclaimed out from under it. This is a coarse sanity bound (not a
+    // measured processing benchmark), matching the spirit of the task's own
+    // "例: 5 分" (e.g. 5 minutes) example while staying resilient to a future
+    // default tuning within the same order of magnitude.
+    let overrides = env(&[
+        ("KAWASEMI_SERVER_DOMAIN", "example.com"),
+        ("KAWASEMI_DATABASE_URL", "postgres://user:pass@localhost/db"),
+        ("KAWASEMI_ACTOR_KEK", VALID_KEK_HEX),
+        ("KAWASEMI_OWNER_PASSWORD", VALID_OWNER_PASSWORD),
+        ("KAWASEMI_OAUTH_TOKEN_HASH_KEY", VALID_TOKEN_HASH_KEY_HEX),
+    ]);
+    let config = load_config_from(None, &overrides).expect("media defaults alone must load");
+
+    assert!(
+        config.media.lease_duration >= Duration::from_secs(60),
+        "lease_duration default ({:?}) is not well above a typical few-second image processing job",
+        config.media.lease_duration
+    );
+}

@@ -65,7 +65,7 @@
 - マイグレーション番号規約・本 spec 所有テーブルのスキーマ変更。
 - 上流契約の変更（api-foundation の Bearer/Scope/MastodonError/Pagination/Harness、accounts-and-instance の Account シリアライズ/`RemoteAccountFetcher`/`AccountRef`、statuses-core の Status シリアライズ/`VisibilityPolicy`/可視投稿解決、federation-core の `FederationHttpClient`/JSON-LD/`ActorUrls`、actor-model の `ActorDirectory`、core-runtime の `AppState`/`RuntimeContext`）。
 - statuses-core が第一級の tags 問い合わせ境界を公開した場合（本 spec の読み取りインデックスを置換）/ federation-core がアウトバウンド WebFinger リゾルバを公開した場合（本 spec の薄い照会を置換）。
-- `PgSearchBackend` が生 SQL で直接参照する upstream カラム（`account_profiles.display_name`、`remote_accounts.username`/`domain`/`display_name`、`statuses.content`/`created_at`/`id`。Logical Data Model の「`PgSearchBackend` が依存する upstream カラム」参照）のカラム名・型を accounts-and-instance / statuses-core が変更した場合、本 spec の SQL の再検証が必要。
+- `PgSearchBackend` が生 SQL で直接参照する upstream カラム（`account_profiles.display_name`、`local_actors.handle`、`remote_accounts.username`/`domain`/`display_name`、`statuses.content`/`created_at`/`id`。Logical Data Model の「`PgSearchBackend` が依存する upstream カラム」参照）のカラム名・型を actor-model / accounts-and-instance / statuses-core が変更した場合、本 spec の SQL の再検証が必要。
 
 ## Architecture
 
@@ -154,8 +154,8 @@ migrations/
 └── 0010_search.sql              # search_tags / search_status_tags（0001-0009 と非衝突。0003=api-foundation(oauth) / 0008=federation-core の確定連番。研究ログ「Migration Numbering Coordination」参照）
 
 src/
+├── search.rs                     # SearchModule 組み立て（サービス/バックエンド/リゾルバ/シリアライザ/インデクサのハンドル束ね）と公開・ルータ装着点
 └── search/
-    ├── mod.rs                    # SearchModule 組み立て（サービス/バックエンド/リゾルバ/シリアライザ/インデクサのハンドル束ね）と公開・ルータ装着点
     ├── model.rs                  # SearchParams, SearchType, ParsedQuery(Plain/Acct/Url), SearchMatches(AccountRef[]/StatusId[]/TagMatch[]), TagView ドメイン型
     ├── query_parser.rs          # QueryParser（q を Plain / Acct(user,domain) / Url に判別・正規化、空クエリ検出）
     ├── ports.rs                  # SearchBackend trait（search_accounts / search_statuses / search_hashtags、識別子のみ返す）+ 既定/モックの差し替え規約
@@ -517,7 +517,7 @@ pub fn build_search_results(&self, accounts: Vec<serde_json::Value>, statuses: V
 - `search_tags`: ハッシュタグ読み取りインデックス（正規化名 UNIQUE・使用集計）。本 spec 所有。upstream 投稿タグから導出。
 - `search_status_tags`: タグ↔投稿の関連（status_id は statuses-core `statuses.id` を論理参照、read-only 導出）。
 - `search_index_watermark`: `HashtagIndexer` のオンデマンドキャッチアップスキャン用カーソル（単一行、最終処理済み `statuses.created_at`/`id` を保持）。本 spec 所有。
-- アカウント/投稿の照合は upstream の `account_profiles`/`remote_accounts`/`statuses` を read-only 参照（本 spec はテーブルを所有しない）。
+- アカウント/投稿の照合は upstream の `account_profiles`/`local_actors`/`remote_accounts`/`statuses` を read-only 参照（本 spec はテーブルを所有しない）。
 - 可視性・関係状態・Account/Status JSON は上流所有（委譲/消費）。
 
 #### `PgSearchBackend` が依存する upstream カラム（生 SQL 直接参照）
@@ -527,6 +527,7 @@ pub fn build_search_results(&self, accounts: Vec<serde_json::Value>, statuses: V
 | Upstream Table | Column | Owner Spec | 用途 |
 |-----------------|--------|------------|------|
 | `account_profiles` | `display_name` | accounts-and-instance | ローカルアカウント名の部分一致照合 |
+| `local_actors` | `handle` | actor-model | ローカルアカウントのハンドル（`acct`）部分一致照合（`account_profiles.actor_id` からの `LEFT JOIN`） |
 | `remote_accounts` | `username` | accounts-and-instance | 既知リモートアカウントのハンドル部分一致照合 |
 | `remote_accounts` | `domain` | accounts-and-instance | 既知リモートアカウントの `acct`（`username@domain`）部分一致照合 |
 | `remote_accounts` | `display_name` | accounts-and-instance | 既知リモートアカウント名の部分一致照合 |

@@ -1,26 +1,26 @@
 # Implementation Plan
 
 - [ ] 1. 基盤: スキーマ・ドメイン型・解析・照合ポート
-- [ ] 1.1 検索用テーブルのマイグレーションを追加する
+- [x] 1.1 検索用テーブルのマイグレーションを追加する
   - `migrations/0010_search.sql` を作成し `search_tags`（`name` UNIQUE・使用集計）と `search_status_tags`（tag_id↔status_id）を定義し、前方一致索引（`text_pattern_ops`）と status_id 索引を設定する
   - 同マイグレーションに `search_index_watermark`（`id BOOLEAN PRIMARY KEY DEFAULT TRUE` + 単一行強制の CHECK 制約、`status_created_at`、`status_id`、`updated_at`）のシングルトンテーブルを追加し、ハッシュタグインデクサの導出カーソルを永続化できるようにする
   - 既定構成に `CREATE EXTENSION`（`pg_bigm` 等）を含めず、標準 PostgreSQL のみで成立させる。日本語拡張インデックスを後から独立マイグレーション（`CREATE EXTENSION` + GIN）で追加しても本テーブル・既定契約を破壊しない構造（スキーマコメントで後付け経路を明記）にする
   - 観測可能な完了条件: テストハーネス起動時に当該マイグレーションが適用済みとなり、3 テーブル（`search_tags`/`search_status_tags`/`search_index_watermark`）と各索引・制約（`search_index_watermark` の単一行 CHECK を含む）が存在し、拡張未導入でも起動する統合確認が通る
   - _Requirements: 8.1, 8.2, 8.3_
   - _Boundary: Migration_
-- [ ] 1.2 (P) 検索ドメイン型を定義する
+- [x] 1.2 (P) 検索ドメイン型を定義する
   - `src/search/model.rs` に `SearchType` / `SearchParams` / `ParsedQuery` / `SearchMatches`（識別子のみ）/ `TagMatch` / `TagView` / `TagHistoryEntry` を定義し、`AccountRef`（accounts-and-instance）と core-runtime Id/時刻型を消費する
   - 観測可能な完了条件: 各型がコンパイルされ、`SearchMatches` がエンティティ JSON を持たず識別子のみで構成される単体テストが通る
   - _Requirements: 1.3, 2.1, 2.2, 7.2_
   - _Boundary: model_
   - _Depends: 1.1_
-- [ ] 1.3 (P) クエリパーサを実装する
+- [x] 1.3 (P) クエリパーサを実装する
   - `src/search/query_parser.rs` に `parse_query` を実装し、`acct:user@domain` / `@user@domain` / URL（スキーム付き）/ プレーン語を `ParsedQuery` に判別・正規化し、空/空白のみは 422 相当の `AppError` を返す
   - 観測可能な完了条件: 4 種別の判別と空クエリ拒否を網羅する単体テストが通る
   - _Requirements: 2.3, 6.1, 6.2_
   - _Boundary: QueryParser_
   - _Depends: 1.2_
-- [ ] 1.4 (P) 検索バックエンド抽象ポートを定義する
+- [x] 1.4 (P) 検索バックエンド抽象ポートを定義する
   - `src/search/ports.rs` に `SearchBackend` trait（`search_accounts` / `search_statuses` / `search_hashtags`、いずれも識別子のみ返す）と `AccountQuery` / `StatusQuery` / `HashtagQuery`、テスト用 `StubSearchBackend` の差し替え規約を定義する
   - 観測可能な完了条件: スタブ実装が trait を満たし、識別子のみを返す差し替えが可能で、呼び出し側がエンジン非依存に書ける単体テストが通る
   - _Requirements: 7.1, 7.2, 7.5_
@@ -28,14 +28,14 @@
   - _Depends: 1.2_
 
 - [ ] 2. データ層: ハッシュタグ読み取りインデックス
-- [ ] 2.1 ハッシュタグインデックスリポジトリを実装する
+- [x] 2.1 ハッシュタグインデックスリポジトリを実装する
   - `src/search/hashtag_repository.rs` に `match_hashtags`（名前の前方/部分一致で `TagView` を返す）と `upsert_tag_usage`（`search_tags`/`search_status_tags` の upsert）を実装し、本 spec 所有テーブルのみを参照する
   - 同ファイルに `load_watermark`（`search_index_watermark` から最終処理済み `statuses.created_at`/`id` を読む。未保持は `None`）と `save_watermark`（同テーブルへ upsert）を実装する
   - 観測可能な完了条件: 名前一致で `TagView` が返り、`limit`/`offset` が反映され、(tag_id, status_id) 重複が一意化され、`save_watermark` 後に `load_watermark` が同じ値を返す統合テストが通る
   - _Requirements: 5.1, 5.2, 5.5, 8.2_
   - _Boundary: HashtagIndexRepository_
   - _Depends: 1.1, 1.2_
-- [ ] 2.2 ハッシュタグインデクサ（watermark カーソル方式の導出・キャッチアップ）を実装する
+- [x] 2.2 ハッシュタグインデクサ（watermark カーソル方式の導出・キャッチアップ）を実装する
   - `src/search/hashtag_indexer.rs` に `catch_up_from_watermark` を実装し、`load_watermark` で得た watermark（未保持時は全件走査＝バックフィル相当）より新しい `statuses` 行を statuses-core の投稿保持データから read-only で走査し、抽出済みハッシュタグを `search_tags`/`search_status_tags` へ upsert したのち `save_watermark` で watermark を進める。時刻/ID は `RuntimeContext` を用いる
   - 観測可能な完了条件: 既存投稿のハッシュタグがインデックスへ導出され、再実行で重複生成されず watermark 以降の新規投稿のみが処理され、upstream テーブルを変更しない統合テストが通る
   - _Requirements: 5.3_
@@ -43,13 +43,13 @@
   - _Depends: 2.1_
 
 - [ ] 3. 照合: 標準 PostgreSQL 最小バックエンド
-- [ ] 3.1 PgSearchBackend のアカウント・投稿照合を実装する
+- [x] 3.1 PgSearchBackend のアカウント・投稿照合を実装する
   - `src/search/pg_backend.rs` に `search_accounts`（ローカル/既知リモートの display_name/username/acct 部分一致で `AccountRef` 群）と `search_statuses`（閲覧者可視候補の投稿 `Id` 群、`account_id` 絞り、本文部分一致）を標準 SQL（`ILIKE`）で実装し、`limit`/`offset` を反映する
   - 観測可能な完了条件: アカウント/投稿照合が識別子のみを返し、`account_id` 絞り・`limit`/`offset` が効き、必須拡張なしで動作する統合テストが通る
   - _Requirements: 3.1, 3.4, 4.1, 4.3, 4.4, 4.5, 4.6, 7.2_
   - _Boundary: PgSearchBackend_
   - _Depends: 1.4_
-- [ ] 3.2 PgSearchBackend のハッシュタグ照合を結線する
+- [x] 3.2 PgSearchBackend のハッシュタグ照合を結線する
   - `pg_backend.rs` の `search_hashtags` で、まず `HashtagIndexer::catch_up_from_watermark` をオンデマンド実行して検索直前までのタグ状態に追いつかせ、続けて `HashtagIndexRepository::match_hashtags` へ結線して `TagMatch` 群を `limit`/`offset` 付きで返す
   - 観測可能な完了条件: ハッシュタグ照合の直前に watermark 以降の新規投稿が取り込まれたうえで、読み取りインデックス経由の `TagMatch` が返る統合テストが通る
   - _Requirements: 5.1, 5.3, 5.5_
@@ -57,19 +57,19 @@
   - _Depends: 2.1, 2.2, 3.1_
 
 - [ ] 4. 具体化・解決・シリアライズ
-- [ ] 4.1 (P) Tag / SearchResults シリアライザを実装する
+- [x] 4.1 (P) Tag / SearchResults シリアライザを実装する
   - `src/search/tag_serializer.rs` と `src/search/result_serializer.rs` を実装し、Tag（`name`/`url`/`history`）と SearchResults（`accounts`/`statuses`/`hashtags`、空種別は `[]` 非 null、上流 Account/Status 出力は再シリアライズせず格納）を生成し、api-foundation 契約ハーネスへゴールデン登録する
   - 観測可能な完了条件: 空種別が `[]` になり、Account/Status が上流出力のまま格納され、ゴールデンが決定的に再現される契約テストが通る
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
   - _Boundary: TagSerializer, SearchResultSerializer_
   - _Depends: 1.2_
-- [ ] 4.2 検索ハイドレータを実装する
+- [x] 4.2 検索ハイドレータを実装する
   - `src/search/hydrator.rs` に `hydrate_accounts`（accounts-and-instance の Account シリアライズ・複数 ID 一括・一意化・`following` 最終フィルタ）/ `hydrate_statuses`（statuses-core 可視投稿解決 + `VisibilityPolicy` で不可視除外 + Status シリアライズ）/ `hydrate_hashtags`（`TagView`→`TagSerializer`）を実装する
   - 観測可能な完了条件: 重複アカウントが一意化され、閲覧者不可視の投稿が必ず除外され、ハッシュタグが Tag JSON 化される統合テストが通る
   - _Requirements: 1.2, 3.2, 3.3, 3.5, 4.2, 5.2_
   - _Boundary: SearchHydrator_
   - _Depends: 4.1, 3.1_
-- [ ] 4.3 リモートリゾルバを実装する
+- [x] 4.3 リモートリゾルバを実装する
   - `src/search/remote_resolver.rs` に `resolve_remote` を実装し、`Acct` はアウトバウンド WebFinger（`FederationHttpClient.fetch` で JRD 取得→`self` の actor_uri 抽出）→ accounts-and-instance `RemoteAccountFetcher.fetch_and_normalize` で Account 化、`Url` は連合取得 + JSON-LD 安全展開で Account/Status 化（Note は statuses-core 取り込み経路）し、取得/正規化失敗は `Resolved::None` に正規化する
   - 観測可能な完了条件: `FederationHttpClient` モックで `acct:`→Account・URL→Status の解決が成立し、取得失敗が `None` になり検索全体を失敗させない統合テストが通る
   - _Requirements: 6.1, 6.2, 6.4_
@@ -77,20 +77,20 @@
   - _Depends: 1.3_
 
 - [ ] 5. サービス・エンドポイント・配線
-- [ ] 5.1 検索サービスを実装する
+- [x] 5.1 検索サービスを実装する
   - `src/search/service.rs` に `search` を実装し、解析（空クエリ 422）→ `type` 絞り（他種別は空配列）→ `resolve=true` かつ認証時のみ `RemoteResolver` 呼び出し（`resolve=false`/未認証はローカル既知のみ）→ `SearchBackend` 照合（`limit`/`offset`/`account_id`/`following`/`exclude_unreviewed` 受理）→ `SearchHydrator` 具体化 → `SearchResultSerializer` 組み立て、を結線する
   - 検索処理（解析・照合・リモート解決・具体化・組み立て）の失敗・部分失敗を、クエリ種別・対象種別・失敗箇所を含む構造化診断（秘匿値を除く）として core-runtime 観測性に出力する
   - 観測可能な完了条件: type 絞り・空クエリ拒否・resolve 分岐・限定種別の空配列が一連で機能し、呼び出し側がエンジン非依存（`SearchBackend` 経由）で、失敗時に種別・箇所を含む診断が出力される統合テストが通る
   - _Requirements: 2.1, 2.2, 2.3, 2.5, 5.4, 6.3, 6.5, 7.1, 9.5_
   - _Boundary: SearchService_
   - _Depends: 3.2, 4.2, 4.3_
-- [ ] 5.2 検索エンドポイントを実装する
+- [x] 5.2 検索エンドポイントを実装する
   - `src/search/endpoint.rs` に `GET /api/v2/search` ハンドラを実装し、Bearer + `read:search` を要求、`q`/`type`/`resolve`/`following`/`account_id`/`limit`/`offset`/`exclude_unreviewed` を抽出して `SearchParams` を構築（`limit`/`offset` は api-foundation 規約で丸め）、失敗は Mastodon 互換エラー本文で返す
   - 観測可能な完了条件: 認証時に SearchResults が返り、未認証 401・`read:search` 欠落 403・空クエリ 422 になり、`limit`/`offset` が規約どおり丸められる統合テストが通る
   - _Requirements: 2.3, 2.4, 9.1, 9.2, 9.3_
   - _Boundary: SearchEndpoint_
   - _Depends: 5.1_
-- [ ] 5.3 検索モジュールを bootstrap と AppState へ配線する
+- [x] 5.3 検索モジュールを bootstrap と AppState へ配線する
   - `src/search/mod.rs`（`SearchModule`）を実装し、`src/state.rs`/`src/bootstrap.rs`/`src/server.rs`（core-runtime）を更新して、既定 `PgSearchBackend` を `SearchBackend` として配線・`HashtagIndexer` を初期化・`/api/v2/search` ルータを横断レイヤー（認証・エラー・レート制限）適用点へ装着し、`SearchService` を `AppState` に格納する。差し替え点を 1 箇所に集約する
   - 観測可能な完了条件: 起動後に `/api/v2/search` が一連で機能し、既定バックエンドが必須拡張なしで配線され、`X-RateLimit-*` 付与・レート制限装着点に乗ることが確認できる
   - _Requirements: 7.3, 7.4, 8.1, 8.4, 9.4_
@@ -98,27 +98,40 @@
   - _Depends: 5.2_
 
 - [ ] 6. 検証
-- [ ] 6.1 (P) SearchResults / Tag 契約のゴールデンテスト
+- [x] 6.1 (P) SearchResults / Tag 契約のゴールデンテスト
   - 決定的 `RuntimeContext` で SearchResults（空配列規律・`accounts`/`statuses` の上流埋め込み形）と Tag（`name`/`url`/`history`）のゴールデンを固定し、実クライアントキャプチャをフィクスチャ登録する
   - 観測可能な完了条件: ゴールデンが決定的に再現され、空種別が `[]`、Account/Status が上流出力のまま格納されることが契約テストで確認できる
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
   - _Boundary: search_contract_it_
   - _Depends: 5.3_
-- [ ] 6.2 (P) アカウント・投稿・ハッシュタグ検索の統合テスト
+- [x] 6.2 (P) アカウント・投稿・ハッシュタグ検索の統合テスト
   - アカウント検索（一致・following 絞り・一意化・limit/offset）、投稿検索（可視性に閉じる・不可視除外・account_id 絞り・limit/offset）、ハッシュタグ検索（名前一致・インデックス導出反映・exclude_unreviewed 受理）を検証する
   - 観測可能な完了条件: 不可視投稿が漏れず、各種別の絞り込み・ページングが効き、ハッシュタグがインデックス導出を反映する統合テストが通る
   - _Requirements: 3.1, 3.3, 3.4, 3.5, 4.1, 4.2, 4.3, 4.6, 5.1, 5.3, 5.4, 5.5_
   - _Boundary: search_accounts_it, search_statuses_it, search_hashtags_it_
   - _Depends: 5.3_
-- [ ] 6.3 (P) リモート解決・type/スコープの統合テスト
+- [x] 6.3 (P) リモート解決・type/スコープの統合テスト
   - `resolve=true` 認証時の `acct:`→Account（WebFinger モック）・URL→Status・取得失敗の除外・未認証/`resolve=false` のローカル限定、`type` 絞りの他種別空配列、空クエリ 422、`read:search` 認証/スコープ（401/403）を検証する
   - 観測可能な完了条件: リモート解決が認証・resolve 条件どおり振る舞い失敗を除外し、type 絞り・空クエリ拒否・スコープ制御が成立する統合テストが通る
   - _Requirements: 2.2, 2.4, 6.1, 6.2, 6.3, 6.4, 6.5, 9.1, 9.2_
   - _Boundary: search_resolve_it, search_type_scope_it_
   - _Depends: 5.3_
-- [ ] 6.4 (P) 検索バックエンド差し替えの統合テスト
+- [x] 6.4 (P) 検索バックエンド差し替えの統合テスト
   - `SearchBackend` を `StubSearchBackend` に差し替え、`SearchService`・結果組み立て・エンドポイントを変更せずに動作することと、呼び出し側が特定エンジン実装に依存しないことを検証する
   - 観測可能な完了条件: 既定 `PgSearchBackend` をスタブへ差し替えても API 契約・結果組み立てが不変で、差し替え点が配線 1 箇所であることが確認できる
   - _Requirements: 7.1, 7.3, 7.4, 7.5, 8.4_
   - _Boundary: search_backend_swap_it_
   - _Depends: 5.3_
+
+## Implementation Notes
+
+- グループ1 (1.1-1.4) を通じて: `notifications`/`statuses`/`timelines` 等の既存テストで「無関係な事前失敗」の件数がラン毎に大きく変動する現象を確認（同一コード状態で 15/22/49/65 件など）。原因は `src/test_harness.rs` の共有テスト用 Postgres プールが `max_connections: 1` に設定されていることによる並列実行時のコネクション競合と推定される（`search` 配下のテストは DB を使わないため影響を受けない）。今後のタスクレビューで「事前失敗件数」を回帰の判定基準として使う場合は、この既知のフレーキー要因を差し引いて判断すること。search spec 自体の修正対象ではないため本タスクでは対応しない。
+- タスク 1.1: `tasks.md`/`design.md` が指定するマイグレーション番号 `0010` は実際には未使用の予約済み欠番だった（`migrations/` は 0001-0007/0009/0011/0012 まで既に埋まっており、0008/0010 は他 spec の design.md が並列生成時に重複して主張した未使用番号であることが `social-graph/tasks.md` の Implementation Notes で先に判明済み）。次の空き番号 `migrations/0013_search.sql` を採用した。番号以外は design.md の Physical Data Model ブロックと完全一致（`search_tags`/`search_status_tags`/`search_index_watermark`、`text_pattern_ops` 前方一致索引、シングルトン CHECK 制約、`CREATE EXTENSION` なし）。今後 search 内で新規マイグレーションが必要になった場合は 0014 以降を使うこと。
+- タスク 3.1: `PgSearchBackend::search_accounts` のローカルアカウント一致対象は design.md の「`PgSearchBackend` が依存する upstream カラム」表に厳密に従い `account_profiles.display_name` のみとした（`local_actors` のユーザー名/ハンドル列は表に存在せず、表は「上記以外のカラムは参照しない」と明言）。requirements.md 3.1 の「表示名・ユーザー名・ハンドル（acct）」という文言はより広い読み方も可能だが、本タスクでは design.md の upstream カラム表を権威あるソースとして扱った（レビューで許容済み、CONCERN として明記）。将来この境界を見直す場合は design.md の当該表と requirements.md 3.1 の整合を先に取ること。
+- タスク 3.1: `PgSearchBackend::search_statuses` は `viewer`/可視性を一切フィルタしない（`ports.rs` の `StatusQuery` doc comment と design.md の記述どおり、候補抽出のみを担い最終可視性はタスク 4.2 の `SearchHydrator` が再適用する設計）。タスク 4.2 実装時にこの前提（`PgSearchBackend` からは不可視投稿を含む候補が返り得る）を踏まえること。
+- タスク 3.1: 投稿検索のオーバーフェッチマージンは design.md が具体値を指定していないため実装定数 `STATUS_OVERFETCH_MARGIN = 20`（SQL `LIMIT` は `max(limit*2, limit+20)`、`OFFSET` は要求値のまま）をコード中に明文化して採用した。タスク 4.2 の `SearchHydrator` 側の切り詰めロジックはこの規約を前提にできる。
+- タスク 4.1: `tests/search_contract_it.rs`（design.md File Structure Plan・`Boundary: search_contract_it`）は本タスクでは作成しなかった。同ファイル/境界はタスク 6.1 所有（`_Depends: 5.3_`、`SearchService`/`SearchEndpoint`/`AppState` 配線完了後）であり、本タスクのゴールデンは notifications タスク 2.1 vs 5.1・accounts-and-instance タスク 3.5 vs 7.3・statuses-core タスク 8.2 と同じ「純粋関数の単体ゴールデンを先に登録し、フルパイプラインの契約テストは配線完了後の別タスクに委ねる」既存慣行に従い `src/search/tag_serializer/tests.rs` / `src/search/result_serializer/tests.rs` に `crate::contract::assert_golden` で登録した。
+- タスク 4.1: `TagSerializer::build_tag` の `url` はリクエストごとの `X-Forwarded-*` を考慮しない固定 `https://{domain}` オリジン（コンストラクタ供給）から構築した。design.md の `build_tag(&self, tag: &TagView)` シグネチャにはリクエスト/オリジン引数がなく、既存の `NotificationService::origin` と同一の前提（「この深さではライブなリクエストごとのオリジンを取得できない」）に倣った判断（レビューで許容済み）。
+- タスク 4.2: `hydrate_accounts` は crate 内に複数 ID 一括解決 API が存在しないため（`AccountService::show_account` は単一 ID のみ）、`AccountStatusesProviderImpl`/`NotificationService`/`StatusHydrator` と同じ単一 ID ループ規約を踏襲した。`hydrate_statuses` も同様に `StatusService` を経由せず `crate::statuses::visibility::is_visible` + `RelationshipQueryRegistry` を直接呼ぶ既存規約（`AccountStatusesProviderImpl`/`NotificationService`）に倣った（レビューで確認済み）。Status JSON 組み立てのグルーコード（`render_status`/`leaf_render_input` 等）はこれで crate 内 4 箇所目の重複となっており、将来の共通ヘルパー抽出候補として記録するが本タスクの境界外のため未対応。`hydrate_hashtags` は `SearchBackend::search_hashtags` が識別子のみの `TagMatch` を返す契約（7.2）に合わせ、`HashtagIndexRepository::match_hashtags` をタグ名ごとに再照会して `TagView` を復元する（`search_tags.name` の UNIQUE 制約 + 完全一致フィルタで安全性を担保）。
+- タスク 4.3（セキュリティ・レビュー指摘・修正済み）: 初回実装は `resolve_url` の Note 分岐で `StatusIngestService::ingest_url` ではなく `ingest_document` を直接呼んでおり、`ingest_url` が内部で行う「取得元 URL のホスト」と「ドキュメント自身の `id` のホスト」を突き合わせる origin/authority チェック（`check_fetched_host`、コミット `03dab77` で一度修正済みの脆弱性クラスと同種）を素通りしていた。攻撃者が `id`/`attributedTo` 相互に整合するが取得元ホストとは異なる別実在ユーザーを詐称した Note を配置すれば、`resolve=true` の検索経由でなりすまし投稿が取り込まれ得た。修正: `src/statuses/ingest_service.rs` の `check_fetched_host`/`host_from_url` と同一セマンティクス（大文字小文字非依存のホスト比較、`id` 欠如時は許容）を持つ private ヘルパーを `remote_resolver.rs` にローカル複製し、`ingest_document` 呼び出し前にホスト不一致を検出して `Resolved::None` へ正規化（`ingest_url` への切替は不要な二重フェッチを増やすため不採用）。クロスホスト詐称ケースの統合テストを追加（レビューで再検証済み・APPROVED）。今後 URL 取得済みドキュメントを別モジュールが `ingest_document` に直接渡す実装を追加する場合は、このチェックの複製漏れがないか必ず確認すること。
+- フォローアップ修正（requirements.md 3.1 のローカルアカウント・ハンドル一致、feature-level `/kiro-validate-impl search` 指摘の是正・上のタスク 3.1 エントリの CONCERN を解消）: 上のタスク 3.1 エントリが CONCERN として記録した「`PgSearchBackend::search_accounts` のローカルアカウント一致対象を design.md の upstream カラム表に厳密に従い `account_profiles.display_name` のみとした」判断について、feature レベルの検証パスで requirements.md 3.1 の文言（「表示名・ユーザー名・ハンドル（`acct`）に対する一致」）に対する実質的な機能ギャップであると判定された（ローカルユーザーが自分のハンドルが表示名に含まれていない限り `@handle` 検索で見つからないのは、標準クライアントが期待する一般的な検索パターンに反する）。恒久的な CONCERN として残すのではなく解消することとし、以下を実施した: (1) `src/search/pg_backend.rs::PgSearchBackend::search_accounts` の SQL を、ローカルアカウント側のサブクエリで `account_profiles` から `local_actors` へ `LEFT JOIN`（`local_actors.id = account_profiles.actor_id`、両者とも主キーのため 1 アカウントにつき高々 1 行のまま）し、`account_profiles.display_name ILIKE $1 OR local_actors.handle ILIKE $1` に拡張（既存の remote 側 `ILIKE` 方式・大文字小文字非依存と同一手法）。`LEFT JOIN` を採用したのは、`account_profiles` 単独行（`local_actors` 行を伴わない）を直接 SQL で作るこのタスク自身の既存フィクスチャ（`tests/search_accounts_it.rs::insert_local_account`）が `INNER JOIN` では一致しなくなり回帰するため。(2) `.kiro/specs/search/design.md` の「`PgSearchBackend` が依存する upstream カラム」表・Logical Data Model 本文・Revalidation Triggers 箇条書きに `local_actors.handle`（actor-model 所有）を追加し、コードと設計書の記載を一致させた。(3) `tests/search_accounts_it.rs` に `search_accounts_matches_local_account_by_handle_substring`（ハンドルが表示名に一切含まれないローカルアカウントをハンドルの部分文字列で検索し発見できることを検証、TDD の RED→GREEN で確認済み）を追加。リモートアカウント一致（`username`/`domain`/`display_name`/合成 `acct`）は既存実装で要件を満たしており変更していない。

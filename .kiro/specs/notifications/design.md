@@ -142,8 +142,8 @@ migrations/
 └── 0009_notifications.sql       # notifications テーブルと重複排除の部分一意制約（未消去限定）・受信者カーソルインデックス（research.md の Migration Numbering Coordination 参照）
 
 src/
+├── notifications.rs             # NotificationModule 組み立て・公開・ルータ装着点・EventSink/DeliverySink 登録
 └── notifications/
-    ├── mod.rs                   # NotificationModule 組み立て・公開・ルータ装着点・EventSink/DeliverySink 登録
     ├── model.rs                 # NotificationType, Notification, NotificationEvent, NotificationFilterDecision 等のドメイン型
     ├── repository.rs            # NotificationRepository（重複排除付き挿入・カーソル/フィルタ一覧・単一取得・dismiss・clear）
     ├── ports.rs                 # NotificationEventSink trait + NoopSink（既定）/ NotificationDeliverySink trait + 既定 no-op + レジストリ

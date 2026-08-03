@@ -167,8 +167,8 @@ migrations/
 └── 0005_accounts.sql            # account_profiles / remote_accounts / custom_emojis / instance_settings（0001-0004 と非衝突。0003 は federation/oauth 二重利用のため回避）
 
 src/
+├── accounts.rs                   # AccountsModule 組み立て（サービス/リポジトリ/シリアライザ/port のハンドル束ね）と公開・ルータ装着点
 └── accounts/
-    ├── mod.rs                    # AccountsModule 組み立て（サービス/リポジトリ/シリアライザ/port のハンドル束ね）と公開・ルータ装着点
     ├── model.rs                  # AccountView, CredentialSource, AccountProfile, ProfilePatch, RemoteAccount, ProfileField, CustomEmojiView, RelationshipView, InstanceSettings 等のドメイン型
     ├── ports.rs                  # AccountStatusesProvider / RelationshipStateProvider / AccountCountsProvider trait + 既定実装（空/関係なし/0）+ 登録レジストリ
     ├── profile_repository.rs     # AccountProfileRepository（ローカルプロフィール拡張の取得・upsert）

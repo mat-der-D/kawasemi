@@ -28,10 +28,18 @@
 //! repository layer (tasks 3.1-3.3) uses to hash client secrets,
 //! authorization codes, and access tokens before persisting them — neither
 //! may ever appear in plaintext via `Debug`/`Display`/log output either.
+//!
+//! media-pipeline's task 1.2 adds `media.*`: storage root, max upload size,
+//! thumbnail target dimensions, supported content types, worker
+//! concurrency, max retry attempts, and processing-job lease duration. None
+//! of these are secret-bearing, so none are wrapped in `Secret<T>`; see
+//! [`MediaConfig`]'s own doc comment for field-by-field detail and why every
+//! field has a safe default.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[cfg(test)]
@@ -76,6 +84,32 @@ pub struct AppConfig {
     /// Model: `client_secret_hash`/`code_hash`/`token_hash`, "同一規約で
     /// ハッシュ化").
     pub oauth: OauthConfig,
+    /// federation-core's startup settings: secure-mode flag, public-key
+    /// cache TTL, and received-Activity retention window (task 5.4,
+    /// `_Boundary: FederationModule, Bootstrap, AppState, Config_`,
+    /// Requirements 7.3, 10.1, 11.1, 11.2). core-runtime only hosts this
+    /// field; `crate::federation::module::build_federation_module` is the
+    /// consumer. See [`FederationConfig`]'s own doc comment for why this
+    /// struct does not also carry a delivery-retry-policy field despite
+    /// task 5.4's task text naming "配送リトライ方針" alongside these three.
+    pub federation: FederationConfig,
+    /// media-pipeline's startup settings (task 1.2, design.md's Modified
+    /// Files: "起動設定にメディア保管ルート・アップロード上限サイズ・
+    /// サムネイル寸法・対応形式・ワーカー並行度/再試行上限・処理ジョブの
+    /// リース期間...を追加", Requirements 1.4, 4.2, 5.2, 6.1). core-runtime
+    /// only hosts this field; the eventual consumers (`LocalFsStore`,
+    /// `MediaService`, `PureRustImageProcessor`, `ProcessingWorker`,
+    /// `ProcessingJobQueue`) are wired up by later tasks (2.x-5.2), not this
+    /// one. See [`MediaConfig`]'s own doc comment for why no field here is
+    /// wrapped in `Secret<T>`.
+    pub media: MediaConfig,
+    /// statuses-core's operational startup settings (task 7.2, `_Boundary:
+    /// StatusesModule, server, bootstrap, config_`, design.md's Modified
+    /// Files: "投稿最大文字数・投票選択肢上限/最小締切・冪等キー保持方針等の
+    /// 運用関連設定項目を追加"). core-runtime only hosts this field; see
+    /// [`StatusesConfig`]'s own doc comment for why none of these three
+    /// values are yet consumed by `crate::statuses`'s own business logic.
+    pub statuses: StatusesConfig,
 }
 
 /// Server-facing startup settings.
@@ -181,6 +215,200 @@ pub struct OauthConfig {
     /// cryptographic primitive with no natural human-typable format beyond
     /// hex.
     pub token_hash_key: Secret<[u8; 32]>,
+}
+
+/// federation-core's startup settings (task 5.4, design.md's Data Contracts
+/// & Integration: "設定: セキュアモードフラグ・配送リトライ方針・公開鍵
+/// キャッシュ TTL（`federation.public_key_cache_ttl`、既定 24h）・受信
+/// Activity 保持日数（`federation.received_activity_retention_days`、既定
+/// 14 日）を core-runtime 起動設定に追加").
+///
+/// ## Why no delivery-retry-policy field
+/// Task 5.4's own text also names "配送リトライ方針" (delivery retry
+/// policy) as something to add to startup config, alongside these three
+/// fields. Judgment call, documented here: the only components that
+/// actually *consume* a retry policy — `DeliveryWorker::process_job`
+/// (comparing an incremented attempt count against
+/// `federation::outbound::queue::DEFAULT_MAX_DELIVERY_ATTEMPTS`) and
+/// `backoff_delay` (reading `DEFAULT_DELIVERY_BASE_DELAY`/
+/// `DEFAULT_DELIVERY_MAX_DELAY`) — reference those as bare module
+/// constants with no constructor parameter to inject a different value
+/// through (`src/federation/outbound/worker.rs`, `queue.rs`). Task 5.4's own
+/// boundary explicitly forbids modifying `src/federation/outbound/*.rs`
+/// ("already-implemented dependencies"), so there is no reachable injection
+/// point this task can wire a config value into without violating that
+/// boundary. Adding a `FederationConfig` field nothing reads would be a
+/// dead/unwired config surface, which this task's own "no scope expansion
+/// beyond wiring" constraint counsels against. The delivery retry policy
+/// therefore remains exactly the already-existing compile-time defaults
+/// documented on those constants (`DEFAULT_DELIVERY_BASE_DELAY = 30s`,
+/// `DEFAULT_DELIVERY_MAX_DELAY = 6h`, `DEFAULT_MAX_DELIVERY_ATTEMPTS = 10`);
+/// a future task revisiting `DeliveryWorker`'s own boundary is the right
+/// place to add the constructor parameter this would need.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FederationConfig {
+    /// Whether authorized fetch (signed GET) is required for ActivityPub
+    /// representation requests (Requirement 6.4). Defaults to `false`: a
+    /// freshly configured instance should serve public AP documents
+    /// without requiring every fetcher to pre-negotiate signing.
+    pub secure_mode: bool,
+    /// How long a resolved remote public key stays valid in
+    /// `remote_public_keys` before the next verification re-fetches it
+    /// (`federation.public_key_cache_ttl`, design.md's literal config key;
+    /// Requirement 2.4). Defaults to 24 hours, mirroring
+    /// `crate::federation::signatures::DEFAULT_PUBLIC_KEY_CACHE_TTL`
+    /// (duplicated as a plain seconds constant here rather than importing
+    /// that `time::Duration` constant, so this foundational, early-loaded
+    /// module does not gain a dependency on `crate::federation`).
+    pub public_key_cache_ttl: Duration,
+    /// How many days a `received_activities` row is kept before the
+    /// periodic pruning task deletes it
+    /// (`federation.received_activity_retention_days`, design.md's literal
+    /// config key; Requirement 7.4). Defaults to 14 days, mirroring
+    /// `crate::federation::inbound::DEFAULT_RECEIVED_ACTIVITY_RETENTION`
+    /// (see this field's sibling doc comment for why that constant is not
+    /// imported directly).
+    pub received_activity_retention_days: u32,
+}
+
+/// media-pipeline's startup settings (task 1.2, design.md's Modified Files:
+/// "起動設定にメディア保管ルート・アップロード上限サイズ・サムネイル寸法・
+/// 対応形式・ワーカー並行度/再試行上限・処理ジョブのリース期間
+/// （`lease_duration`。クラッシュしたワーカーからジョブを再取得するまでの
+/// 猶予。既定は想定処理時間を十分に上回る値、例: 5 分）を追加").
+/// core-runtime only hosts these fields; it does not itself know how a
+/// storage root or thumbnail dimension is used — `LocalFsStore` (task 2.2,
+/// Requirement 5.2), `MediaService` (task 4.1, Requirement 1.4),
+/// `PureRustImageProcessor` (task 2.3, Requirement 6.1), and
+/// `ProcessingWorker`/`ProcessingJobQueue` (tasks 3.2/4.3, Requirement 4.2)
+/// are the eventual consumers, mirroring `FederationConfig`'s precedent of
+/// a downstream-consumed startup settings group hosted here without this
+/// module depending on `crate::media`.
+///
+/// Unlike `ActorConfig`/`OwnerConfig`/`OauthConfig`, no field here is
+/// secret-bearing (no credentials or key material), so nothing is wrapped
+/// in [`Secret`]. Every field also has a safe default (mirroring
+/// `FederationConfig`'s "defaults are provided so a minimal config still
+/// boots" precedent): none of Requirements 1.4, 4.2, 5.2, or 6.1 mandate a
+/// value with no safe fallback, unlike `database.url`/`actor.kek`/
+/// `owner.password`/`oauth.token_hash_key`, which have no safe default to
+/// fall back to. Consequently this struct — like `FederationConfig` —
+/// contributes no `ConfigIssue::Missing` cases, only `Malformed` ones for
+/// values present but not shaped as expected.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaConfig {
+    /// Filesystem directory under which a later `LocalFsStore` (task 2.2,
+    /// Requirement 5.2) persists original media and derivatives, keyed by a
+    /// path derived deterministically from the media identifier (design.md
+    /// Physical Data Model: `object_key`/`thumb_key`). Defaults to
+    /// `media_storage`, a relative path resolved against the process's
+    /// current working directory — mirroring [`DEFAULT_CONFIG_PATH`]'s own
+    /// relative-path convention, so a freshly cloned instance boots without
+    /// an operator having to pre-provision an absolute path.
+    pub storage_root: PathBuf,
+    /// Maximum accepted upload size in bytes; an upload exceeding this is
+    /// rejected before storage (Requirement 1.4, consumed by a later
+    /// `MediaService::accept_upload`). Defaults to 10 MiB
+    /// (`10 * 1024 * 1024` bytes), a generous ceiling for this MVP's
+    /// image-only scope (Requirement 10.3 — no video/audio to size for
+    /// yet).
+    pub max_upload_size_bytes: u64,
+    /// Target thumbnail width in pixels, consumed by a later
+    /// `PureRustImageProcessor::process_image` (Requirement 6.1). Defaults
+    /// to 400, alongside [`Self::thumbnail_target_height`].
+    pub thumbnail_target_width: u32,
+    /// Target thumbnail height in pixels, consumed the same way as
+    /// [`Self::thumbnail_target_width`] (Requirement 6.1). Defaults to 400.
+    pub thumbnail_target_height: u32,
+    /// Content types accepted by upload validation; anything else is
+    /// rejected as an unsupported format (Requirement 1.4, consumed by a
+    /// later `MediaService::accept_upload`). Supplied as a comma-separated
+    /// list (matching this module's convention of scalar-string TOML/env
+    /// values — see [`MergedSource::get`]'s doc comment for why array-typed
+    /// TOML values are not supported here). Defaults to the four raster
+    /// formats a later pure-Rust `MediaProcessor` (task 2.3, Requirements
+    /// 10.2, 10.3) is expected to decode without native dependencies:
+    /// `image/jpeg`, `image/png`, `image/gif`, `image/webp`.
+    pub supported_formats: Vec<String>,
+    /// Number of concurrent processing workers a later `MediaModule`
+    /// wiring (task 5.2) spawns to consume the processing job queue
+    /// (Requirement 4.2's exclusive per-job claim only matters once 1+
+    /// workers may run concurrently). Defaults to 2, a modest concurrency
+    /// befitting this project's single-server ("一人鯖") deployment
+    /// target.
+    pub worker_concurrency: u32,
+    /// Maximum retry attempts for a processing job before it is moved to a
+    /// failed state, consumed by a later
+    /// `ProcessingJobQueue::fail_or_retry` (design.md's `max_attempts: u32`
+    /// parameter; Requirement 4.5, referenced from this task's boundary via
+    /// Requirement 4.2's exclusive-claim/retry semantics). Defaults to 5.
+    pub max_retry_attempts: u32,
+    /// Grace period after a processing job's `locked_at` before a worker
+    /// crash is presumed and another worker may reclaim the job (design.md's
+    /// `lease_duration` parameter to `ProcessingJobQueue::claim_due`;
+    /// Requirement 4.2). Defaults to 5 minutes, matching the task text's own
+    /// example of a value "well above the expected processing time"
+    /// (処理ジョブのリース期間の既定は想定処理時間を十分に上回る値、例: 5
+    /// 分).
+    pub lease_duration: Duration,
+}
+
+/// statuses-core's operational startup settings (task 7.2, design.md's
+/// Modified Files entry for this file: "投稿最大文字数・投票選択肢上限/最小
+/// 締切・冪等キー保持方針等の運用関連設定項目を追加"). core-runtime only
+/// hosts these fields; it does not itself know how a max content length or a
+/// poll option bound is enforced.
+///
+/// ## CONCERN (documented judgment call): not yet consumed by any business
+/// logic
+/// Unlike [`MediaConfig`]/[`FederationConfig`] (whose fields every one feed a
+/// real, already-implemented consumer), no task in this spec's dependency
+/// chain (`status_service.rs`/`poll_repository.rs`/`idempotency.rs`, tasks
+/// 2.3/5.1/5.3, all already implemented and reviewed before this task) has
+/// ever enforced a maximum content length, a poll-option-count bound, a
+/// minimum poll deadline, or an idempotency-key retention/pruning policy —
+/// `grep -rn "max.*len\|MAX_.*LEN\|retention" src/statuses/` outside this
+/// struct finds no such existing constant to reuse, and no pruning job for
+/// `status_idempotency_keys` exists anywhere (unlike federation-core's
+/// `received_activities`, which does have one). Wiring these three values
+/// into actual enforcement would mean editing `status_service.rs::create_status`
+/// (content-length rejection), `poll_repository.rs::record_vote`/a new
+/// `PollService` validation path (option-count/min-deadline rejection), and
+/// adding a new idempotency-key pruning job — every one of those is business
+/// logic inside an already-reviewed task (5.1/2.3/5.3) squarely outside this
+/// task's own boundary (`_Boundary: StatusesModule, server, bootstrap,
+/// config_`, which does not include `StatusService`/`PollRepository`/
+/// `IdempotencyStore`), and this task's own Critical Constraints explicitly
+/// forbid reworking those tasks' decisions. This struct therefore exists
+/// (satisfying design.md's literal Modified Files entry for this file, and
+/// making these three operational knobs startup-validated and reachable via
+/// `AppState::config().statuses` today) without yet being consumed anywhere
+/// — a documented, boundary-driven placeholder for a later task to wire into
+/// real enforcement, not silently presented as already having runtime
+/// effect. See this task's own status report for the same CONCERN.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatusesConfig {
+    /// Maximum accepted post content length, in Unicode scalar values
+    /// (`str::chars().count()`, not bytes — consistent with this being a
+    /// user-facing character-count limit, not a storage-size limit).
+    /// Defaults to 500, Mastodon's own long-standing default post length.
+    pub max_content_chars: u32,
+    /// Maximum number of options a poll may offer. Defaults to 4, Mastodon's
+    /// own long-standing default.
+    pub poll_max_options: u32,
+    /// Minimum allowed poll expiration window. Defaults to 5 minutes,
+    /// Mastodon's own long-standing minimum (short enough for a real poll to
+    /// still be useful, long enough to reject an effectively-already-expired
+    /// poll at creation time).
+    pub poll_min_expiration: Duration,
+    /// How many days a `status_idempotency_keys` row is kept before a future
+    /// pruning job would delete it (mirroring
+    /// `FederationConfig::received_activity_retention_days`'s identical
+    /// shape). Defaults to 7 days — long enough to cover any plausible
+    /// client retry window for a single `Idempotency-Key`, short enough that
+    /// the ledger does not grow unbounded on a long-running instance once a
+    /// pruning job is wired.
+    pub idempotency_key_retention_days: u32,
 }
 
 /// Logging/diagnostics startup settings.
@@ -397,6 +625,114 @@ fn load_config_from(
         &mut issues,
     );
 
+    let federation_secure_mode = optional(
+        &source,
+        "federation.secure_mode",
+        false,
+        parse_bool,
+        &mut issues,
+    );
+    let federation_public_key_cache_ttl = optional(
+        &source,
+        "federation.public_key_cache_ttl",
+        Duration::from_secs(DEFAULT_FEDERATION_PUBLIC_KEY_CACHE_TTL_SECS),
+        parse_secs,
+        &mut issues,
+    );
+    let federation_received_activity_retention_days = optional(
+        &source,
+        "federation.received_activity_retention_days",
+        DEFAULT_FEDERATION_RECEIVED_ACTIVITY_RETENTION_DAYS,
+        |raw| raw.parse::<u32>().map_err(|e| e.to_string()),
+        &mut issues,
+    );
+
+    let media_storage_root = optional(
+        &source,
+        "media.storage_root",
+        default_media_storage_root(),
+        validate_media_storage_root,
+        &mut issues,
+    );
+    let media_max_upload_size_bytes = optional(
+        &source,
+        "media.max_upload_size_bytes",
+        DEFAULT_MEDIA_MAX_UPLOAD_SIZE_BYTES,
+        parse_max_upload_size_bytes,
+        &mut issues,
+    );
+    let media_thumbnail_target_width = optional(
+        &source,
+        "media.thumbnail_target_width",
+        DEFAULT_MEDIA_THUMBNAIL_TARGET_WIDTH,
+        parse_thumbnail_dimension,
+        &mut issues,
+    );
+    let media_thumbnail_target_height = optional(
+        &source,
+        "media.thumbnail_target_height",
+        DEFAULT_MEDIA_THUMBNAIL_TARGET_HEIGHT,
+        parse_thumbnail_dimension,
+        &mut issues,
+    );
+    let media_supported_formats = optional(
+        &source,
+        "media.supported_formats",
+        default_media_supported_formats(),
+        parse_supported_formats,
+        &mut issues,
+    );
+    let media_worker_concurrency = optional(
+        &source,
+        "media.worker_concurrency",
+        DEFAULT_MEDIA_WORKER_CONCURRENCY,
+        parse_worker_concurrency,
+        &mut issues,
+    );
+    let media_max_retry_attempts = optional(
+        &source,
+        "media.max_retry_attempts",
+        DEFAULT_MEDIA_MAX_RETRY_ATTEMPTS,
+        |raw| raw.parse::<u32>().map_err(|e| e.to_string()),
+        &mut issues,
+    );
+    let media_lease_duration = optional(
+        &source,
+        "media.lease_duration_secs",
+        Duration::from_secs(DEFAULT_MEDIA_LEASE_DURATION_SECS),
+        parse_secs,
+        &mut issues,
+    );
+
+    let statuses_max_content_chars = optional(
+        &source,
+        "statuses.max_content_chars",
+        DEFAULT_STATUSES_MAX_CONTENT_CHARS,
+        |raw| raw.parse::<u32>().map_err(|e| e.to_string()),
+        &mut issues,
+    );
+    let statuses_poll_max_options = optional(
+        &source,
+        "statuses.poll_max_options",
+        DEFAULT_STATUSES_POLL_MAX_OPTIONS,
+        |raw| raw.parse::<u32>().map_err(|e| e.to_string()),
+        &mut issues,
+    );
+    let statuses_poll_min_expiration = optional(
+        &source,
+        "statuses.poll_min_expiration_secs",
+        Duration::from_secs(DEFAULT_STATUSES_POLL_MIN_EXPIRATION_SECS),
+        parse_secs,
+        &mut issues,
+    );
+    let statuses_idempotency_key_retention_days = optional(
+        &source,
+        "statuses.idempotency_key_retention_days",
+        DEFAULT_STATUSES_IDEMPOTENCY_KEY_RETENTION_DAYS,
+        |raw| raw.parse::<u32>().map_err(|e| e.to_string()),
+        &mut issues,
+    );
+
     let level = optional(
         &source,
         "log.level",
@@ -452,7 +788,106 @@ fn load_config_from(
                     .expect("validated above: no issues means all required fields present"),
             ),
         },
+        federation: FederationConfig {
+            secure_mode: federation_secure_mode.expect("validated above"),
+            public_key_cache_ttl: federation_public_key_cache_ttl.expect("validated above"),
+            received_activity_retention_days: federation_received_activity_retention_days
+                .expect("validated above"),
+        },
+        media: MediaConfig {
+            storage_root: media_storage_root.expect("validated above"),
+            max_upload_size_bytes: media_max_upload_size_bytes.expect("validated above"),
+            thumbnail_target_width: media_thumbnail_target_width.expect("validated above"),
+            thumbnail_target_height: media_thumbnail_target_height.expect("validated above"),
+            supported_formats: media_supported_formats.expect("validated above"),
+            worker_concurrency: media_worker_concurrency.expect("validated above"),
+            max_retry_attempts: media_max_retry_attempts.expect("validated above"),
+            lease_duration: media_lease_duration.expect("validated above"),
+        },
+        statuses: StatusesConfig {
+            max_content_chars: statuses_max_content_chars.expect("validated above"),
+            poll_max_options: statuses_poll_max_options.expect("validated above"),
+            poll_min_expiration: statuses_poll_min_expiration.expect("validated above"),
+            idempotency_key_retention_days: statuses_idempotency_key_retention_days
+                .expect("validated above"),
+        },
     })
+}
+
+/// Default for `federation.public_key_cache_ttl`, in seconds (24 hours).
+/// Mirrors `crate::federation::signatures::DEFAULT_PUBLIC_KEY_CACHE_TTL` —
+/// see [`FederationConfig::public_key_cache_ttl`]'s doc comment for why this
+/// is a plain duplicated constant rather than an import.
+const DEFAULT_FEDERATION_PUBLIC_KEY_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// Default for `federation.received_activity_retention_days` (14 days).
+/// Mirrors `crate::federation::inbound::DEFAULT_RECEIVED_ACTIVITY_RETENTION`
+/// — see [`FederationConfig::received_activity_retention_days`]'s doc
+/// comment for why this is a plain duplicated constant rather than an
+/// import.
+const DEFAULT_FEDERATION_RECEIVED_ACTIVITY_RETENTION_DAYS: u32 = 14;
+
+/// Default for `media.max_upload_size_bytes` (10 MiB). See
+/// [`MediaConfig::max_upload_size_bytes`]'s doc comment for rationale.
+const DEFAULT_MEDIA_MAX_UPLOAD_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Default for `media.thumbnail_target_width` (400px). See
+/// [`MediaConfig::thumbnail_target_width`]'s doc comment.
+const DEFAULT_MEDIA_THUMBNAIL_TARGET_WIDTH: u32 = 400;
+
+/// Default for `media.thumbnail_target_height` (400px). See
+/// [`MediaConfig::thumbnail_target_height`]'s doc comment.
+const DEFAULT_MEDIA_THUMBNAIL_TARGET_HEIGHT: u32 = 400;
+
+/// Default for `media.worker_concurrency` (2 workers). See
+/// [`MediaConfig::worker_concurrency`]'s doc comment for rationale.
+const DEFAULT_MEDIA_WORKER_CONCURRENCY: u32 = 2;
+
+/// Default for `media.max_retry_attempts` (5 attempts). See
+/// [`MediaConfig::max_retry_attempts`]'s doc comment.
+const DEFAULT_MEDIA_MAX_RETRY_ATTEMPTS: u32 = 5;
+
+/// Default for `media.lease_duration_secs`, in seconds (5 minutes). See
+/// [`MediaConfig::lease_duration`]'s doc comment for why this specific
+/// value (task 1.2's own example of "well above the expected processing
+/// time").
+const DEFAULT_MEDIA_LEASE_DURATION_SECS: u64 = 5 * 60;
+
+/// Default for `statuses.max_content_chars` (500 Unicode scalar values). See
+/// [`StatusesConfig::max_content_chars`]'s doc comment for rationale.
+const DEFAULT_STATUSES_MAX_CONTENT_CHARS: u32 = 500;
+
+/// Default for `statuses.poll_max_options` (4 options). See
+/// [`StatusesConfig::poll_max_options`]'s doc comment for rationale.
+const DEFAULT_STATUSES_POLL_MAX_OPTIONS: u32 = 4;
+
+/// Default for `statuses.poll_min_expiration_secs`, in seconds (5 minutes).
+/// See [`StatusesConfig::poll_min_expiration`]'s doc comment for rationale.
+const DEFAULT_STATUSES_POLL_MIN_EXPIRATION_SECS: u64 = 5 * 60;
+
+/// Default for `statuses.idempotency_key_retention_days` (7 days). See
+/// [`StatusesConfig::idempotency_key_retention_days`]'s doc comment for
+/// rationale.
+const DEFAULT_STATUSES_IDEMPOTENCY_KEY_RETENTION_DAYS: u32 = 7;
+
+/// Default for `media.storage_root`: `media_storage`, resolved relative to
+/// the process's current working directory. See
+/// [`MediaConfig::storage_root`]'s doc comment for why a relative default is
+/// safe here (mirrors [`DEFAULT_CONFIG_PATH`]'s own convention).
+fn default_media_storage_root() -> PathBuf {
+    PathBuf::from("media_storage")
+}
+
+/// Default for `media.supported_formats`: the four raster formats a later
+/// pure-Rust `MediaProcessor` is expected to decode without native
+/// dependencies. See [`MediaConfig::supported_formats`]'s doc comment.
+fn default_media_supported_formats() -> Vec<String> {
+    vec![
+        "image/jpeg".to_string(),
+        "image/png".to_string(),
+        "image/gif".to_string(),
+        "image/webp".to_string(),
+    ]
 }
 
 fn default_bind_addr() -> SocketAddr {
@@ -592,6 +1027,83 @@ fn validate_owner_password(raw: &str) -> Result<String, String> {
         return Err("must be at least 8 characters".to_string());
     }
     Ok(trimmed.to_string())
+}
+
+/// Validates `media.storage_root`: non-empty after trimming. Deliberately
+/// permissive about shape (relative or absolute, existing or not — a later
+/// `LocalFsStore` is responsible for creating/validating the directory at
+/// use time); this validator only rejects the degenerate empty-string case,
+/// mirroring [`validate_domain`]'s minimal non-emptiness floor.
+fn validate_media_storage_root(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("must not be empty".to_string());
+    }
+    Ok(PathBuf::from(trimmed))
+}
+
+/// Validates `media.max_upload_size_bytes`: a positive whole number of
+/// bytes. Zero is rejected — a zero-byte ceiling would reject every upload,
+/// which is never the intent of a size *limit* (Requirement 1.4).
+fn parse_max_upload_size_bytes(raw: &str) -> Result<u64, String> {
+    let value = raw
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| format!("'{raw}' is not a whole number of bytes: {e}"))?;
+    if value == 0 {
+        return Err("must be greater than 0".to_string());
+    }
+    Ok(value)
+}
+
+/// Validates a thumbnail target dimension (`media.thumbnail_target_width`/
+/// `media.thumbnail_target_height`): a positive whole number of pixels.
+/// Shared by both fields since the parsing rule is identical (Requirement
+/// 6.1); only the dotted config path each is registered under differs.
+fn parse_thumbnail_dimension(raw: &str) -> Result<u32, String> {
+    let value = raw
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| format!("'{raw}' is not a whole number of pixels: {e}"))?;
+    if value == 0 {
+        return Err("must be greater than 0".to_string());
+    }
+    Ok(value)
+}
+
+/// Validates `media.supported_formats`: a comma-separated list of content
+/// types, each trimmed of surrounding whitespace, with empty entries
+/// dropped. At least one entry must remain — an empty accepted-format list
+/// would reject every upload, which is never the intent of Requirement
+/// 1.4's "unsupported format" check (that check exists to reject some
+/// formats, not all of them).
+fn parse_supported_formats(raw: &str) -> Result<Vec<String>, String> {
+    let formats: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if formats.is_empty() {
+        return Err("must list at least one supported content type".to_string());
+    }
+    Ok(formats)
+}
+
+/// Validates `media.worker_concurrency`: a whole number of at least 1. Zero
+/// workers would mean the processing job queue (Requirement 4.2) is never
+/// consumed, which is never a valid startup intent — an operator who wants
+/// processing paused should stop the process, not configure a
+/// zero-concurrency worker pool.
+fn parse_worker_concurrency(raw: &str) -> Result<u32, String> {
+    let value = raw
+        .trim()
+        .parse::<u32>()
+        .map_err(|e| format!("'{raw}' is not a whole number: {e}"))?;
+    if value == 0 {
+        return Err("must be at least 1".to_string());
+    }
+    Ok(value)
 }
 
 /// Merged view over a parsed TOML document and an environment-variable map,

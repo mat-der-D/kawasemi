@@ -1,0 +1,29 @@
+{
+  "accounts": [
+    {
+      "acct": "alice",
+      "display_name": "Alice",
+      "id": "1",
+      "username": "alice"
+    }
+  ],
+  "hashtags": [
+    {
+      "history": [],
+      "name": "fediverse",
+      "url": "https://kawasemi.example/tags/fediverse"
+    }
+  ],
+  "statuses": [
+    {
+      "account": {
+        "acct": "alice",
+        "display_name": "Alice",
+        "id": "1",
+        "username": "alice"
+      },
+      "content": "<p>hello fediverse</p>",
+      "id": "42"
+    }
+  ]
+}

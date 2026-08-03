@@ -135,8 +135,8 @@ migrations/
 └── 0003_oauth.sql                # oauth_applications / oauth_authorization_codes / oauth_access_tokens と各種制約
 
 src/
+├── oauth.rs                      # OauthModule 組み立て（サービス/リポジトリ/ミドルウェアのハンドル束ね）と公開
 ├── oauth/
-│   ├── mod.rs                    # OauthModule 組み立て（サービス/リポジトリ/ミドルウェアのハンドル束ね）と公開
 │   ├── model.rs                  # OauthApp, AuthorizationCode, AccessToken, TokenContext, OwnerSession 等のドメイン型
 │   ├── scope.rs                  # Scope/ScopeSet モデルと内包判定（authorize/token/middleware で共有）
 │   ├── pkce.rs                   # PKCE(S256) チャレンジ生成検証・コードとの整合検証
@@ -150,8 +150,8 @@ src/
 │   ├── token_endpoint.rs         # POST /oauth/token, POST /oauth/revoke
 │   ├── middleware.rs             # Bearer 認証レイヤー/抽出器（RequestActorContext 供給）と再利用可能トークン検査
 │   └── templates.rs              # 承認画面・オーナーログインの最小 HTML レンダリング
+├── api.rs                        # api 横断モジュール公開・ルータ装着ヘルパ
 ├── api/
-│   ├── mod.rs                    # api 横断モジュール公開・ルータ装着ヘルパ
 │   ├── error.rs                  # Mastodon 互換エラー本文 + AppError 拡張 + ステータス対応表
 │   ├── pagination.rs             # PageParams, Cursor 抽象, Page<T>, Link ヘッダ生成（X-Forwarded 尊重）
 │   └── ratelimit.rs              # X-RateLimit-* 付与レイヤー・上限超過応答・インメモリカウンタ
@@ -172,7 +172,7 @@ tests/
 - `src/state.rs`（core-runtime）— `AppState` に `OauthModule`（`OauthService` / Bearer ミドルウェア / リポジトリのハンドル）と `ApiModule`（ページネーション/エラー/RL ヘルパ）を追加。
 - `src/bootstrap.rs`（core-runtime）— プール確立後に OAuth リポジトリ/サービスとオーナーゲートを構築し、エラー変換・RL・Bearer の各 tower レイヤーをルータへ装着、`AppState` に格納。
 - `src/server.rs`（core-runtime）— ルータに OAuth/apps エンドポイントを mount し、横断レイヤー（エラー変換・RL）を全 API に適用する装着点を用意。
-- `src/config/mod.rs`（core-runtime）— 起動設定にオーナー資格情報（`Secret<T>`）とトークンハッシュ用素材（`Secret<T>`）の項目を追加。
+- `src/config.rs`（core-runtime）— 起動設定にオーナー資格情報（`Secret<T>`）とトークンハッシュ用素材（`Secret<T>`）の項目を追加。
 - `src/error.rs`（core-runtime）— Mastodon 互換本文を差し込めるよう、`AppError` 拡張点が `api::error` の変換を受け入れることを確認（骨格は core-runtime 所有・本 spec は本文表現を供給）。
 
 > 各ファイルは単一責務。OAuth 業務（service/repository）と API 横断（error/pagination/ratelimit）と認証ミドルウェアを分離し、core-runtime の Composition Root へ一方向に配線する。

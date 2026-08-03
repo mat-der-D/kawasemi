@@ -460,8 +460,15 @@ async fn bearer_auth_middleware_is_wired_against_the_real_app_state() {
     });
 
     // No Authorization header -> 401, Mastodon-compatible.
-    let unauthenticated =
-        raw_request(protected_addr, "GET", "/__wiring_test_whoami__", None, &[], "").await;
+    let unauthenticated = raw_request(
+        protected_addr,
+        "GET",
+        "/__wiring_test_whoami__",
+        None,
+        &[],
+        "",
+    )
+    .await;
     assert_eq!(unauthenticated.status, 401);
     let unauth_body: Value = serde_json::from_str(&unauthenticated.body)
         .expect("unauthenticated error response must be valid JSON");

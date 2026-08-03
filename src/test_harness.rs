@@ -85,19 +85,31 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use crate::accounts;
+use crate::accounts::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::keys::provider::DbSigningKeyProvider;
-use crate::actor::{self, ActorModule};
+use crate::actor::{self, ActorDirectory, ActorModule};
 use crate::config::{
-    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, OauthConfig, OwnerConfig, Secret,
-    ServerConfig,
+    ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, MediaConfig,
+    OauthConfig, OwnerConfig, Secret, ServerConfig, StatusesConfig,
 };
 use crate::db;
+use crate::federation::inbound::InboundActivityDispatcher;
+use crate::federation::signatures::ReqwestFederationHttpClient;
+use crate::federation::{self, FederationWiringConfig};
+use crate::media;
 use crate::migrate;
+use crate::notifications;
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
+use crate::search;
 use crate::server;
+use crate::social_graph;
 use crate::state::AppState;
+use crate::statuses::notification_sink::NotificationSinkRegistry;
+use crate::statuses::{self, ProdRemoteActorResolver};
+use crate::timelines;
 
 /// Environment variable overriding the shared test database's connection
 /// URL, mirroring `src/db/tests.rs`'/`src/migrate/tests.rs`'s own convention.
@@ -142,11 +154,53 @@ const TEST_OWNER_PASSWORD: &str = "test-harness-owner-passphrase";
 /// per-call, mirroring [`TEST_KEK`]'s own "why fixed" reasoning.
 const TEST_TOKEN_HASH_KEY: [u8; 32] = [0x24; 32];
 
+/// Every [`spawn_test_app`] call's delivery-worker poll interval (task 5.4):
+/// far shorter than [`crate::federation::module::DEFAULT_DELIVERY_POLL_INTERVAL`]'s
+/// production default so an integration test proving delivery completion
+/// (e.g. observing a `delivery_jobs` row transition after enqueuing) does
+/// not need to wait several seconds per assertion.
+const TEST_DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Every [`spawn_test_app`] call's received-Activity pruning-loop interval
+/// (task 5.4): short for the same reason as [`TEST_DELIVERY_POLL_INTERVAL`],
+/// though no test in this crate currently depends on pruning actually
+/// running within a test's lifetime (task 3.1's own unit tests already
+/// cover `prune_expired`'s correctness directly).
+const TEST_PRUNING_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Resolves the shared test database's connection URL: an explicit
 /// `KAWASEMI_TEST_DATABASE_URL` override if set, otherwise
 /// [`DEFAULT_TEST_DB_URL`].
 fn base_test_db_url() -> String {
     std::env::var(TEST_DB_URL_ENV).unwrap_or_else(|_| DEFAULT_TEST_DB_URL.to_string())
+}
+
+/// Generates a `LocalFsStore` root unique to this call, under the OS temp
+/// directory rather than a path relative to the process's current working
+/// directory (task 5.2). `crate::config::MediaConfig::storage_root`'s own
+/// production default (`"media_storage"`, resolved against the process's
+/// cwd) is safe for a real single long-running deployment, but every prior
+/// task's own `MediaConfig` fixture in this file used that same literal
+/// relative default without consequence — nothing exercised the real,
+/// composition-root-wired `LocalFsStore` end to end until this task's own
+/// `ProcessingWorker`/mounted endpoints made it actually write bytes.
+/// Reusing that fixed relative path here would mean every `spawn_test_app`
+/// call (and every `cargo test` run) accumulates ever-growing, never-cleaned
+/// files directly inside this repository's own working directory. Mirrors
+/// `src/media/local_fs.rs`'s/`tests/media_endpoints_it.rs`'s own established
+/// `unique_temp_root` convention (counter + wall-clock nanoseconds under
+/// `std::env::temp_dir()`) — left for the OS's own temp-directory lifecycle
+/// to reclaim, exactly like every other test-only temp root in this crate,
+/// rather than adding a bespoke `Drop`-based cleanup path to `TestApp` for
+/// this one config value.
+fn unique_media_storage_root() -> std::path::PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is after the Unix epoch")
+        .as_nanos();
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("kawasemi_test_harness_media_storage_{nanos}_{seq}"))
 }
 
 /// Generates a schema name unique to this process/run: a monotonic counter
@@ -303,7 +357,52 @@ pub struct TestApp {
     server_task: Option<JoinHandle<std::io::Result<()>>>,
 }
 
+/// The already-built parts [`TestApp::from_parts`] bundles into a
+/// [`TestApp`] (task 6.4, `Boundary: FederationTestHarness,
+/// federation_pair_it`) — a plain data bundle (mirroring this crate's own
+/// `FederationWiringConfig`-style "group a constructor's inputs into a named
+/// struct" convention) rather than a long positional parameter list.
+pub(crate) struct TestAppParts {
+    pub(crate) address: SocketAddr,
+    pub(crate) pool: PgPool,
+    pub(crate) runtime: RuntimeContext,
+    pub(crate) actor: ActorModule,
+    pub(crate) state: AppState,
+    pub(crate) schema: String,
+    pub(crate) shutdown_tx: oneshot::Sender<()>,
+    pub(crate) server_task: JoinHandle<std::io::Result<()>>,
+}
+
 impl TestApp {
+    /// `pub(crate)` constructor from already-built parts (task 6.4,
+    /// `Boundary: FederationTestHarness, federation_pair_it`): lets
+    /// [`crate::federation::test_harness::spawn_federation_pair`] reuse
+    /// `TestApp`'s own release lifecycle (`cleanup()`/`Drop`) for the paired
+    /// instances it composes itself — with a different `domain`
+    /// (`cfg.server.domain`/`FederationWiringConfig.domain`, set to that
+    /// instance's own bound address rather than [`spawn_test_app`]'s fixed
+    /// `"test-harness.kawasemi.internal"`) and a different
+    /// [`crate::federation::signatures::ReqwestFederationHttpClient`]
+    /// (`insecure_loopback()` rather than `new()`) — without duplicating
+    /// [`TestApp`]'s own struct fields or [`Drop`] logic in that module.
+    /// `pub(crate)` (not `pub`): [`TestApp`]'s external contract stays
+    /// exactly "boot a full app via [`spawn_test_app`]/`spawn_federation_pair`;
+    /// call [`Self::cleanup`] when done" — no `tests/*.rs` integration test
+    /// (a separate crate, seeing only `pub` items) can reach this
+    /// constructor to build a `TestApp` from arbitrary parts of its own.
+    pub(crate) fn from_parts(parts: TestAppParts) -> Self {
+        Self {
+            address: parts.address,
+            pool: parts.pool,
+            runtime: parts.runtime,
+            actor: parts.actor,
+            state: parts.state,
+            schema: Some(parts.schema),
+            shutdown_tx: Some(parts.shutdown_tx),
+            server_task: Some(parts.server_task),
+        }
+    }
+
     /// The mandatory, explicit async release path (Requirement 8.5): signals
     /// the serving task to shut down and awaits it actually stopping, closes
     /// the connection pool, and drops this instance's isolated schema — in
@@ -480,6 +579,40 @@ pub async fn spawn_test_app() -> TestApp {
         oauth: OauthConfig {
             token_hash_key: Secret::new(TEST_TOKEN_HASH_KEY),
         },
+        federation: FederationConfig {
+            secure_mode: false,
+            public_key_cache_ttl: Duration::from_secs(24 * 60 * 60),
+            received_activity_retention_days: 14,
+        },
+        // media-pipeline task 1.2: fixed, non-production values mirroring
+        // `load_config_from`'s own defaults (`src/config.rs`) — this test
+        // harness constructs `AppConfig` directly rather than through TOML/
+        // env parsing, the same way every other startup-config group above
+        // is fixed here rather than loaded.
+        media: MediaConfig {
+            storage_root: unique_media_storage_root(),
+            max_upload_size_bytes: 10 * 1024 * 1024,
+            thumbnail_target_width: 400,
+            thumbnail_target_height: 400,
+            supported_formats: vec![
+                "image/jpeg".to_string(),
+                "image/png".to_string(),
+                "image/gif".to_string(),
+                "image/webp".to_string(),
+            ],
+            worker_concurrency: 2,
+            max_retry_attempts: 5,
+            lease_duration: Duration::from_secs(5 * 60),
+        },
+        // statuses-core task 7.2: fixed, non-production values mirroring
+        // `load_config_from`'s own defaults, the same convention every other
+        // startup-config group above already follows in this harness.
+        statuses: StatusesConfig {
+            max_content_chars: 500,
+            poll_max_options: 4,
+            poll_min_expiration: Duration::from_secs(5 * 60),
+            idempotency_key_retention_days: 7,
+        },
     };
 
     // Assembles the OAuth service bundle (task 7.1) the same way
@@ -496,12 +629,259 @@ pub async fn spawn_test_app() -> TestApp {
         false,
     );
 
+    // Assembles statuses-core's own `RemoteActorResolver` (task 7.2) the
+    // same way `bootstrap()`'s production path does — *before*
+    // `federation::build_federation_module` runs, since registration must
+    // happen inside that function's own registration point (see this
+    // module's own doc comment on reusing `bootstrap()`'s building blocks,
+    // and `build_federation_module`'s own doc comment).
+    let statuses_remote_actor_fetcher = Arc::new(RemoteAccountFetcher::new(
+        pool.clone(),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    ));
+    let statuses_remote_actor_resolver = Arc::new(ProdRemoteActorResolver::new(
+        config.server.domain.clone(),
+        Arc::new(ActorDirectory::new(pool.clone())),
+        statuses_remote_actor_fetcher,
+    ));
+
+    // Task 10.2: built here, before `federation::build_federation_module`
+    // runs `register_downstream_handlers`, so the exact same
+    // `NotificationSinkRegistry` instance also reaches
+    // `statuses::build_statuses_module` below — mirrors `bootstrap()`'s own
+    // identical wiring, see that module's own doc comment at its matching
+    // call site.
+    let notifications = NotificationSinkRegistry::new();
+
+    // Assembles social-graph's own `RemoteAccountFetcher` (task 5.2) the
+    // same way `bootstrap()`'s production path does — *before*
+    // `federation::build_federation_module` runs, since
+    // `social_graph::register_downstream_handlers` must be composed into
+    // that function's own `register_downstream` closure before it runs (see
+    // `src/federation/module.rs`'s own doc comment).
+    let social_graph_remote_actor_fetcher = Arc::new(RemoteAccountFetcher::new(
+        pool.clone(),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    ));
+    let (social_graph_register_downstream, social_graph_pending_delivery) =
+        social_graph::register_downstream_handlers(
+            pool.clone(),
+            runtime.clone(),
+            config.server.domain.clone(),
+            Arc::clone(actor_module.directory()),
+            Arc::clone(&social_graph_remote_actor_fetcher),
+            notifications.clone(),
+        );
+
+    // Assembles the federation-core port bundle (task 5.4) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::federation::build_federation_module`), sharing this
+    // instance's own `pool`/`runtime`/`ActorDirectory`, but with a much
+    // shorter background-task poll cadence (see `TEST_DELIVERY_POLL_INTERVAL`'s
+    // own doc comment) so integration tests observing delivery/pruning
+    // completion do not need to wait production's several-seconds interval.
+    // The final argument composes both statuses-core's and social-graph's
+    // own registration closures (task 7.2 / task 5.2), exactly as
+    // `bootstrap()`'s production path does.
+    let (federation_module, federation_background) = federation::build_federation_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor_module.directory()),
+        FederationWiringConfig {
+            domain: config.server.domain.clone(),
+            secure_mode: config.federation.secure_mode,
+            public_key_cache_ttl: time::Duration::seconds(
+                config.federation.public_key_cache_ttl.as_secs() as i64,
+            ),
+            received_activity_retention: time::Duration::days(
+                config.federation.received_activity_retention_days as i64,
+            ),
+            delivery_poll_interval: TEST_DELIVERY_POLL_INTERVAL,
+            delivery_poll_batch_size: 20,
+            pruning_interval: TEST_PRUNING_INTERVAL,
+        },
+        Arc::new(ReqwestFederationHttpClient::new()),
+        {
+            let statuses_register = statuses::register_downstream_handlers(
+                pool.clone(),
+                runtime.clone(),
+                config.server.domain.clone(),
+                statuses_remote_actor_resolver,
+                notifications.clone(),
+            );
+            move |dispatcher: &mut InboundActivityDispatcher| {
+                statuses_register(dispatcher);
+                social_graph_register_downstream(dispatcher);
+            }
+        },
+    );
+    federation_background.spawn();
+
+    // Task 5.2: fills in the deferred delivery cell now that a real
+    // `Arc<ConcreteDeliveryService>` finally exists — see
+    // `social_graph::PendingDeliveryService`'s own doc comment. Strictly
+    // before this harness's own listener starts serving (several steps
+    // below), so no request can ever observe an unresolved cell.
+    social_graph_pending_delivery.resolve(Arc::clone(federation_module.delivery_service()));
+
+    // Assembles the media-pipeline module bundle (task 5.2) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::media::build_media_module`), sharing this instance's own
+    // `pool`/`runtime`/`config.media`. Workers are started with a shutdown
+    // signal that never resolves (`std::future::pending`), mirroring
+    // `federation_background.spawn()`'s own established "tests never
+    // explicitly stop this background task; the per-test tokio runtime
+    // simply aborts it when the test function returns" precedent
+    // (`FederationBackgroundTasks`'s own doc comment says as much) — rather
+    // than plumbing this harness's own single-consumer `oneshot`-based HTTP
+    // listener shutdown (which cannot fan out to several worker tasks)
+    // through the worker pool as well.
+    let (media_module, media_background) =
+        media::build_media_module(pool.clone(), runtime.clone(), config.media.clone());
+    media_background.spawn(std::future::pending::<()>);
+
+    // Assembles the accounts-and-instance module bundle (task 5.1) the same
+    // way `bootstrap()`'s production path does
+    // (`crate::accounts::build_accounts_module`), sharing this instance's own
+    // `pool`/`runtime`/`config.server.domain`/`actor_module`'s
+    // `ActorDirectory`/`media_module`'s `LocalFsStore`, with its own,
+    // separately-constructed `ReqwestFederationHttpClient` (mirroring
+    // `federation_module`'s own instance above) — no background task to
+    // spawn (see `bootstrap.rs`'s identical comment at its own call site).
+    let accounts_module = accounts::build_accounts_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        media_module.store().clone(),
+        media_module.service(),
+        config.media.clone(),
+    );
+
+    // Assembles the statuses-core module bundle (task 7.2) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::statuses::build_statuses_module`), sharing this instance's own
+    // `pool`/`runtime`/`config.server.domain`/`federation_module`'s own
+    // `Arc<ConcreteDeliveryService>` handle — no background task to spawn
+    // (see `accounts_module`'s own identical precedent immediately above).
+    let statuses_module = statuses::build_statuses_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(federation_module.delivery_service()),
+        notifications.clone(),
+    );
+
+    // Supplies statuses-core's own real implementations of the two
+    // accounts-and-instance-owned delegation ports (task 9.1) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::statuses::register_account_ports`), so this harness's own
+    // `GET /accounts/:id/statuses`/`statuses_count` integration tests
+    // observe the real provider, not `accounts_module`'s built-in
+    // `EmptyStatusesProvider`/`ZeroCountsProvider` defaults. Also passes
+    // `statuses_module`'s own live `RelationshipQueryRegistry`
+    // (feature-level `kiro-validate-impl` remediation round 1 follow-up,
+    // 2026-07-31), so `AccountStatusesProviderImpl::visible_to` observes the
+    // exact same registry `social_graph::build_social_graph_module` below
+    // registers its real implementation into.
+    statuses::register_account_ports(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        accounts_module.ports(),
+        accounts_module.service(),
+        media_module.store().clone(),
+        statuses_module.relationship_query_registry(),
+    );
+
+    // Assembles the social-graph module bundle (task 5.2) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::social_graph::build_social_graph_module`) — must run after
+    // `statuses::register_account_ports` immediately above, so this call's
+    // own composed `AccountCountsProvider` registration is the last (and
+    // therefore observed) one.
+    let social_graph_module = social_graph::build_social_graph_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        social_graph_remote_actor_fetcher,
+        Arc::clone(federation_module.delivery_service()),
+        federation_module.block_policy(),
+        &statuses_module.relationship_query_registry(),
+        accounts_module.ports(),
+        accounts_module.service(),
+        notifications.clone(),
+    );
+
+    // Assembles the timelines module bundle (task 5.2) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::timelines::build_timelines_module`), sharing this instance's
+    // own `pool`/`runtime`/`accounts_module`'s `AccountService`/
+    // `media_module`'s `LocalFsStore` — no background task to spawn (see
+    // `accounts_module`'s own identical precedent above).
+    let timelines_module = timelines::build_timelines_module(
+        pool.clone(),
+        runtime.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+    );
+
+    // Assembles the notifications module bundle (task 4.2) the same way
+    // `bootstrap()`'s production path does
+    // (`crate::notifications::build_notification_module`), sharing this
+    // instance's own `pool`/`runtime`/`config.server.domain`/
+    // `accounts_module`'s `AccountService`/`media_module`'s `LocalFsStore`,
+    // and this same `notifications` registry every upstream module above
+    // already shares — no background task to spawn (see `accounts_module`'s
+    // own identical precedent above).
+    let notification_module = notifications::build_notification_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        accounts_module.service(),
+        media_module.store().clone(),
+        notifications,
+    );
+
+    // Assembles the search module bundle (task 5.3) the same way
+    // `bootstrap()`'s production path does (`crate::search::build_search_module`),
+    // sharing this instance's own `pool`/`runtime`/`config.server.domain`/
+    // `actor_module`'s `ActorDirectory`/`accounts_module`'s
+    // `AccountService`/`AccountPortsRegistry`/`media_module`'s
+    // `LocalFsStore`/`statuses_module`'s `RelationshipQueryRegistry` — no
+    // background task to spawn (see `accounts_module`'s own identical
+    // precedent above).
+    let search_module = search::build_search_module(
+        pool.clone(),
+        runtime.clone(),
+        config.server.domain.clone(),
+        Arc::clone(actor_module.directory()),
+        accounts_module.service(),
+        accounts_module.ports(),
+        media_module.store().clone(),
+        statuses_module.relationship_query_registry(),
+    );
+
     let state = AppState::new(
         pool.clone(),
         runtime.clone(),
         config,
         actor_module.clone(),
         oauth_module,
+        federation_module,
+        media_module,
+        accounts_module,
+        statuses_module,
+        social_graph_module,
+        timelines_module,
+        notification_module,
+        search_module,
     );
     let router = server::build_router(state.clone());
 

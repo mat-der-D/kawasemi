@@ -45,10 +45,10 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::FromRef;
+use axum::extract::{DefaultBodyLimit, FromRef};
 use axum::http::{Request, Response, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
@@ -56,14 +56,48 @@ use tokio::sync::oneshot;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
+use crate::accounts::{self, AccountsEndpointsState};
+use crate::actor::ActorDirectory;
 use crate::api::ratelimit::{RateLimitPolicy, rate_limit_layer};
 use crate::config::ServerConfig;
+use crate::federation::signatures::ReqwestFederationHttpClient;
+use crate::federation::{
+    ApGetState, ConcreteBlockPolicy, ConcreteReceivedActivityStore, ConcreteVerifier, InboxState,
+    NodeInfoState, OutboxState, WebfingerState, actor_get, actor_inbox, nodeinfo_discovery,
+    nodeinfo_document, object_get, outbox_get, shared_inbox, webfinger,
+};
+use crate::media::{self, LocalFsStore, MediaEndpointsState};
+use crate::notifications::endpoints::{
+    self as notifications_endpoints, NOTIFICATION_DISMISS_PATH, NOTIFICATION_SHOW_PATH,
+    NOTIFICATIONS_CLEAR_PATH, NOTIFICATIONS_LIST_PATH, NotificationEndpointsState,
+};
 use crate::oauth::apps_endpoint::{self, AppsEndpointState};
 use crate::oauth::authorize_endpoint::{self, AuthorizeEndpointState};
 use crate::oauth::middleware::AuthState;
 use crate::oauth::token_endpoint::{self, TokenEndpointState};
+use crate::search::endpoint::{self as search_endpoint, SEARCH_PATH, SearchEndpointsState};
+use crate::search::pg_backend::PgSearchBackend;
+use crate::social_graph::activity_builder::PgRemoteActorLookup;
+use crate::social_graph::endpoints as social_graph_endpoints;
+use crate::social_graph::{
+    ConcreteHttpSink as SgConcreteHttpSink, ConcreteLocalSink as SgConcreteLocalSink,
+};
 use crate::state::AppState;
+use crate::statuses::endpoints::{
+    self, BOOKMARKS_PATH, POLL_PATH, POLL_VOTES_PATH, STATUS_BOOKMARK_PATH, STATUS_CONTEXT_PATH,
+    STATUS_FAVOURITE_PATH, STATUS_HISTORY_PATH, STATUS_PATH, STATUS_PIN_PATH, STATUS_REBLOG_PATH,
+    STATUS_SOURCE_PATH, STATUS_UNBOOKMARK_PATH, STATUS_UNFAVOURITE_PATH, STATUS_UNPIN_PATH,
+    STATUS_UNREBLOG_PATH, STATUSES_PATH,
+};
+use crate::statuses::visibility::RelationshipQueryRegistry;
+use crate::statuses::{
+    ConcreteHttpSink, ConcreteLocalSink, ConcreteStatusesEndpointsState, ProdRemoteActorResolver,
+};
 use crate::telemetry;
+use crate::timelines::endpoints::{
+    self as timelines_endpoints, HOME_TIMELINE_PATH, PUBLIC_TIMELINE_PATH, TAG_TIMELINE_PATH,
+    TimelineEndpointsState,
+};
 
 /// `POST /api/v1/apps` / `GET /api/v1/apps/verify_credentials` path
 /// (design.md's API Contract table, api-foundation task 5.1).
@@ -74,6 +108,70 @@ const AUTHORIZE_PATH: &str = "/oauth/authorize";
 /// `POST /oauth/token` / `POST /oauth/revoke` paths (task 5.3).
 const TOKEN_PATH: &str = "/oauth/token";
 const REVOKE_PATH: &str = "/oauth/revoke";
+
+/// federation-core's URL shapes (task 5.4, `_Boundary: FederationModule,
+/// Bootstrap, AppState, Config_`), matching `crate::federation::urls::ActorUrls`'s
+/// own literal path convention verbatim (`urls.rs`'s own doc comment:
+/// "actor: `https://{domain}/users/{handle}`", "inbox: `{actor_url}/inbox`",
+/// "shared inbox: `https://{domain}/inbox`", "outbox: `{actor_url}/outbox`")
+/// — every one of these constants must keep matching that module's own
+/// construction exactly, since a sender's HTTP Signature covers the URL
+/// `ActorUrls` builds, and a mismatch here would make every inbound
+/// signature verification fail on a URL the sender never actually signed.
+const WEBFINGER_PATH: &str = "/.well-known/webfinger";
+const NODEINFO_DISCOVERY_PATH: &str = "/.well-known/nodeinfo";
+const NODEINFO_DOCUMENT_PATH: &str = "/nodeinfo/{version}";
+const ACTOR_PATH: &str = "/users/{handle}";
+const ACTOR_INBOX_PATH: &str = "/users/{handle}/inbox";
+const ACTOR_OUTBOX_PATH: &str = "/users/{handle}/outbox";
+const SHARED_INBOX_PATH: &str = "/inbox";
+/// Catch-all GET route [`object_get`] is mounted on, for every local
+/// object/collection URL that is not an actor URL (Requirement 6.2).
+/// `ActorUrls::object_url`'s own `ObjectKind` is a deliberately open-ended,
+/// caller-supplied path segment (`urls.rs`'s own doc comment: "extensible by
+/// construction at any later call site, never by editing this type again"),
+/// so no fixed set of literal routes can enumerate every kind a not-yet-written
+/// downstream spec might register an `ObjectDocumentProvider` for. A single
+/// wildcard route is therefore the only mount point that can serve every
+/// current and future object/collection kind without this task guessing at
+/// kinds that do not exist yet. axum's router prefers a more specific
+/// static/named-param match over a wildcard one (`ACTOR_PATH`/`ACTOR_OUTBOX_PATH`/
+/// etc. all win over this route for the paths they cover), so this does not
+/// shadow any of the other GET routes mounted below.
+const OBJECT_CATCH_ALL_PATH: &str = "/{*path}";
+
+/// media-pipeline's three endpoints (task 5.2, `_Boundary: MediaModule
+/// wiring_`, design.md's API Contract table): `POST /api/v2/media` (upload),
+/// `GET`/`PUT /api/v1/media/{id}` (poll/update).
+const MEDIA_UPLOAD_PATH: &str = "/api/v2/media";
+const MEDIA_ITEM_PATH: &str = "/api/v1/media/{id}";
+
+/// accounts-and-instance's route paths (task 1.4, `_Boundary: AccountsModule_`,
+/// design.md's `AccountsModule（wiring）`/`AccountsEndpoints` API Contract
+/// tables, verbatim): mounted here with task 1.4's placeholder handlers
+/// through task 5; as of task 6 (`_Boundary: AccountsEndpoints,
+/// AccountsModule_`) [`accounts_router`] mounts the real handlers from
+/// `crate::accounts::endpoints` instead — see that module's doc comment for
+/// every wire-shape judgment call.
+const ACCOUNTS_VERIFY_CREDENTIALS_PATH: &str = "/api/v1/accounts/verify_credentials";
+const ACCOUNTS_RELATIONSHIPS_PATH: &str = "/api/v1/accounts/relationships";
+const ACCOUNTS_UPDATE_CREDENTIALS_PATH: &str = "/api/v1/accounts/update_credentials";
+const ACCOUNTS_SHOW_PATH: &str = "/api/v1/accounts/{id}";
+const ACCOUNTS_STATUSES_PATH: &str = "/api/v1/accounts/{id}/statuses";
+const INSTANCE_V2_PATH: &str = "/api/v2/instance";
+const CUSTOM_EMOJIS_PATH: &str = "/api/v1/custom_emojis";
+
+/// social-graph's route group paths (task 5.2, design.md's `SocialGraphEndpoints`
+/// API Contract table, `src/social_graph/endpoints.rs`'s own doc comment).
+const SG_FOLLOW_PATH: &str = "/api/v1/accounts/{id}/follow";
+const SG_UNFOLLOW_PATH: &str = "/api/v1/accounts/{id}/unfollow";
+const SG_FOLLOW_REQUESTS_PATH: &str = "/api/v1/follow_requests";
+const SG_FOLLOW_REQUEST_AUTHORIZE_PATH: &str = "/api/v1/follow_requests/{id}/authorize";
+const SG_FOLLOW_REQUEST_REJECT_PATH: &str = "/api/v1/follow_requests/{id}/reject";
+const SG_MUTE_PATH: &str = "/api/v1/accounts/{id}/mute";
+const SG_UNMUTE_PATH: &str = "/api/v1/accounts/{id}/unmute";
+const SG_BLOCK_PATH: &str = "/api/v1/accounts/{id}/block";
+const SG_UNBLOCK_PATH: &str = "/api/v1/accounts/{id}/unblock";
 
 /// Rate-limit policy applied to the whole router (task 7.1, api-foundation
 /// Requirements 8.1-8.4): a single-owner deployment ("一人鯖前提") has
@@ -143,6 +241,324 @@ impl FromRef<AppState> for TokenEndpointState {
     }
 }
 
+/// Bridges `AppState` to [`WebfingerState`] (task 5.4), mirroring
+/// [`AppsEndpointState`]'s own `FromRef` bridge above.
+impl FromRef<AppState> for WebfingerState {
+    fn from_ref(state: &AppState) -> Self {
+        state.federation().webfinger_state()
+    }
+}
+
+/// Bridges `AppState` to [`NodeInfoState`] (task 5.4).
+impl FromRef<AppState> for NodeInfoState {
+    fn from_ref(state: &AppState) -> Self {
+        state.federation().nodeinfo_state()
+    }
+}
+
+/// Bridges `AppState` to [`ApGetState<ConcreteVerifier>`] (task 5.4). See
+/// `crate::federation::module`'s own doc comment ("One concrete type per
+/// non-`dyn`-safe trait") for why [`ConcreteVerifier`] specifically, and why
+/// this instantiation (not a generic `impl<V> FromRef<AppState> for
+/// ApGetState<V>`) is the one this crate mounts.
+impl FromRef<AppState> for ApGetState<ConcreteVerifier> {
+    fn from_ref(state: &AppState) -> Self {
+        state.federation().ap_get_state()
+    }
+}
+
+/// Bridges `AppState` to [`OutboxState`] (task 5.4).
+impl FromRef<AppState> for OutboxState {
+    fn from_ref(state: &AppState) -> Self {
+        state.federation().outbox_state()
+    }
+}
+
+/// Bridges `AppState` to [`InboxState<ConcreteVerifier, ConcreteBlockPolicy,
+/// ConcreteReceivedActivityStore>`] (task 5.4). Same concrete-type-choice
+/// reasoning as [`ApGetState<ConcreteVerifier>`]'s bridge above.
+impl FromRef<AppState>
+    for InboxState<ConcreteVerifier, ConcreteBlockPolicy, ConcreteReceivedActivityStore>
+{
+    fn from_ref(state: &AppState) -> Self {
+        state.federation().inbox_state()
+    }
+}
+
+/// Bridges `AppState` to [`MediaEndpointsState<LocalFsStore>`] (task 5.2,
+/// `_Boundary: MediaModule wiring_`), mirroring [`AppsEndpointState`]'s own
+/// `FromRef` bridge above. `LocalFsStore` is the one concrete `MediaStore`
+/// this instance mounts every media endpoint with — see
+/// `crate::media::MediaModule`'s own doc comment.
+impl FromRef<AppState> for MediaEndpointsState<LocalFsStore> {
+    fn from_ref(state: &AppState) -> Self {
+        MediaEndpointsState {
+            media_service: state.media().service(),
+            store: state.media().store().clone(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
+/// Bridges `AppState` to [`AccountsEndpointsState`] (task 6, `_Boundary:
+/// AccountsEndpoints, AccountsModule_`), mirroring
+/// [`MediaEndpointsState<LocalFsStore>`]'s own `FromRef` bridge immediately
+/// above: `AppState::accounts()`'s already-built `AccountService`/
+/// `InstanceService`/`CustomEmojiService` handles (tasks 5.1/5.5/5.6) are
+/// `Arc` clones, never freshly constructed here.
+impl FromRef<AppState> for AccountsEndpointsState {
+    fn from_ref(state: &AppState) -> Self {
+        AccountsEndpointsState {
+            service: state.accounts().service(),
+            instance: state.accounts().instance(),
+            emojis: state.accounts().emojis(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
+/// Bridges `AppState` to [`ConcreteStatusesEndpointsState`] (task 7.2,
+/// `_Boundary: StatusesModule, server, bootstrap, config_`), mirroring
+/// [`AccountsEndpointsState`]'s own `FromRef` bridge immediately above:
+/// `AppState::statuses()`'s already-built `StatusService`/
+/// `InteractionService`/`PollService` handles (task 7.2's own
+/// `StatusesModule`) are `Arc` clones, never freshly constructed here.
+/// `pool`/`runtime` are cloned the same way `MediaEndpointsState`'s own
+/// bridge clones `store` — this endpoint-state bundle needs direct pool
+/// access for its own `Status -> StatusRenderInput` assembly glue
+/// (`endpoints.rs`'s own doc comment).
+impl FromRef<AppState> for ConcreteStatusesEndpointsState {
+    fn from_ref(state: &AppState) -> Self {
+        ConcreteStatusesEndpointsState {
+            status_service: state.statuses().status_service(),
+            interaction_service: state.statuses().interaction_service(),
+            poll_service: state.statuses().poll_service(),
+            accounts: state.accounts().service(),
+            media_store: state.media().store().clone(),
+            pool: state.pool().clone(),
+            runtime: state.runtime().clone(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
+/// Names social-graph's endpoint handlers' own five generic type parameters
+/// (`AL, AR, D, LS, HS`) with this instance's one concrete instantiation
+/// (`crate::social_graph::ConcreteSocialGraphEndpointsState`'s identical
+/// type argument list) — mirrors [`SA`]/[`SD`]/[`SL`]/[`SH`]/[`SR`]/[`SM`]'s
+/// identical rationale for [`statuses_router`], below.
+type SgAl = ActorDirectory;
+type SgAr = PgRemoteActorLookup;
+type SgD = ActorDirectory;
+type SgLs = SgConcreteLocalSink;
+type SgHs = SgConcreteHttpSink;
+
+/// Bridges `AppState` to
+/// [`crate::social_graph::ConcreteSocialGraphEndpointsState`] (task 5.2,
+/// `_Boundary: SocialGraphModule_`), mirroring
+/// [`ConcreteStatusesEndpointsState`]'s own `FromRef` bridge immediately
+/// above: `AppState::social_graph()`'s already-built `FollowService`/
+/// `FollowRequestService`/`MuteService`/`BlockService` handles (task 5.2's
+/// own `SocialGraphModule`) are `Arc` clones, never freshly constructed
+/// here.
+impl FromRef<AppState> for crate::social_graph::ConcreteSocialGraphEndpointsState {
+    fn from_ref(state: &AppState) -> Self {
+        crate::social_graph::ConcreteSocialGraphEndpointsState {
+            follow: state.social_graph().follow(),
+            follow_requests: state.social_graph().follow_requests(),
+            mute: state.social_graph().mute(),
+            block: state.social_graph().block(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
+/// Bridges `AppState` to [`TimelineEndpointsState`] (task 5.2, `_Boundary:
+/// TimelinesModule, server, bootstrap, state_`), mirroring
+/// [`ConcreteSocialGraphEndpointsState`]'s own `FromRef` bridge immediately
+/// above: `AppState::timelines()`'s already-built `TimelineService` handle
+/// (task 5.2's own `TimelinesModule`) is an `Arc` clone, never freshly
+/// constructed here.
+impl FromRef<AppState> for TimelineEndpointsState {
+    fn from_ref(state: &AppState) -> Self {
+        TimelineEndpointsState {
+            service: state.timelines().service(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
+/// Bridges `AppState` to [`NotificationEndpointsState`] (task 4.2,
+/// `_Boundary: NotificationModule_`), mirroring
+/// [`ConcreteStatusesEndpointsState`]'s own `FromRef` bridge above:
+/// `AppState::notifications()`'s already-built `NotificationService` handle
+/// (task 4.2's own `NotificationModule`) is an `Arc` clone, never freshly
+/// constructed here. `actor_directory`/`pool` are the two collaborators
+/// `resolve_account_id_filter` (task 4.1) needs for its own `account_id`
+/// resolution — drawn from `AppState::actor()`/`AppState::pool()` directly,
+/// the same already-existing accessors every other bridge above already
+/// reuses, rather than duplicating either handle inside
+/// `NotificationModule` itself.
+impl FromRef<AppState> for NotificationEndpointsState {
+    fn from_ref(state: &AppState) -> Self {
+        NotificationEndpointsState {
+            service: state.notifications().service(),
+            actor_directory: state.actor().directory().clone(),
+            pool: state.pool().clone(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
+/// Names [`search_endpoint::search`]'s own four generic type parameters
+/// (`B, H, R, M`) with this instance's one concrete instantiation
+/// (`crate::search::SearchModule`'s own `ProdSearchService` alias, see that
+/// module's own doc comment for why this is resolved to exactly one
+/// concrete type at the composition root), mirroring [`SA`]/[`SD`]/[`SL`]/
+/// [`SH`]/[`SR`]/[`SM`]'s identical rationale for [`statuses_router`], above.
+type SeB = PgSearchBackend;
+type SeH = ReqwestFederationHttpClient;
+type SeR = ProdRemoteActorResolver;
+type SeM = ActorDirectory;
+
+/// Bridges `AppState` to
+/// [`SearchEndpointsState<SeB, SeH, SeR, SeM>`] (task 5.3, `_Boundary:
+/// SearchModule, Bootstrap, AppState, Server_`), mirroring
+/// [`NotificationEndpointsState`]'s own `FromRef` bridge immediately above:
+/// `AppState::search()`'s already-built `SearchService` handle (task 5.3's
+/// own `SearchModule`) is an `Arc` clone, never freshly constructed here.
+impl FromRef<AppState> for SearchEndpointsState<SeB, SeH, SeR, SeM> {
+    fn from_ref(state: &AppState) -> Self {
+        SearchEndpointsState {
+            search_service: state.search().search_service(),
+            auth: AuthState::from_ref(state),
+        }
+    }
+}
+
+/// social-graph's route group (task 5.2, `_Boundary: SocialGraphModule_`,
+/// design.md's `SocialGraphEndpoints` API Contract table): every
+/// follow/follow_requests/mute/block path `src/social_graph/endpoints.rs`
+/// (task 5.1) implements, mounted onto its nine real handlers monomorphized
+/// over this instance's one concrete type argument list ([`SgAl`]/[`SgAr`]/
+/// [`SgD`]/[`SgLs`]/[`SgHs`], above). Kept as a separate `.merge()`-able
+/// group mirroring [`accounts_router`]/[`statuses_router`]'s own precedent —
+/// no real per-instance config is needed to build it either.
+fn social_graph_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            SG_FOLLOW_PATH,
+            post(social_graph_endpoints::follow::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_UNFOLLOW_PATH,
+            post(social_graph_endpoints::unfollow::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_FOLLOW_REQUESTS_PATH,
+            get(social_graph_endpoints::list_follow_requests::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_FOLLOW_REQUEST_AUTHORIZE_PATH,
+            post(social_graph_endpoints::authorize_follow_request::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_FOLLOW_REQUEST_REJECT_PATH,
+            post(social_graph_endpoints::reject_follow_request::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_MUTE_PATH,
+            post(social_graph_endpoints::mute::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_UNMUTE_PATH,
+            post(social_graph_endpoints::unmute::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_BLOCK_PATH,
+            post(social_graph_endpoints::block::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+        .route(
+            SG_UNBLOCK_PATH,
+            post(social_graph_endpoints::unblock::<SgAl, SgAr, SgD, SgLs, SgHs>),
+        )
+}
+
+/// timelines's route group (task 5.2, `_Boundary: TimelinesModule, server,
+/// bootstrap, state_`, design.md's `TimelineEndpoints` API Contract table):
+/// home/public(local)/tag, mounted onto the three real handlers task 5.1's
+/// `src/timelines/endpoints.rs` implements. Kept as a separate `.merge()`-able
+/// group mirroring [`social_graph_router`]/[`statuses_router`]'s own
+/// precedent — task 5.1's own Implementation Note explicitly directs this
+/// (`endpoints.rs` deliberately defines no `router()` function of its own,
+/// following `social_graph::endpoints`'s identical precedent, so this
+/// function is the one place `HOME_TIMELINE_PATH`/`PUBLIC_TIMELINE_PATH`/
+/// `TAG_TIMELINE_PATH` are actually mounted). No real per-instance config is
+/// needed to build it either.
+fn timelines_router() -> Router<AppState> {
+    Router::new()
+        .route(HOME_TIMELINE_PATH, get(timelines_endpoints::home_timeline))
+        .route(
+            PUBLIC_TIMELINE_PATH,
+            get(timelines_endpoints::public_timeline),
+        )
+        .route(TAG_TIMELINE_PATH, get(timelines_endpoints::tag_timeline))
+}
+
+/// notifications's route group (task 4.2, `_Boundary: NotificationModule_`,
+/// design.md's `NotificationEndpoints` API Contract table): every
+/// list/show/clear/dismiss path task 4.1's `src/notifications/endpoints.rs`
+/// implements, mounted onto its four real handlers. Kept as a separate
+/// `.merge()`-able group mirroring [`timelines_router`]/
+/// [`social_graph_router`]'s own precedent — `endpoints.rs`'s own doc
+/// comment ("Not wired into the module tree yet") explicitly directs this,
+/// and (mirroring `timelines_router`'s/`social_graph_router`'s own "no
+/// per-route rate-limit layer" precedent) applies no rate-limit layer of its
+/// own — [`build_router`]'s single, crate-wide [`rate_limit_layer`] already
+/// covers every route merged here automatically (Requirement 9.4, per
+/// `endpoints.rs`'s own doc comment, "Rate-limiting: no per-route layer
+/// here").
+fn notifications_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            NOTIFICATIONS_LIST_PATH,
+            get(notifications_endpoints::list_notifications),
+        )
+        .route(
+            NOTIFICATION_SHOW_PATH,
+            get(notifications_endpoints::show_notification),
+        )
+        .route(
+            NOTIFICATIONS_CLEAR_PATH,
+            post(notifications_endpoints::clear_notifications),
+        )
+        .route(
+            NOTIFICATION_DISMISS_PATH,
+            post(notifications_endpoints::dismiss_notification),
+        )
+}
+
+/// search's route (task 5.3, `_Boundary: SearchModule, Bootstrap, AppState,
+/// Server_`, design.md's API Contract table): `GET /api/v2/search`, mounted
+/// onto the real handler task 5.2's `src/search/endpoint.rs` implements
+/// (that module's own doc comment: "No `pub fn router(...)` in this
+/// module... task 5.3 ... is unblocked to build `search_router()` there
+/// exactly the way it builds every other module's router"), monomorphized
+/// over this instance's one concrete type argument list ([`SeB`]/[`SeH`]/
+/// [`SeR`]/[`SeM`], above). Kept as a separate `.merge()`-able group
+/// mirroring [`notifications_router`]'s own precedent — no real
+/// per-instance config is needed to build it either, and (mirroring
+/// [`notifications_router`]'s own "no per-route rate-limit layer" precedent)
+/// applies no rate-limit layer of its own: [`build_router`]'s single,
+/// crate-wide [`rate_limit_layer`] already covers every route merged here
+/// automatically (Requirement 9.4).
+fn search_router() -> Router<AppState> {
+    Router::new().route(
+        SEARCH_PATH,
+        get(search_endpoint::search::<SeB, SeH, SeR, SeM>),
+    )
+}
+
 /// Path of the minimal liveness route this task adds (Requirement 1.1).
 pub const HEALTH_PATH: &str = "/health";
 
@@ -156,6 +572,169 @@ struct HealthBody {
 
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, axum::Json(HealthBody { status: "ok" }))
+}
+
+/// media-pipeline's three endpoints (task 5.2), kept as a separate
+/// `.merge()`-able group rather than folded directly into [`router`] itself:
+/// mounting `upload_media` needs to size a [`DefaultBodyLimit`] layer from
+/// `AppConfig::media.max_upload_size_bytes`, a real runtime config value
+/// [`router`] never has access to (it is built before any concrete
+/// `AppState` exists; only [`build_router`] is, so this function is called
+/// from there instead). See `crate::media::endpoints`'s own doc comment
+/// ("CONCERN for task 5.2") for why this layer exists at all: axum's
+/// `Multipart` extractor applies its own hard-coded 2MB body-limit default
+/// unless a `DefaultBodyLimit` layer overrides it on the specific route the
+/// handler is mounted on (`MethodRouter::layer`, scoped to just this one
+/// route — not [`Router::layer`], which would apply to every route
+/// including unrelated ones), and that hard-coded default is smaller than
+/// this config's own default (10 MiB) — so a legitimate upload between
+/// those two sizes would otherwise be silently rejected by axum itself
+/// before `MediaService::accept_upload`'s own size validation ever ran
+/// (Requirements 1.1, 1.4).
+fn media_router(upload_body_limit: usize) -> Router<AppState> {
+    Router::new()
+        .route(
+            MEDIA_UPLOAD_PATH,
+            post(media::upload_media::<LocalFsStore>)
+                .layer(DefaultBodyLimit::max(upload_body_limit)),
+        )
+        .route(
+            MEDIA_ITEM_PATH,
+            get(media::show_media::<LocalFsStore>).put(media::update_media::<LocalFsStore>),
+        )
+}
+
+/// accounts-and-instance's route group (task 6, `_Boundary:
+/// AccountsEndpoints, AccountsModule_`, design.md's `AccountsEndpoints` API
+/// Contract table): every accounts/instance/custom_emojis path design.md
+/// names, mounted onto the real handlers from `crate::accounts::endpoints`
+/// (task 1.4's `accounts_not_implemented` `501` placeholders are gone —
+/// every route below now runs real business logic). Kept as a separate
+/// `.merge()`-able group mirroring [`media_router`]'s own precedent, even
+/// though (unlike `media_router`) no real per-instance config is needed to
+/// build it — this keeps the accounts-and-instance route set visually and
+/// structurally distinct from [`router`]'s own directly inlined routes.
+/// `verify_credentials`/`relationships`/`update_credentials` require Bearer
+/// plus the scope `crate::accounts::endpoints`'s own doc comment names for
+/// each (Requirement 10.1); `accounts/:id`/`accounts/:id/statuses`/
+/// `instance`/`custom_emojis` accept an absent token (Requirement 10.2).
+/// See `crate::accounts::endpoints`'s own doc comment for every wire-shape
+/// judgment call these handlers make.
+fn accounts_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            ACCOUNTS_VERIFY_CREDENTIALS_PATH,
+            get(accounts::verify_credentials),
+        )
+        .route(ACCOUNTS_RELATIONSHIPS_PATH, get(accounts::relationships))
+        .route(
+            ACCOUNTS_UPDATE_CREDENTIALS_PATH,
+            patch(accounts::update_credentials),
+        )
+        .route(ACCOUNTS_SHOW_PATH, get(accounts::show_account))
+        .route(ACCOUNTS_STATUSES_PATH, get(accounts::list_statuses))
+        .route(INSTANCE_V2_PATH, get(accounts::instance_v2))
+        .route(CUSTOM_EMOJIS_PATH, get(accounts::custom_emojis))
+}
+
+/// Names a statuses-core endpoint handler's own six generic type parameters
+/// (`A, D, L, H, R, M`) with this instance's one concrete instantiation
+/// (mirroring [`ConcreteStatusesEndpointsState`]'s identical type argument
+/// list), one short alias per slot, so [`statuses_router`]'s own explicit
+/// turbofish per handler (mirroring federation-core's own
+/// `actor_inbox::<ConcreteVerifier, ConcreteBlockPolicy,
+/// ConcreteReceivedActivityStore>` precedent, see [`router`]) stays readable
+/// rather than repeating the fully-qualified six-argument list 18 times.
+///
+/// (A `macro_rules!` shorthand gluing `::<...>` directly onto a captured
+/// `$f:path` fragment was tried first and rejected: rustc's macro fragment
+/// sealing rejects appending a turbofish to a substituted `path`/`ident`
+/// fragment inside another macro-like call position such as `post(...)`
+/// — "macro expansion ignores `::` and any tokens following". Plain type
+/// aliases sidestep that entirely.)
+type SA = ActorDirectory;
+type SD = ActorDirectory;
+type SL = ConcreteLocalSink;
+type SH = ConcreteHttpSink;
+type SR = RelationshipQueryRegistry;
+type SM = ActorDirectory;
+
+/// statuses-core's route group (task 7.2, `_Boundary: StatusesModule,
+/// server, bootstrap, config_`, design.md's API Contract table for
+/// `StatusEndpoints`, task 7.1): every statuses/reblog/favourite/bookmark/
+/// pin/poll path task 7.1's `endpoints.rs` implements, mounted onto its 18
+/// real handlers monomorphized over this instance's one concrete type
+/// argument list (`SA`/`SD`/`SL`/`SH`/`SR`/`SM` above). Kept as a separate
+/// `.merge()`-able group mirroring [`accounts_router`]'s own precedent — no
+/// real per-instance config is needed to build it either.
+fn statuses_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            STATUSES_PATH,
+            post(endpoints::create_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_PATH,
+            get(endpoints::show_status::<SA, SD, SL, SH, SR, SM>)
+                .delete(endpoints::delete_status::<SA, SD, SL, SH, SR, SM>)
+                .put(endpoints::edit_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_HISTORY_PATH,
+            get(endpoints::status_history::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_SOURCE_PATH,
+            get(endpoints::status_source::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_CONTEXT_PATH,
+            get(endpoints::status_context::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_REBLOG_PATH,
+            post(endpoints::reblog_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_UNREBLOG_PATH,
+            post(endpoints::unreblog_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_FAVOURITE_PATH,
+            post(endpoints::favourite_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_UNFAVOURITE_PATH,
+            post(endpoints::unfavourite_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_BOOKMARK_PATH,
+            post(endpoints::bookmark_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_UNBOOKMARK_PATH,
+            post(endpoints::unbookmark_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_PIN_PATH,
+            post(endpoints::pin_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            STATUS_UNPIN_PATH,
+            post(endpoints::unpin_status::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            BOOKMARKS_PATH,
+            get(endpoints::list_bookmarks::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            POLL_PATH,
+            get(endpoints::show_poll::<SA, SD, SL, SH, SR, SM>),
+        )
+        .route(
+            POLL_VOTES_PATH,
+            post(endpoints::vote_poll::<SA, SD, SL, SH, SR, SM>),
+        )
 }
 
 /// Builds the foundation `Router<AppState>` (Requirement 1.1, and — as of
@@ -191,6 +770,24 @@ pub fn router() -> Router<AppState> {
         )
         .route(TOKEN_PATH, post(token_endpoint::exchange_token))
         .route(REVOKE_PATH, post(token_endpoint::revoke_token))
+        // federation-core (task 5.4): WebFinger, NodeInfo, ActivityPub
+        // actor/object/collection GET, outbox GET, per-actor and shared
+        // inbox POST — see `WEBFINGER_PATH`'s own doc comment for why every
+        // path constant here must match `ActorUrls`'s construction exactly.
+        .route(WEBFINGER_PATH, get(webfinger))
+        .route(NODEINFO_DISCOVERY_PATH, get(nodeinfo_discovery))
+        .route(NODEINFO_DOCUMENT_PATH, get(nodeinfo_document))
+        .route(ACTOR_PATH, get(actor_get::<ConcreteVerifier>))
+        .route(ACTOR_OUTBOX_PATH, get(outbox_get))
+        .route(
+            ACTOR_INBOX_PATH,
+            post(actor_inbox::<ConcreteVerifier, ConcreteBlockPolicy, ConcreteReceivedActivityStore>),
+        )
+        .route(
+            SHARED_INBOX_PATH,
+            post(shared_inbox::<ConcreteVerifier, ConcreteBlockPolicy, ConcreteReceivedActivityStore>),
+        )
+        .route(OBJECT_CATCH_ALL_PATH, get(object_get::<ConcreteVerifier>))
 }
 
 /// Builds the complete, ready-to-serve foundation router (Requirements 1.1,
@@ -219,8 +816,47 @@ pub fn router() -> Router<AppState> {
 pub fn build_router(state: AppState) -> Router {
     let span_state = state.clone();
     let rate_limit_clock = state.runtime().clock.clone();
+    let media_upload_body_limit = state.config().media.max_upload_size_bytes as usize;
 
     router()
+        // task 5.2: mounted here (not inside `router()`) precisely because
+        // sizing `DefaultBodyLimit` needs `state`'s own real config value —
+        // see `media_router`'s own doc comment. Merged before the
+        // rate-limit/`TraceLayer` layers below, so media responses get
+        // wrapped by both exactly the way every other endpoint on this
+        // router already is (Requirement 9.5).
+        .merge(media_router(media_upload_body_limit))
+        // task 1.4: merged the same way `media_router` is, immediately
+        // above — see `accounts_router`'s own doc comment for why no
+        // `state`-derived sizing (unlike `media_router`'s `DefaultBodyLimit`)
+        // is needed here.
+        .merge(accounts_router())
+        // task 7.2: merged the same way `accounts_router`/`media_router` are,
+        // immediately above — no `state`-derived sizing is needed here
+        // either.
+        .merge(statuses_router())
+        // task 5.2: merged the same way `statuses_router`/`accounts_router`/
+        // `media_router` are, immediately above — no `state`-derived sizing
+        // is needed here either.
+        .merge(social_graph_router())
+        // task 5.2: merged the same way `social_graph_router`/
+        // `statuses_router`/`accounts_router`/`media_router` are, immediately
+        // above — no `state`-derived sizing is needed here either.
+        .merge(timelines_router())
+        // task 4.2: merged the same way `timelines_router`/
+        // `social_graph_router`/`statuses_router`/`accounts_router`/
+        // `media_router` are, immediately above — no `state`-derived sizing
+        // is needed here either.
+        .merge(notifications_router())
+        // task 5.3: merged the same way `notifications_router`/
+        // `timelines_router`/`social_graph_router`/`statuses_router`/
+        // `accounts_router`/`media_router` are, immediately above — no
+        // `state`-derived sizing is needed here either. Merging `/api/v2/search`
+        // at this same point (before the rate-limit/`TraceLayer` layers
+        // below) is exactly what makes it inherit `X-RateLimit-*`/tracing
+        // the same way every other endpoint on this router already does
+        // (Requirement 9.4) — see `search_router`'s own doc comment.
+        .merge(search_router())
         .layer(rate_limit_layer(
             rate_limit_clock,
             RateLimitPolicy::new(RATE_LIMIT_PER_WINDOW, RATE_LIMIT_WINDOW),
@@ -293,7 +929,17 @@ impl std::error::Error for ServeError {
 /// [`tokio::signal::unix::SignalKind::terminate`]). Unix-only
 /// (`tokio::signal::unix`), consistent with this project's Linux-only
 /// deployment target.
-async fn os_shutdown_signal() {
+///
+/// `pub(crate)` (not private) as of task 5.2: `src/bootstrap.rs` passes this
+/// function directly as every resident `ProcessingWorker`'s own shutdown
+/// signal factory (`crate::media::MediaBackgroundWorkers::spawn`). This is
+/// safe to call more than once concurrently — `tokio::signal::ctrl_c`/
+/// `tokio::signal::unix::signal` both support any number of independent
+/// listeners for the same signal, each observing the same real OS event —
+/// so every worker and [`serve_with_shutdown`]'s own internal call below
+/// observe the identical shutdown trigger without needing a broadcast/watch
+/// channel to fan one call out to several tasks.
+pub(crate) async fn os_shutdown_signal() {
     let mut sigterm = signal(SignalKind::terminate())
         .expect("installing a SIGTERM handler must succeed on a supported Unix target");
     let ctrl_c = tokio::signal::ctrl_c();

@@ -166,6 +166,7 @@ statuses-core は kawasemi の Mastodon 互換 API における **投稿（Statu
 4. If 単一選択の投票へ複数選択肢が指定されたとき、または範囲外の選択肢インデックスが指定されたとき, then the Statuses Core shall 投票を拒否する。
 5. When 同一アクターが既に投票済みの投票へ再投票を要求したとき, the Statuses Core shall 重複した投票を記録しない。
 6. When 投票が記録されたとき, the Statuses Core shall 投票を表す正規 Activity を投票対象元アクターへ配送共通パス経由で配送する。
+7. When 投票付き投稿を配送するとき, the Statuses Core shall 生成する正規 Create Activity に投票データ（選択肢・締切・単一/複数選択）を連合ピアが解釈可能な形で埋め込む。（2026-07-29 追記: run-level `kiro-validate-impl` で発覚した要件ギャップ。13.1 実装（`StatusService::create_status`）はローカルの投票永続化のみを満たし、`StatusActivityBuilder::deliver_create` は素の `Note` を配送するため連合ピアには投票が見えない。当初の 13.1-13.6 はいずれもこの wire 形式を規定していなかった。）
 
 ### Requirement 14: 投稿関連の受信 Activity 処理
 

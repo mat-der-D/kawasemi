@@ -1,0 +1,20 @@
+{
+  "blocked_by": true,
+  "blocking": true,
+  "domain_blocking": true,
+  "endorsed": true,
+  "followed_by": true,
+  "following": true,
+  "id": "99",
+  "languages": [
+    "en",
+    "ja"
+  ],
+  "muting": true,
+  "muting_notifications": true,
+  "note": "a private note about this account",
+  "notifying": true,
+  "requested": true,
+  "requested_by": true,
+  "showing_reblogs": true
+}

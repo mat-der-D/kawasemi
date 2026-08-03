@@ -31,10 +31,18 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
+use crate::accounts::AccountsModule;
 use crate::actor::ActorModule;
 use crate::config::AppConfig;
+use crate::federation::FederationModule;
+use crate::media::MediaModule;
+use crate::notifications::NotificationModule;
 use crate::oauth::OauthModule;
 use crate::runtime::RuntimeContext;
+use crate::search::SearchModule;
+use crate::social_graph::SocialGraphModule;
+use crate::statuses::StatusesModule;
+use crate::timelines::TimelinesModule;
 
 /// The data `AppState` bundles, held behind a single `Arc` so cloning the
 /// outer handle is one atomic increment rather than a deep copy of any of
@@ -45,6 +53,61 @@ struct AppStateInner {
     config: AppConfig,
     actor: ActorModule,
     oauth: OauthModule,
+    /// federation-core's port bundle (task 5.4, Requirements 7.3, 10.1,
+    /// 11.1, 11.2): every federation-core port constructed with one
+    /// concrete production type, shared the same way `actor`/`oauth` are —
+    /// see `crate::federation::FederationModule`'s own doc comment.
+    federation: FederationModule,
+    /// media-pipeline's module bundle (task 5.2, Requirements 1.1, 4.1,
+    /// 9.5): the shared `MediaService`/`LocalFsStore` handle
+    /// `src/server.rs`'s mounted media endpoints derive their own state
+    /// from — see `crate::media::MediaModule`'s own doc comment.
+    media: MediaModule,
+    /// accounts-and-instance's Composition Root wiring skeleton (task 1.4,
+    /// Requirements 10.1, 10.5): the shared delegation-ports registry
+    /// (`AccountPortsRegistry`, task 1.3) a downstream spec
+    /// (statuses-core/social-graph) registers its own real provider into
+    /// after this instance is already live — see
+    /// `crate::accounts::AccountsModule`'s own doc comment.
+    accounts: AccountsModule,
+    /// statuses-core's module bundle (task 7.2, Requirements 4.3, 14.1): the
+    /// shared `StatusService`/`InteractionService`/`PollService` handles
+    /// `src/server.rs`'s `FromRef<AppState> for StatusesEndpointsState<...>`
+    /// bridge derives every mounted statuses/polls/bookmarks endpoint's own
+    /// state from — see `crate::statuses::StatusesModule`'s own doc comment.
+    statuses: StatusesModule,
+    /// social-graph's module bundle (task 5.2, Requirements 6.1, 7.1, 8.2,
+    /// 10.1): the shared `FollowService`/`FollowRequestService`/
+    /// `MuteService`/`BlockService` handles `src/server.rs`'s
+    /// `FromRef<AppState> for ConcreteSocialGraphEndpointsState` bridge
+    /// derives every mounted follow/follow_requests/mute/block endpoint's
+    /// own state from — see `crate::social_graph::SocialGraphModule`'s own
+    /// doc comment.
+    social_graph: SocialGraphModule,
+    /// timelines's module bundle (task 5.2, Requirements 8.1, 8.3): the
+    /// shared `TimelineService` handle `src/server.rs`'s `FromRef<AppState>
+    /// for crate::timelines::endpoints::TimelineEndpointsState` bridge
+    /// derives every mounted home/public/tag timeline endpoint's own state
+    /// from, and the `TimelineMatcher` public seam a downstream `streaming`
+    /// spec reuses via `AppState::timelines().matcher()` — see
+    /// `crate::timelines::TimelinesModule`'s own doc comment.
+    timelines: TimelinesModule,
+    /// notifications's module bundle (task 4.2, Requirements 5.4, 5.5,
+    /// 9.1): the shared `NotificationService` handle `src/server.rs`'s
+    /// `FromRef<AppState> for
+    /// crate::notifications::endpoints::NotificationEndpointsState` bridge
+    /// derives every mounted notification endpoint's own state from, and
+    /// the `NotificationPortsRegistry` public seam a downstream `streaming`/
+    /// `web-push` spec reuses via `AppState::notifications().ports()` to
+    /// register its own real `NotificationDeliverySink` implementation —
+    /// see `crate::notifications::NotificationModule`'s own doc comment.
+    notifications: NotificationModule,
+    /// search's module bundle (task 5.3, Requirements 7.3, 7.4, 8.1, 8.4,
+    /// 9.4): the shared `SearchService` handle `src/server.rs`'s
+    /// `FromRef<AppState> for crate::search::endpoint::SearchEndpointsState<..>`
+    /// bridge derives the mounted `GET /api/v2/search` endpoint's own state
+    /// from — see `crate::search::SearchModule`'s own doc comment.
+    search: SearchModule,
 }
 
 /// Immutable, cheaply-cloneable shared handle bundling the database
@@ -65,15 +128,44 @@ impl AppState {
     /// already-constructed runtime context, an already-validated config, an
     /// already-assembled actor-model service bundle, and an
     /// already-assembled OAuth service bundle (task 7.1, api-foundation's
-    /// `OauthModule`). Callers (the Bootstrap composition root, task 7.4/6.1
-    /// and 7.1) are responsible for constructing each of these first — this
+    /// `OauthModule`), an already-assembled federation-core port bundle, an
+    /// already-assembled media-pipeline module bundle (task 5.2), and an
+    /// already-assembled accounts-and-instance module bundle (task 1.4).
+    /// Callers (the Bootstrap composition root, task 7.4/6.1/7.1/5.2/1.4)
+    /// are responsible for constructing each of these first — this
     /// constructor only bundles them.
+    ///
+    /// ## `too_many_arguments`: inherent to this constructor's role, not a
+    /// smell to refactor away
+    /// `AppState::new` takes one positional argument per module bundle
+    /// because that *is* its job: this module is the Composition Root's
+    /// single bundling point (see the module doc comment above — "this
+    /// module does not construct its own dependencies"), and each
+    /// foundation/API spec (core-runtime, actor-model, api-foundation,
+    /// federation-core, media-pipeline, accounts-and-instance, ...) has
+    /// contributed exactly one more bundle here as it landed. That count is
+    /// expected to keep growing as later specs (statuses-core,
+    /// social-graph, timelines, notifications, search, per
+    /// `.kiro/steering/roadmap.md`) add their own module bundles the same
+    /// way — collapsing the parameters into a single params struct would
+    /// only relocate the field list, not remove the coupling this
+    /// constructor is supposed to express, so the lint is suppressed here
+    /// rather than worked around.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: PgPool,
         runtime: RuntimeContext,
         config: AppConfig,
         actor: ActorModule,
         oauth: OauthModule,
+        federation: FederationModule,
+        media: MediaModule,
+        accounts: AccountsModule,
+        statuses: StatusesModule,
+        social_graph: SocialGraphModule,
+        timelines: TimelinesModule,
+        notifications: NotificationModule,
+        search: SearchModule,
     ) -> Self {
         Self {
             inner: Arc::new(AppStateInner {
@@ -82,6 +174,14 @@ impl AppState {
                 config,
                 actor,
                 oauth,
+                federation,
+                media,
+                accounts,
+                statuses,
+                social_graph,
+                timelines,
+                notifications,
+                search,
             }),
         }
     }
@@ -127,5 +227,83 @@ impl AppState {
     /// through this accessor rather than each constructing their own.
     pub fn oauth(&self) -> &OauthModule {
         &self.inner.oauth
+    }
+
+    /// The shared federation-core port bundle (task 5.4, Requirements 7.3,
+    /// 10.1, 11.1, 11.2): `src/server.rs`'s `FromRef<AppState>` bridges for
+    /// every federation endpoint's own state type derive from this handle,
+    /// and downstream code (a later spec's own service layer) retrieves the
+    /// delivery service / registers into the object-document / outbox-source
+    /// registries through it — see `crate::federation::FederationModule`'s
+    /// own doc comment for the full downstream-registration surface.
+    pub fn federation(&self) -> &FederationModule {
+        &self.inner.federation
+    }
+
+    /// The shared media-pipeline module bundle (task 5.2, Requirements 1.1,
+    /// 4.1, 9.5): `src/server.rs`'s `FromRef<AppState> for
+    /// MediaEndpointsState<LocalFsStore>` bridge derives every mounted media
+    /// endpoint's own state from this handle, rather than each constructing
+    /// its own `MediaService`/`LocalFsStore`.
+    pub fn media(&self) -> &MediaModule {
+        &self.inner.media
+    }
+
+    /// The shared accounts-and-instance module bundle (task 1.4,
+    /// Requirements 10.1, 10.5): at this wiring-only stage, downstream code
+    /// reaches task 1.3's `AccountPortsRegistry` through
+    /// `state.accounts().ports()` to register a real delegation-port
+    /// implementation into the already-live registry — see
+    /// `crate::accounts::AccountsModule`'s own doc comment.
+    pub fn accounts(&self) -> &AccountsModule {
+        &self.inner.accounts
+    }
+
+    /// The shared statuses-core module bundle (task 7.2, Requirements 4.3,
+    /// 14.1): `src/server.rs`'s `FromRef<AppState> for
+    /// StatusesEndpointsState<...>` bridge derives every mounted statuses/
+    /// polls/bookmarks endpoint's own state from this handle.
+    pub fn statuses(&self) -> &StatusesModule {
+        &self.inner.statuses
+    }
+
+    /// The shared social-graph module bundle (task 5.2, Requirements 6.1,
+    /// 7.1, 8.2, 10.1): `src/server.rs`'s `FromRef<AppState> for
+    /// ConcreteSocialGraphEndpointsState` bridge derives every mounted
+    /// follow/follow_requests/mute/block endpoint's own state from this
+    /// handle.
+    pub fn social_graph(&self) -> &SocialGraphModule {
+        &self.inner.social_graph
+    }
+
+    /// The shared timelines module bundle (task 5.2, Requirements 8.1, 8.3):
+    /// `src/server.rs`'s `FromRef<AppState> for
+    /// crate::timelines::endpoints::TimelineEndpointsState` bridge derives
+    /// every mounted home/public/tag timeline endpoint's own state from this
+    /// handle, and a downstream `streaming` spec reaches the
+    /// `TimelineMatcher` public seam through
+    /// `state.timelines().matcher()`.
+    pub fn timelines(&self) -> &TimelinesModule {
+        &self.inner.timelines
+    }
+
+    /// The shared notifications module bundle (task 4.2, Requirements 5.4,
+    /// 5.5, 9.1): `src/server.rs`'s `FromRef<AppState> for
+    /// crate::notifications::endpoints::NotificationEndpointsState` bridge
+    /// derives every mounted notification endpoint's own state from this
+    /// handle, and a downstream `streaming`/`web-push` spec reaches the
+    /// `NotificationPortsRegistry` public seam through
+    /// `state.notifications().ports()` to register its own real
+    /// `NotificationDeliverySink` implementation.
+    pub fn notifications(&self) -> &NotificationModule {
+        &self.inner.notifications
+    }
+
+    /// The shared search module bundle (task 5.3, Requirements 7.3, 7.4,
+    /// 8.1, 8.4, 9.4): `src/server.rs`'s `FromRef<AppState> for
+    /// crate::search::endpoint::SearchEndpointsState<..>` bridge derives the
+    /// mounted `GET /api/v2/search` endpoint's own state from this handle.
+    pub fn search(&self) -> &SearchModule {
+        &self.inner.search
     }
 }

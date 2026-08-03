@@ -1,0 +1,7 @@
+{
+  "category": "cats",
+  "shortcode": "blobcat",
+  "static_url": "https://kawasemi.example/emoji/blobcat_static.png",
+  "url": "https://kawasemi.example/emoji/blobcat.png",
+  "visible_in_picker": true
+}

@@ -1,14 +1,14 @@
 # Implementation Plan
 
 - [ ] 1. 基盤: スキーマとドメイン型
-- [ ] 1.1 投稿コアのマイグレーションを追加する
+- [x] 1.1 投稿コアのマイグレーションを追加する
   - `migrations/0007_statuses.sql` に `statuses` / `status_edits` / `status_media` / `favourites` / `bookmarks` / `pins` / `polls` / `poll_options` / `poll_votes` / `status_idempotency_keys` に加えて、ハッシュタグ永続化用の `tags` / `status_tags`（投稿↔タグ関連付け）を作成し、一意制約・外部参照・インデックスを定義する
   - 操作の重複防止（fav/bookmark/pin は (actor_id, status_id) 一意、vote は (poll_id, actor_id, choice) 一意、冪等は (actor_id, idempotency_key) 一意、status_tags は (status_id, tag_id) 一意）を制約で担保する
   - 観測可能な完了: `sqlx migrate` がローカル DB で適用でき、全テーブル（tags / status_tags を含む）と一意制約・インデックスが作成される
   - research.md の「Migration Numbering Coordination」に従い、番号は 0007（core 連番：0008 は federation-core が所有）で確定
   - _Requirements: 1.1, 3.6, 5.1, 7.4, 9.3, 10.4, 11.1, 12.1, 13.1, 13.5_
   - _Boundary: 0007_statuses.sql_
-- [ ] 1.2 投稿ドメイン型を定義する
+- [x] 1.2 投稿ドメイン型を定義する
   - `Status` / `StatusEdit` / `Poll` / `PollOption` / `PollVote` / `IdempotencyRecord` / `Tag` 等を core-runtime の Id/時刻型の上に定義する。`Visibility` と `AccountRef` は再定義せず core-runtime の domain-primitives（正準所有）から import する
   - コア状態モデルに連合方言（引用・絵文字リアクション）フィールドを含めないことを型で保証する
   - 観測可能な完了: 各ドメイン型がコンパイルでき、`Visibility`（core-runtime import）が 4 値、ブースト（`reblog_of_id`）・返信（`in_reply_to_id`）・投票（`poll_id`）の関連が型で表現される
@@ -16,37 +16,37 @@
   - _Boundary: model_
 
 - [ ] 2. データ層（リポジトリ）
-- [ ] 2.1 (P) 投稿リポジトリを実装する
+- [x] 2.1 (P) 投稿リポジトリを実装する
   - 投稿の挿入・可視スコープ取得・祖先/子孫走査・編集適用と履歴保存・カウンタ原子更新に加え、`tags` / `status_tags` へのタグ関連付け永続化と、照会可能な読み取り境界（タグ→投稿・投稿→タグ）を実装する（timelines のタグタイムライン・search のハッシュタグインデックスが消費）
   - 削除は物理 FK `ON DELETE CASCADE` が扱わない自己参照 2 点を明示的に処理する: (a) 削除対象を `reblog_of_id` で参照するブースト行の明示的なカスケード削除、(b) 削除対象が返信（`in_reply_to_id` あり）であった場合の親投稿 `replies_count` の 1 減算。両者を同一トランザクションで行う
   - 観測可能な完了: 投稿を挿入し ID で取得でき、削除で当該投稿を参照するブースト行が消え・返信元の `replies_count` が 1 減り（他の関連行は FK CASCADE で整合し）、編集で `edited_at` が更新され履歴が `status_edits` に残り、タグ関連付けが永続化され read-only 照会できる（リポジトリ単体テストがグリーン）
   - _Requirements: 3.1, 3.5, 3.6, 6.1, 6.2, 7.1, 7.4, 8.1, 8.2_
   - _Boundary: StatusRepository, TagRepository_
-- [ ] 2.2 (P) 操作リポジトリを実装する
+- [x] 2.2 (P) 操作リポジトリを実装する
   - favourite/reblog/bookmark/pin の記録・取消・存在判定・ブックマーク一覧（作成順カーソル）を実装し、重複は一意制約で防ぐ
   - 観測可能な完了: 同一 (actor, status) への二重登録が抑止され、ブックマーク一覧がブックマーク固有カーソルで取得できる（リポジトリ単体テストがグリーン）
   - _Requirements: 9.1, 9.3, 9.4, 10.1, 10.3, 10.4, 11.1, 11.2, 11.3, 12.1, 12.2_
   - _Boundary: InteractionRepository_
-- [ ] 2.3 (P) 投票リポジトリと冪等ストアを実装する
+- [x] 2.3 (P) 投票リポジトリと冪等ストアを実装する
   - poll/option/vote の挿入・投票記録（締切/範囲/単複/重複の検証）・集計取得と、(actor_id, key) 一意の冪等記録・再送解決を実装する
   - 観測可能な完了: 締切後/範囲外/重複投票が拒否され集計が反映される、同一冪等キーの再送が記録済み status_id を返す（リポジトリ単体テストがグリーン）
   - _Requirements: 5.1, 5.2, 13.1, 13.2, 13.3, 13.4, 13.5_
   - _Boundary: PollRepository, IdempotencyStore_
 
 - [ ] 3. 可視性・addressing・シリアライズ
-- [ ] 3.1 (P) 可視性判定と関係シームの委譲ポートを実装する
+- [x] 3.1 (P) 可視性判定と関係シームの委譲ポートを実装する
   - 投稿が viewer から可視かを単一ロジックで判定し、取得・context・操作の可視性チェックで同一適用、未認証は公開のみ可視とする。`private` の可視判定は viewer が投稿者のフォロワーかどうか（`ViewerRelation`）を要する
   - 可視性判定・addressing 導出が必要とする関係シーム `RelationshipQuery`（viewer とのフォロー関係解決 `viewer_relation()`、`private`/`unlisted` 配送先フォロワー集合解決 `followers_of()`）の委譲ポート契約と既定実装（関係なし・空フォロワー）を定義する。social-graph 未配線でも安全側の結果（非フォロワー扱い・空フォロワー）で単独動作する
   - 観測可能な完了: public/unlisted/private/direct について可視/不可視が単一関数で判定され、未認証文脈で公開のみ可視になり、既定 `RelationshipQuery` 実装で `private` 判定が非フォロワー扱いになる（単体テストがグリーン）
   - _Requirements: 4.1, 6.1, 6.3, 6.4, 9.5, 12.4_
   - _Boundary: VisibilityPolicy, RelationshipQuery(port)_
-- [ ] 3.2 (P) addressing 導出を実装する
+- [x] 3.2 (P) addressing 導出を実装する
   - 可視性から `to`/`cc` と recipient 集合（公開コレクション・フォロワーコレクション・メンション宛）を導出する単一ロジックを実装する。`private`/`unlisted` の recipient 確定は `RelationshipQuery::followers_of` の解決結果をフォロワー配送先として実体化する
   - 観測可能な完了: 各可視性に対し決定的な `to`/`cc`/recipient が導出され、direct はメンション限定になり、既定 `RelationshipQuery`（空フォロワー）では private/unlisted のフォロワー配送先が空集合になる（単体テストがグリーン）
   - _Requirements: 4.1, 4.2_
   - _Boundary: Addressing_
   - _Depends: 3.1_
-- [ ] 3.3 (P) Status / Poll シリアライザと契約ゴールデンを実装する
+- [x] 3.3 (P) Status / Poll シリアライザと契約ゴールデンを実装する
   - Mastodon 互換 JSON（フィールド・null 規律・reblog ネスト・操作状態・`expired`/`voted`/`own_votes`）を出力し、Account/メディアは上流シリアライズへ委譲、方言フィールドを含めない
   - api-foundation 契約ハーネスへ Status / Poll ゴールデンを登録し決定的に再現可能にする
   - 観測可能な完了: 決定的 `RuntimeContext` 下で通常/reblog/編集済み/投票付きの Status と Poll のゴールデンが一致する（契約テストがグリーン）
@@ -54,7 +54,7 @@
   - _Boundary: StatusSerializer, PollSerializer_
 
 - [ ] 4. 連合橋渡し
-- [ ] 4.1 投稿 Activity ビルダと配送依頼を実装する
+- [x] 4.1 投稿 Activity ビルダと配送依頼を実装する
   - Create(Note)/Announce/Like/Delete/Update/Undo(Announce|Like) の正規 Activity を `JsonLdCodec`・`ActorUrls` で生成し、`Addressing` 由来の recipient を federation-core `DeliveryService::deliver` へ渡す
   - 投票は独自の `Vote` Activity type を持たないため生成せず、Mastodon 互換のデファクトワイヤ形 `Create{Note, name=<選択された選択肢のテキスト>}`（宛先＝投票対象 Poll を持つ Status の投稿者アクター）として生成する
   - 論理的に同一の正規 Activity を生成・検証してから配送手段のみを federation-core に分岐させる
@@ -64,19 +64,19 @@
   - _Depends: 3.2_
 
 - [ ] 5. サービス層
-- [ ] 5.1 投稿サービス（作成/取得/削除/編集/context）を実装する
+- [x] 5.1 投稿サービス（作成/取得/削除/編集/context）を実装する
   - 冪等確認→空投稿拒否→メディア所有検証→投票排他→言及/タグ/絵文字抽出→挿入→可視性/addressing 導出→配送依頼の作成フローと、取得/context の可視フィルタ、削除/編集の所有検証・配送、履歴/source 取得を実装する
   - 観測可能な完了: 投稿が作成され配送依頼が発行される、同一冪等キー再送が同一投稿を返す、不可視投稿は取得で 404 相当、削除/編集で Delete/Update が配送される（サービステストがグリーン）
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 5.1, 5.2, 5.3, 6.1, 6.2, 6.3, 6.4, 7.1, 7.2, 7.3, 7.4, 8.1, 8.2, 8.3, 8.4, 8.5_
   - _Boundary: StatusService_
   - _Depends: 2.1, 2.3, 3.1, 3.2, 4.1_
-- [ ] 5.2 (P) 操作サービス（reblog/fav/bookmark/pin）を実装する
+- [x] 5.2 (P) 操作サービス（reblog/fav/bookmark/pin）を実装する
   - 可視性チェック・重複防止・記録・カウンタ更新・連合配送（reblog=Announce/Undo、favourite=Like/Undo）を実装し、bookmark/pin はローカル状態のみ（非連合）、pin は所有検証と direct 拒否を行う
   - 観測可能な完了: reblog/favourite でカウンタが増減し Announce/Like が配送される、bookmark/pin は連合せず状態が反映される、direct 投稿の pin が拒否される（サービステストがグリーン）
   - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5, 10.1, 10.2, 10.3, 10.4, 11.1, 11.2, 11.3, 11.4, 12.1, 12.2, 12.3, 12.4_
   - _Boundary: InteractionService_
   - _Depends: 2.2, 3.1, 4.1_
-- [ ] 5.3 (P) 投票サービスを実装する
+- [x] 5.3 (P) 投票サービスを実装する
   - poll 取得・投票（締切/範囲/単複/重複検証）・集計反映・投票 Activity 配送を実装する
   - 観測可能な完了: 締切前の有効投票で集計が更新され投票 Activity が配送される、無効投票が拒否される（サービステストがグリーン）
   - _Requirements: 13.2, 13.3, 13.4, 13.5, 13.6_
@@ -84,7 +84,7 @@
   - _Depends: 2.3, 3.1, 4.1_
 
 - [ ] 6. 受信ハンドラ
-- [ ] 6.1 投稿関連受信ハンドラを実装し登録する
+- [x] 6.1 投稿関連受信ハンドラを実装し登録する
   - Create(Note)/Announce/Like/Delete/Update/Undo のハンドラを実装し、ローカル発生時と同一の状態遷移ロジックを呼び、未知方言プロパティは解釈せず継続する
   - 受信 `Create{Note, name=...}` が自ローカル Poll の投票ワイヤ形（`inReplyTo`/宛先が自ローカル所有かつ `poll_id` を持つ Status を指し、`name` が当該 Poll の選択肢テキストと一致する）と識別できる場合、`CreateNoteHandler` は通常の Note 取り込みではなく `name` を選択肢へ解決して `PollService` の投票記録へ分岐する
   - 各ハンドラを federation-core の `InboundActivityDispatcher` へ種別宣言付きで登録する。`Undo` は social-graph も登録するため、inner `object` 種別（Announce/Like）を検査し所有しないものは `HandleOutcome::Ignored` を返すファンアウト前提で実装する
@@ -92,7 +92,7 @@
   - _Requirements: 13.6, 14.1, 14.2, 14.3, 14.4, 14.5, 15.2, 15.3_
   - _Boundary: InboundHandlers_
   - _Depends: 2.1, 2.2, 2.3, 3.1, 5.3_
-- [ ] 6.2 リモート投稿取り込みエントリポイント（StatusIngestService）を実装する
+- [x] 6.2 リモート投稿取り込みエントリポイント（StatusIngestService）を実装する
   - 受信 Create(Note) 正規化パスを再利用し、ドキュメント/URL → Status の取り込みを受信 Activity ディスパッチの外（search の `RemoteResolver` 等）からも呼び出せる `StatusIngestService` として公開する
   - 観測可能な完了: URL/ドキュメント指定で Note が取得・正規化され Status として取り込まれる（単体/結合テストがグリーン）。受信ハンドラ経路と同一結果になる
   - _Requirements: 14.1, 14.2, 14.3_
@@ -100,13 +100,13 @@
   - _Depends: 6.1_
 
 - [ ] 7. エンドポイントと配線
-- [ ] 7.1 投稿/投票/ブックマークのエンドポイントを実装する
+- [x] 7.1 投稿/投票/ブックマークのエンドポイントを実装する
   - statuses（作成/取得/削除/編集/history/source/context）・reblog/fav/bookmark/pin・bookmarks 一覧・polls（取得/投票）の HTTP ハンドラを実装し、Bearer + 必要スコープ・`Idempotency-Key` 受理・Mastodon 互換エラー・ページネーション（Link）を適用する
   - 観測可能な完了: 各エンドポイントが正しい応答コード（200/401/403/404/422）とスコープ検証で動作し、ブックマーク一覧に Link ヘッダが付く（エンドポイント結合テストがグリーン）
   - _Requirements: 3.1, 3.2, 6.1, 7.1, 7.2, 8.1, 8.5, 9.1, 10.1, 11.1, 11.3, 12.1, 12.3, 12.4, 13.2_
   - _Boundary: StatusEndpoints_
   - _Depends: 5.1, 5.2, 5.3_
-- [ ] 7.2 モジュール配線と受信登録・設定を行う
+- [x] 7.2 モジュール配線と受信登録・設定を行う
   - `StatusesModule` を構築して各サービス/リポジトリを束ね、`StatusActivityBuilder` を `DeliveryService` に結線、受信ハンドラを `InboundActivityDispatcher` へ登録、ルータを土台へ装着、`AppState` に格納し、投稿関連の運用設定項目を追加する
   - 観測可能な完了: アプリ起動時に投稿/投票/ブックマークのルートが有効になり受信ハンドラが登録され、E2E で投稿作成から配送依頼まで一気通貫で動く
   - _Requirements: 4.3, 14.1_
@@ -114,19 +114,19 @@
   - _Depends: 6.1, 7.1_
 
 - [ ] 8. 検証
-- [ ] 8.1 統合テスト（CRUD・冪等・context・操作・投票）を整備する
+- [x] 8.1 統合テスト（CRUD・冪等・context・操作・投票）を整備する
   - 作成（CW/sensitive/メディア所有/返信/言語抽出）・空拒否・取得可視フィルタ・削除/編集所有検証・履歴/source、冪等再送、context 祖先子孫と不可視除外、reblog/fav/bookmark/pin の登録解除/重複防止/カウンタ/スコープ/一覧、投票の各拒否と集計を `spawn_test_app` 上で検証する
   - 観測可能な完了: 上記シナリオの統合テストが全てグリーンになる
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 5.1, 5.2, 5.3, 6.1, 6.2, 6.3, 6.4, 7.1, 7.2, 8.1, 8.2, 8.3, 8.5, 9.1, 9.3, 9.4, 10.1, 10.3, 10.4, 11.1, 11.2, 11.3, 11.4, 12.1, 12.2, 12.3, 12.4, 13.1, 13.2, 13.3, 13.4, 13.5_
   - _Boundary: StatusService, InteractionService, PollService, StatusEndpoints_
   - _Depends: 7.2_
-- [ ] 8.2 (P) 契約テスト（Status / Poll ゴールデン）を整備する
+- [x] 8.2 (P) 契約テスト（Status / Poll ゴールデン）を整備する
   - 決定的境界で通常/reblog/編集済み/投票付きの Status と Poll の JSON ゴールデンを固定し、null 規律・操作状態・`expired` を検証、実クライアントキャプチャをフィクスチャ登録する
   - 観測可能な完了: Status / Poll の契約ゴールデンテストがグリーンになり、再実行で同一 JSON が再現される
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.3, 2.4_
   - _Boundary: StatusSerializer, PollSerializer_
   - _Depends: 7.2_
-- [ ] 8.3 連合テスト（2 インスタンス・ローカル/HTTP 同値）を整備する
+- [x] 8.3 連合テスト（2 インスタンス・ローカル/HTTP 同値）を整備する
   - `spawn_federation_pair` で A→B の投稿/ブースト/お気に入り/削除/編集を往復させ受信反映を検証し、同一操作をローカル in-process 配送と HTTP 配送で実行して業務処理結果が同値であることを検証する（最重要リスク）
   - 観測可能な完了: 連合往復テストがグリーンになり、ローカル最適化パスと HTTP 連合パスの結果同値が担保される
   - _Requirements: 4.4, 4.5, 14.1, 14.2, 14.3, 14.4, 14.5_
@@ -134,16 +134,79 @@
   - _Depends: 7.2_
 
 - [ ] 9. 下流委譲シームと通知イベント
-- [ ] 9.1 accounts 委譲ポートの実装を供給する
+- [x] 9.1 accounts 委譲ポートの実装を供給する
   - accounts-and-instance が所有する `AccountStatusesProvider`（`GET /accounts/:id/statuses` 用の投稿ページ供給。可視性フィルタ適用）を実装し、`AccountCountsProvider` へ `statuses_count`（および `last_status_at`）を供給する。契約は再定義せず、bootstrap で既定実装（空ページ / 0）を本 spec の実装へ差し替える
   - 観測可能な完了: 配線後に `GET /accounts/:id/statuses` が投稿ページを返し、Account の `statuses_count` が実値になる（結合テストがグリーン）。未配線時は accounts の既定実装で安全に空/0
   - _Requirements: 6.1, 7.1_
   - _Boundary: AccountStatusesProviderImpl, AccountCountsContribution_
   - _Depends: 5.1, 7.2_
-- [ ] 9.2 通知イベント（NotificationEvent）を emit する
+- [x] 9.2 通知イベント（NotificationEvent）を emit する
   - notifications が所有する `NotificationEventSink`（既定 no-op）へ、favourite / reblog(Announce) / mention /（任意で）edit の状態遷移コミット後に冪等に `NotificationEvent` を emit する。イベント型/シンク契約は notifications 所有で再定義しない
   - poll-end は状態遷移コミットに紐づく能動トリガが本 spec・現行 federation-core に存在しない（締切到達を検知する遅延ジョブ機構が無い）ため MVP では emit しない。`expired` は `PollSerializer` の読み取り時判定（2.3）に留める
   - 観測可能な完了: favourite/reblog(Announce)/mention/(任意で)edit の各操作コミット後にシンクへ 1 度だけイベントが渡る（再送で重複しない）ことをテストで確認。既定 no-op のため notifications 未配線でも本 spec は成功する
   - _Requirements: 9.1, 9.2, 10.1, 13.2_
   - _Boundary: InteractionService, StatusService, PollService_
   - _Depends: 5.1, 5.2, 5.3_
+
+- [ ] 10. 既知ギャップの解消（run-level 検証での発見事項）
+- [x] 10.1 投票の連合 wire 形式を実装する
+  - `StatusActivityBuilder::deliver_create`（4.1）が生成する Create Activity に、投票付き投稿の場合は投票データ（選択肢・締切・単一/複数選択）を連合ピアが解釈可能な形（`Question` オブジェクト、`oneOf`/`anyOf`、`endTime`、`closed`）で埋め込む
+  - 観測可能な完了: 投票付き投稿を作成・配送したとき、送出される Create Activity の JSON に選択肢・締切・単一/複数選択の別が反映されていることを配送ペイロードを検証するテストで確認する
+  - _Requirements: 13.7_
+  - _Boundary: StatusActivityBuilder_
+  - _Depends: 4.1, 9.1 (投票の連合ではなく本 spec の 9.1 remediation — poll 永続化)_
+- [x] 10.2 リモート起点の interaction（favourite/reblog/mention）でも通知イベントを emit する
+  - `src/statuses/inbound_handlers.rs`（6.1）の `AnnounceHandler`/`LikeHandler`/`CreateNoteHandler` は `InteractionService`/`StatusService` を経由せずリポジトリ関数を直接呼ぶため、9.2 で追加した `NotificationEventSink` への emit が素通りされている。各ハンドラの状態遷移コミット後、9.2 と同じシンクへ同型の `NotificationEvent` を冪等に emit する
+  - 観測可能な完了: リモートアクターからの Announce/Like/メンション付き Create(Note) を受信したとき、対象がローカルアクターであればシンクへ 1 度だけイベントが渡ることをテストで確認する
+  - _Requirements: 9.1, 9.2, 10.1_
+  - _Boundary: InboundHandlers_
+  - _Depends: 6.1, 9.2_
+- [x] 10.3 リモート Create(Note) 取り込みで添付・メンションを反映する（要件14.2の未充足解消）
+  - `CreateNoteHandler`/`StatusIngestService`（6.1, 6.2）が呼ぶ `ingest_note_object` は返信・可視性は反映するが、添付（`status_media` 永続化）とメンション（メンション永続化）を反映していない。リモートメディアの取り込み経路（media-pipeline 側との連携）とメンション永続化を追加する
+  - 観測可能な完了: 添付・メンションを含むリモート Note を受信・取り込みしたとき、ローカルの Status がそれらを反映していることをテストで確認する
+  - _Requirements: 14.2_
+  - _Boundary: InboundHandlers, StatusIngestService_
+  - _Depends: 6.1, 6.2_
+- [x] 10.4 カスタム絵文字ショートコードを実データ化する
+  - `extract_content_tokens`（3.6, 5.1）が抽出するショートコードは現状どこにも解決されず、Status/Poll JSON の `emojis` は常に空配列。accounts-and-instance が所有する既存のカスタム絵文字ディレクトリ（`emoji_repository`/`emoji_service`）へショートコードを解決し、`emojis` フィールドへ反映する
+  - 観測可能な完了: 登録済みショートコードを含む投稿を作成したとき、レスポンス JSON の `emojis` に解決済みの絵文字情報が含まれることをテストで確認する
+  - _Requirements: 1.1, 3.6_
+  - _Boundary: StatusService, StatusSerializer_
+  - _Depends: 5.1, 3.3_
+- [x] 10.5 未テストのエンドポイント・組み合わせ経路のテストを追加する
+  - 7.1 で指摘済みの未テストハンドラ（`edit_status`/`status_history`/`status_source`/`status_context`/`unbookmark_status`/`unpin_status`）にエンドポイントレベルの専用テストを追加する。加えて、投票を含む投稿がメンションも同時に含む場合に 9.1 remediation の poll 作成ブロックと 9.2 のメンション通知 emit ブロックが正しく共存することを直接証明する結合テスト、および `GET /accounts/:id/statuses` が `create_status` 経由で作成された投票付き投稿を正しく描画することを証明する `account_statuses_provider_it.rs` 側のテストを追加する
+  - 観測可能な完了: 上記いずれの経路も、公開 API 経由の呼び出しを含む専用テストで観測可能な形で検証されている
+  - _Requirements: 6.2, 7.3, 7.4, 8.1, 8.2, 8.3, 8.4, 8.5, 11.2, 12.1, 12.2, 13.1, 9.1, 9.2, 6.1_
+  - _Boundary: StatusEndpoints_
+  - _Depends: 7.1, 9.1, 9.2_
+
+## Implementation Notes
+
+- 1.1/1.2: design.md 自体に自己矛盾があり、モデル抜粋（366行目）は `StatusEdit` に `id` を含めないが、Physical Data Model の SQL（716行目）は `status_edits.id BIGINT PRIMARY KEY` を含む。両タスクは design.md に忠実に実装したためこの矛盾をそのまま引き継いでいる。2.1（投稿リポジトリ、`status_edits` の永続化・履歴取得を含む）の実装者は、`StatusEdit` に `id` フィールドを追加するか `status_edits.id` を内部専用に留めるかを設計判断として解決すること。
+- 2.1: 上記の矛盾は `StatusEdit` に `id: Id` を追加する形で解決した（`status_edits.id` に DB 側デフォルトが無く、本クレートの「id は呼び出し側が `RuntimeContext::ids` で採番し、リポジトリ側では採番しない」規約に合わせるため）。`apply_edit` は同一の `edit: &StatusEdit` 引数で「投稿行へ適用する新内容」と「履歴行の採番済み PK」を兼務する点に注意（詳細は `status_repository.rs` のモジュールdocコメント参照）。また `find_visible`/`ancestors`/`descendants` は未実装の `VisibilityPolicy`（task 3.1）に依存せず、自己完結の fail-closed 可視性規則（public/unlisted は誰でも可視、private/direct は投稿者本人のみ）で暫定実装した。これは完全な可視性ロジックの厳密な部分集合（過剰に見せることはない）であり、3.1 実装時に置き換えが必要。
+- 2.2: reblog は `favourites`/`bookmarks`/`pins` と異なり専用テーブルを持たず（migrations/0007_statuses.sql の設計どおり）、記録/取消は task 2.1 の `StatusRepository`（`reblog_of_id` 付き `statuses` 行の insert/delete）が担う。`InteractionRepository` はブースト重複判定用の読み取り専用 `find_reblog` のみを持つ。design.md の Service Interface 素案が省略していた `now`/`id`（`bookmarks.id` に DB 側デフォルトが無いため）・`remove_bookmark`・`exists_*` は 2.1 の「id/時刻は呼び出し側採番」規約と要件（1.2 のアクター状態反映、11.2）を満たすため追加した。行マッピングは `status_repository.rs` の非公開ヘルパーを流用せず（境界外のため）小さく複製している。
+- 2.3: `poll_votes` の実 PK は `(poll_id, actor_id, choice)` であり `(poll_id, actor_id)` ではないため、レビュー1周目で `record_vote` の重複投票チェック（SELECT EXISTS→INSERT、ロック無し）に TOCTOU レースが指摘された（同一アクターの同時リクエストが両方 `already_voted` チェックを通過し二重記録され得る）。修正として `polls` 行取得に `FOR UPDATE` を追加し、同一トランザクション内でチェックと INSERT を同じロックスコープに収めて解消（同一 poll の全投票者を直列化する粗粒度ロックだが、要件・design.md に投票スループットの非機能要件は無く正しさを優先）。並行 2 リクエストで実際にレースを再現する回帰テストで検証済み。`IdempotencyStore` は `check_or_reserve`/`bind` の 2 段階（`status_idempotency_keys.status_id` が `statuses(id)` への NOT NULL FK のためスキーマ上不可避）で、競合は `(actor_id, idempotency_key)` 一意制約 + `ON CONFLICT DO NOTHING` で原子化。`bind` の `now: OffsetDateTime` 引数は 2.2 の `InteractionRepository` と同じ「時刻は呼び出し側採番」規約に従う。
+- 2.1 追補（ラン単位最終レビューでの指摘・修正済み）: 2.3 の `record_vote` レース修正を踏まえ、ラン単位の最終レビューで `StatusRepository::delete_status` にも同種の TOCTOU が見つかった。`in_reply_to_id` を無ロックで SELECT した後、対象行自身の `DELETE FROM statuses WHERE id = $1` の実行結果（`rows_affected()`）を見ずに親の `replies_count` を無条件で減算していたため、同一 status への同時 DELETE（クライアントの再送や、同一 Delete Activity の連合配送重複など現実的なシナリオ）で二重減算が起き得た。`DELETE` の `rows_affected()` を `deleted` として捕捉し、`deleted.rows_affected() > 0 && let Some(parent_id) = in_reply_to_id` の場合のみ減算するよう修正（`FOR UPDATE` 等の追加ロックは不要——`DELETE` 文自体が対象行に取る行ロックのみで閉じる。READ COMMITTED 下で負けたレーサーの `DELETE` は勝者のコミット後に再評価され 0 行ヒットになるため）。並行二重 DELETE を実際に再現する回帰テストで検証済み。ブースト側の `reblog_of_id` カスケード削除・`reblogs_count`/`favourites_count` はこの関数のスコープ外（`InteractionService` 側の責務）であり、本修正の対象外であることを確認済み。
+- 8.1: 統合テスト整備中に、投票の自己ループバック配送で成功済みの投票が誤って `422` になるバグを発見・修正した（`src/statuses/inbound_handlers.rs`）。`PollService::vote` は `poll_repository::record_vote` で投票を記録した後 `deliver_vote` で投稿者へ通知するが、投稿者がローカルアクターの場合（単一/主要ローカル運用では通常のケース）、federation-core の in-process ローカル配送が同一リクエスト内で `CreateNoteHandler::try_record_vote` を再度呼び出し、直前に記録した同一投票への重複投票拒否（`poll_repository.rs` の `"actor has already voted in this poll"`）が `PollService::vote` の戻り値まで伝播していた。`try_record_vote` 側でこの特定のエラー（この一文言・422 のみ）を捕捉し `HandleOutcome::Handled` として扱うよう修正済み（他 Activity 型の冪等受信処理と同じ扱い）。`poll_repository::record_vote` 自体の重複投票防止（Requirement 13.5）・クライアント起因の正当な重複投票拒否は変更していない。8.3（連合テスト）の実装者はこの修正済みの挙動（`inbound_handlers.rs` の「Idempotent re-delivery」節のドキュメントコメント参照）を前提にすること。
+- 8.2: 「実クライアントキャプチャをフィクスチャ登録する」要件について、本サンドボックス環境では実際の Mastodon クライアント（Ivory/Elk/Phanpy 等）からの生トラフィックを取得する手段が無く、`docs/mastodon-api-compat.md`/`docs/mastodon-api-estimate.md` にも生 JSON キャプチャの記載が無いことを確認済み。api-foundation task 9.5（`tests/contract_harness_fixture_it.rs`、既レビュー済み）が同一要件に対して既に確立した解決策——モック/手書きではなく本クレート自身の実パイプラインが生成した実 JSON を `register_fixture` でフィクスチャ登録し、独立に起動した2つ目のインスタンスの実出力をそのフィクスチャに照合することで「フィクスチャが受け入れ基準として機能する」ことを証明する——をそのまま踏襲した（`tests/status_contract_it.rs::real_status_and_poll_json_are_registered_as_fixtures_and_hold_a_second_instances_live_output`）。8 個の並行実行可能な `#[tokio::test]` が同一ファイル内にあるため、9.5 のような単一テストファイルでの `KAWASEMI_UPDATE_GOLDEN` 環境変数トグルは競合リスクがあり使わず、代わりに直接 `assert_eq!` で同等の照合を行っている（`assert_golden` の「既存ゴールデンと照合」経路自体も内部は位置情報付き `assert_eq!` であり、検証強度は同一）。後続の search task 6.1・timelines の同種タスクもこの解決策を前提にしてよい。
+- 8.3: `src/federation/test_harness.rs::spawn_paired_instance`（federation-core 所有、7.2 note (2) が本タスクを拡張元として明示済み）は、この修正以前は statuses-core の受信ハンドラを一切登録しない no-op クロージャを渡していたため、`spawn_federation_pair` で組んだ 2 インスタンス間では投稿関連の受信 Activity が silent no-op になっていた（本タスクの検証対象そのものが観測不能な状態）。`statuses::register_downstream_handlers(...)`（6.1/7.2 で実装済み・変更なし）を federation-core 既存の拡張点 `register_downstream` へ渡すよう配線し解消（`InboxService`/`dispatcher.rs`/署名検証/配送ロジック自体は無変更、レビューで境界逸脱ではなく想定済み拡張点の利用と確認済み）。テストは `StatusService`/`InteractionService` ではなく `StatusActivityBuilder` を直接呼び出している（5.1/5.2 note のとおり、本番配線の `NoRelationshipQuery`/ローカルアクターのみ解決という制約下では、これらサービス経由では本物のリモート宛先へ到達できないため）。create の同値性は「軽量」検証（正準 Activity の再利用 + 冪等な no-op と実際の取り込みの比較）に留め、delete/edit にはローカル宛先版の同値性テストを設けていない（`DeleteHandler`/`UpdateHandler` は `target.local == false` の行にのみ作用するため、in-process 同一インスタンス配送からは構造的に到達不能な条件であり、不自然な fixture 捏造を避けた）。reblog/favourite は完全な local-vs-HTTP 同値性を検証済み。投票（Poll voting）・Undo(Announce/Like) は本タスクの明記された操作一覧（投稿/ブースト/お気に入り/削除/編集）に含まれないためスコープ外。
+- 9.1: `src/statuses/account_provider.rs` に `AccountStatusesProviderImpl`/`AccountCountsContribution` を実装し、accounts-and-instance 所有の `AccountStatusesProvider`/`AccountCountsProvider`（`src/accounts/ports.rs`、契約は無変更）の bootstrap 既定実装（`EmptyStatusesProvider`/`ZeroCountsProvider`）を `src/bootstrap.rs`/`src/test_harness.rs` で置き換えた。可視性フィルタは `visibility::is_visible` を再利用（新規実装なし）。実データ確認済みの副作用として、共有テストハーネスに実 `AccountCountsContribution` が乗ったことで task 8.2 所有のゴールデン契約テスト 5 件（`tests/golden/statuses/status_contract_it_{edited,normal,own_post_interactions,reblog,with_poll}.json`）に埋め込まれた `statuses_count`/`last_status_at` が `0`/`null` から実値に変わり、決定的な新値へ更新した（レビューで境界逸脱ではなく仕様どおりの配線による正しい副作用と確認済み）。既知の未解決ギャップ: (1) `AccountCountsContribution` は `followers`/`following` を常に `0` で返す（social-graph 未実装のため、`AccountPortsRegistry` は1ポート1実装のみで合成不可 — social-graph 実装時にそちらが全体を差し替える）。(2) `AccountStatusesProvider` の `StatusesQuery` にリクエストごとの `ForwardedOrigin` が無いため、埋め込みメディア/タグ URL は固定 `https://{domain}` を合成（本タスクの境界では修正不可、契約は accounts-and-instance 所有）。(3) Requirement 7.1（投稿の削除）は tasks.md 上本タスクの参照要件だが観測可能な対応挙動が無い（レビューで pre-existing なスペック引用のズレと確認、ブロッキングではない）。
+- 9.2 追補（run-level 検証での remediation）: フィーチャー完了後の `/kiro-validate-impl` で要件 13.1（poll 作成）が全タスク完了後も未実装のまま残っていることが判明した（5.1 が 5.3 へ委譲したが、5.3 の `_Requirements:_` は 13.2-13.6 のみで 13.1 を含まず、`PollRepository::insert_poll`（2.3 で実装済み）が本番経路のどこからも呼ばれていなかった）。`StatusService::create_status`（`status_service.rs`）を修正し、poll 入力がある場合に poll id を採番して `Status.poll_id` を設定→投稿行を挿入→`poll_repository::insert_poll` で poll/選択肢を永続化する形に変更（メディア排他検証は維持、`tests/polls_it.rs::insert_poll_status_fixture` と同じ挿入順序）。選択肢が2未満または空文字タイトルを含む場合は拒否するバリデーションを追加（要件 13.1 自体には明記が無いが、要件 13.4「範囲外の選択肢インデックス」が2択以上を前提とする文言であることから導出、レビューで妥当と判定）。**既知の未解決ギャップ（本remediationのスコープ外、要件書に明記が無いため）**: `StatusActivityBuilder::deliver_create`（`activity_builder.rs`）は poll を持つ投稿でも依然として素の `Note` を配送し、`Question`/`oneOf`/`anyOf`/`endTime` 等の JSON-LD を含まない（連合先には poll が見えない）。requirements.md/design.md のいずれも poll 作成の wire 形式を規定しておらず、同モジュールは media 添付の JSON-LD も同様に省略済みであるため、一貫した既存の未実装範囲として据え置いた。将来 poll の連合配信を扱うタスクで対応が必要。
+- 9.2: `src/statuses/notification_sink.rs` に `NotificationEventSink`/`NotificationEvent`/`NotificationType`/`NoopSink`/`NotificationSinkRegistry` を新規定義した。9.1 の `AccountStatusesProvider`/`AccountCountsProvider` とは異なり、この契約の実owner（notifications）は本 run 時点で一切実装されていない（`src/notifications/` が存在しない。roadmap 上 notifications は statuses-core に依存するため構造的に先行不可能）ため、3.1 の `RelationshipQuery` が確立した先例（依存先が未実装のとき、必要とする側がポート契約を自spec境界内に定義し、実装先が後で差し替える）をそのまま踏襲した。フィールド形状は notifications/design.md の型定義を一字一句忠実に複製し（`recipient`/`origin`/`kind`/`target_status_id`/`occurred_at`、`NotificationType` の8バリアント）、レジストリは `src/accounts/ports.rs::AccountPortsRegistry` の `Arc<RwLock<Arc<dyn Trait>>>` イディオムをそのまま踏襲（`emit` は同じ理由で `Pin<Box<dyn Future<...> + Send>>` を返す、`accounts::ports` 既存の逸脱と同型）。emit 対象は favourite（新規時のみ）・reblog/Announce（新規時のみ）・mention（`create_status` 内、ローカル解決分のみ）。unreblog/unfavourite/edit/poll vote では emit しない（edit は「任意で」の裁量行使、poll vote は要件13.2が Activity 配送トリガの引用でありイベント種別 `Poll` は poll-end 相当で本タスク明記のスコープ外と判断）。自分自身への favourite/reblog/mention は emit しない。**未解決の既知ギャップ**（将来タスク向けに `interaction_service.rs`/`status_service.rs` の doc コメントにも記載済み）: (1) リモートアクター起点の reblog/favourite/mention（`inbound_handlers.rs`、task 6.1 の境界、本タスクの `_Boundary:_` 外）は `InteractionService`/`StatusService` を経由せずリポジトリ関数を直接呼ぶため emit されず、notifications/design.md が要求するローカル/リモート対称配信（5.1, 5.2）を満たしていない。(2) reblog の `Announce` は投稿者解決を従来行っていなかったため新規に `account_ref_for_notification` を追加、`ActorHandleLookup` の `Client` 種別エラー（ローカル未発見）を `AccountRef::Remote` として扱い reblog 自体は成功させる（`Server` 種別エラーは従来どおり伝播）。この Remote 分岐を直接踏む単体テストは未整備（reblog 関連テストは全て `known_actors` 登録済みの対象を使用）。次にこの経路へ触れるタスクでのテスト追加を推奨。
+- 3.1: `src/statuses/visibility.rs` に `is_visible`/`ViewerRelation`/`RelationshipQuery`/`NoRelationshipQuery` を実装（design.md の Service Interface 素案に忠実）。`direct` の可視判定は投稿者本人のみとした（`Status` にメンション先を保持するフィールドが無く、`is_visible` のシグネチャ自体にも宛先引数が無いため、この関数単体ではメンション先受信者を判定できない — メンションは要件 3.6 により投稿時に抽出され `derive_addressing`/`derive_recipients` へ別引数として渡される設計）。将来 `StatusService` 等の呼び出し側で「本人 OR メンション先」の OR 条件を追加する必要がある。**未解決の既知の不整合**: task 2.1 の `status_repository.rs::is_visible_to`（暫定実装）は `Visibility::Unlisted` を `viewer: None`（未認証）でも可視としているが、要件 6.4「未認証は公開のみ可視」を素直に読むと `unlisted` は未認証には不可視であるべきで、これは 3.1 の `visibility::is_visible`（未認証には `unlisted` を不可視とする）と矛盾する。3.1 は 2.1 の暫定実装を書き換えていない（3.1 の Boundary 外のため）。`status_repository.rs` を `visibility::is_visible` の呼び出しに置き換える将来タスクで、この不整合を解消すること（`unlisted` は未認証に不可視、というのが 3.1/要件 6.4 に忠実な挙動）。
+- 3.2: `src/statuses/addressing.rs` に `derive_addressing`/`derive_recipients`/`Addressing`/`ActorRef` を実装。design.md は `ActorRef` 型と public collection の IRI 定数をどこにも具体的に定義していなかったため、`ActorRef { uri: String, recipient: Recipient }` と `pub const PUBLIC_COLLECTION_URI = "https://www.w3.org/ns/activitystreams#Public"` を本モジュールに新規定義した（重複無し、他箇所に既存の等価定義は無いことを確認済み）。task 4.1（`StatusActivityBuilder`）はこれらを新規定義せず本モジュールから import して再利用すること。`Addressing` は design.md の `{ to, cc }` 素案に加え非公開フィールド `addresses_followers: bool` を持つ（`derive_recipients` のシグネチャに `Visibility`/`followers_uri` が無く、`to`/`cc` の文字列内容に脆く依存せずフォロワーコレクション展開要否を判定するため）。`to`/`cc` のみ `pub` で構造体リテラル構築不可＝`derive_addressing` 経由のみで生成されるため現状ずれるリスクは無いが、将来 `to`/`cc` を構築後にその場で書き換える呼び出し側が現れた場合は要再確認。
+- 3.3: `src/statuses/serializer.rs` に `status_to_json`/`poll_to_json` を実装（`src/accounts/serializer.rs` の型付き構造体 + `serde_json::to_value` パターンを踏襲、`json!{}` 直書きはしない）。design.md の Service Interface 素案から以下を意図的に逸脱（`accounts/serializer.rs` と同じ「Deliberate deviations」文書化パターンで理由をモジュール doc コメントに記載済み）: (1) `SerializeContext` から `req_uri: RequestUriContext` を削除（`Status` の `uri`/`url` は既に解決済み文字列であり、Account と異なり URL 構築が不要なため）。(2) `status_to_json` は素の `&Status` ではなく `&StatusRenderInput` を取り、design.md の `ctx` 引数は廃止 — `favourited`/`reblogged`/`bookmarked`/`pinned`/`muted` 等の viewer 操作状態、`mentions`/`tags`/`emojis`（`Status`/`Poll`/`PollOption` のいずれにも該当フィールドが無く、要件 3.6 の抽出は将来の `StatusService` の責務）は全て呼び出し側が事前解決した入力として渡す。(3) `poll_to_json` も同様に事前解決済み集計値を受け取る（`poll_repository.rs` の `tally()` 実返り値の形に整合）。いずれも DB/非同期呼び出しはシリアライザ内に一切無い（純粋関数）。ゴールデンは `tests/golden/statuses/`（通常/reblog/編集済み/投票付き Status 各 1 + 投票中/締切後 Poll 各 1、計 6 件）に登録、`mentions`/`tags`/`emojis`/`media_attachments` は全ゴールデンで空配列（委譲先の型自体は 3.2 以前に固定済みだが、非空値を通した end-to-end ゴールデンは未整備 — 将来タスクでの追加を推奨）。
+- 5.1: `src/statuses/status_service.rs` に `StatusService`（create_status/show/context/delete_status/edit_status/history/source）を実装。`show`/`context` は 2.1 の暫定 `is_visible_to` ではなく 3.1 の `visibility::is_visible` を経由させ、3.1 が指摘していた「未認証時の `unlisted`」の不整合を要件 6.4 準拠（未認証は public のみ可視）で解消した（3.1 note 参照）。`is_visible` 単体では判定できないメンション宛先の可視性は、`Status` にメンション永続化フィールド/テーブルが無いため「本人 OR メンション宛」の OR 条件のうち「本人」半分のみ実装（メンション半分は構造的に未対応、モジュール doc コメントに明記）。投票（poll）は design.md の Requirements Traceability（13.1 は PollService/PollRepository/StatusActivityBuilder 所有、StatusService ではない）に従い、投稿作成要求に poll が含まれる場合は投票とメディアの排他検証のみ行い、実際の poll 行作成は行わず 422 で拒否する（PollService は task 5.3 で実装予定、それまでの意図的な境界決定）。リモート（別ドメイン）宛メンションは抽出はされるが配送先解決ポートが本 spec の依存範囲に無いため未解決（`direct` が全てリモートメンション宛の場合、宛先が空になる既知の機能的ギャップ）。要件 8.1 の編集対象に `language` があるが `status_edits`/`apply_edit`（2.1）に language 列/経路が無いため `EditStatus` は language を持たない（サイレントに握りつぶすのではなく構造的に対象外とした）。要件 8.2 の編集履歴あたりの media も同様にスキーマ非対応（`status_edits` に media 列なし）。メディア添付は `attach_media`/`replace_media`/`media_ids_for_status`（status_repository.rs 追加）で永続化し、作成時付与・編集時全置換（空クリア含む）を実装、両経路とも実データでの持続性を確認するテストあり（レビュー1周目で指摘され2周目で追加）。
+- 5.3: `src/statuses/poll_service.rs` に `PollService`（poll 取得・投票）を実装。`vote` は締切/範囲/単複/重複の検証を `PollRepository::record_vote`（2.3 で TOCTOU 対策済み）へ委譲し、本サービスは可視性ゲート（`visibility::is_visible`、投票対象 Status が投票者から可視であること）→ 記録 → 集計反映 → 選択肢インデックスをタイトルへ解決して `StatusActivityBuilder::deliver_vote`（`choice_titles: &[String]` を取る実シグネチャ、4.1 note 参照）へ配送、のオーケストレーションのみを担う。`poll`/`vote` の戻り値は design.md 素案の裸の `Poll` ではなく `(Poll, PollTally)` とした（`Poll` 型自体に投票数フィールドが無いため、5.1/3.3 で確立済みの「事前解決済み集計値を呼び出し側に返す」パターンに整合）。**要件 13.1（poll 作成）は本タスクのスコープ外**: task 5.3 の `_Requirements:_` は 13.2-13.6 のみを列挙し 13.1 を含まず、`status_service.rs::create_status` の poll+media 排他検証（422 拒否、5.1 note 参照）は意図的に未変更のまま。`PollRepository::insert_poll`（2.3 で実装済み・未使用）は将来 13.1 を配線するタスクのために手つかずで残されている。`deliver_vote` の宛先解決は `ActorHandleLookup`（ローカルアクターのみ解決、4.1/5.1/5.2 note と同じ既知のギャップ）に依存するため、投票対象がリモートアクターの投稿である場合は解決失敗する。
+- 4.1: `src/statuses/activity_builder.rs` に `StatusActivityBuilder<A, D, L, H>`（`deliver_create`/`deliver_announce`/`deliver_like`/`deliver_undo`/`deliver_delete`/`deliver_update`/`deliver_vote`）を実装。design.md の Service Interface 素案は未定義の `UndoKind` を参照していたため、3.2 の `ActorRef` と同様の扱いでモジュール内にローカル定義（Announce/Like を区別する enum）。素案からの意図的逸脱（モジュール doc コメントに記載済み）: (1) `deliver_create`/`deliver_update` に `in_reply_to_uri: Option<&str>` を追加（`Status.in_reply_to_id` は URI ではなく `Id` で、本ビルダは DB 非依存のため解決不能）。(2) `deliver_announce`/`deliver_delete`/`deliver_update` に `addressing: &Addressing` を追加（要件 4.2 の `to`/`cc` 充足に必須だが素案は `deliver_create` にしか明記していなかった）。(3) `deliver_like`/`deliver_undo`/`deliver_vote` は `target.actor_id` を内部解決せず、呼び出し側が解決済みの `recipient: ActorRef` を受け取る（宛先アクターがリモートの場合の inbox 解決は本コンポーネントの境界外）。(4) `deliver_vote` は `choices: &[i32]` ではなく `choice_titles: &[String]` を受け取り、選択肢ごとに独立した `Create{Note,name=...}` を配送（インデックス→タイトル解決は `PollRepository` の責務）。`Addressing`/`ActorRef`/`PUBLIC_COLLECTION_URI`/`derive_addressing` は 3.2 の指示どおり `addressing.rs` から import（再定義なし）。`Id`→`Handle` 解決は新規 `ActorHandleLookup` トレイト（`ActorDirectory::resolve_actor_by_id` を実装として使用）。5.1-5.3（`StatusService`/`InteractionService`/`PollService`）の実装者はこれら 4 点のシグネチャ差分を踏まえて配線すること。
+- 5.2: `src/statuses/interaction_service.rs` に `InteractionService`（reblog/unreblog/favourite/unfavourite/bookmark/list_bookmarks/pin）を実装。reblog は 2.2 note のとおり `StatusRepository`（`reblog_of_id` 付き行の insert/delete）で記録し、可視性ゲート（`visibility::is_visible`、9.5）・重複防止（`find_reblog`、9.3）・カウンタ更新・`Announce`/`Undo(Announce)` 配送を実装。favourite/unfavourite も同型（`Like`/`Undo(Like)`）。bookmark/pin はローカル状態のみで配送呼び出しをゼロ回にすることをテストで直接アサート（11.4, 12 系）。pin は所有検証（12.3）と `Direct` 可視性拒否（12.4、422）を実装。**既知の構造的ギャップ（新規ではなく 4.1 由来）**: `ActorHandleLookup`（4.1 が定義、実装は `ActorDirectory::resolve_actor_by_id`）は `local_actors` のみを解決するため、リモートアクターが投稿者の投稿に対する favourite/unfavourite/unreblog は `deliver_like`/`deliver_undo` の宛先解決に失敗する（reblog 自体の `Announce` はリブースト者自身のフォロワー宛のため影響なし）。リモートアクターの永続化は accounts-and-instance の境界（requirements.md Boundary Context）であり、5.2 の境界内では解決不能。将来 accounts-and-instance 配線後、`ActorHandleLookup` の実装を拡張する必要がある。また `unreblog` の `Undo(Announce)` は対象投稿者のみへ配送され、オリジナル `Announce` を受け取ったリブースト者自身のフォロワーへは配送されない（4.1 の単一 `recipient: ActorRef` シグネチャに起因する非対称性、5.2 の境界外）。
+- 6.1: `src/statuses/inbound_handlers.rs` に `CreateNoteHandler`/`AnnounceHandler`/`LikeHandler`/`DeleteHandler`/`UpdateHandler`/`UndoHandler` + `register_status_handlers` を実装、federation-core の `InboundActivityDispatcher`（既存・変更なし）へ登録する形で federation-core 側は一切変更していない。各ハンドラは 2.x/5.x で確立済みの repository/service 関数（`insert_status`/`adjust_counts`/`add_favourite`/`delete_status`/`apply_edit`/`record_vote`）をローカル発生時と同一に呼ぶ（14.5）。アクター識別は `InboundContext.signer.actor_uri`（HTTP Signature 検証済み）のみを信頼し、JSON body 側の `actor`/`attributedTo` は一切参照しない（`Delete`/`Update` の所有検証をスプーフ不能にするための意図的な設計判断）。**既知の未実装（本タスクの境界外・要件 14.2 の一部未充足）**: リモート `Create(Note)` 取り込みは添付・メンションを反映しない（`status_media`/メンション永続化テーブル自体が schema に無く、5.1 note の「メンションは本人半分のみ」と同種の構造的ギャップ）。将来 media-pipeline のリモートメディア取り込み経路と、メンション永続化用テーブルの追加が必要。**未配線**: `register_status_handlers` はまだどこからも呼ばれていない（実際の `AppState`/bootstrap への配線と `RemoteActorResolver` の本番実装 — `RemoteAccountFetcher` を使う場合 `FederationHttpClient::fetch` が `Send` 非対応なため単純な blanket impl 不可 — は 7.2 の境界）。投票ワイヤ形の重複配信（同一選択肢への再送 `Create`）は `record_vote` の重複拒否 `AppError` をそのまま伝播する（13.5 の重複防止ロジックをそのまま再利用、冪等な `Handled` への変換はしていない）。
+- 7.1: `src/statuses/endpoints.rs` に 19 本の HTTP ハンドラ（statuses CRUD/history/source/context・reblog/fav/bookmark/pin(+un-系)・bookmarks 一覧・polls 取得/投票）と `StatusesEndpointsState<A,D,L,H,R,M>`（router-local state、まだ具体型を固定していない——7.2 で `AppState` へ実結線する際に固定される）を実装。`Status -> StatusRenderInput` の組み立てグルー（account は `AccountService::show_account` 経由、media は `media_repository::find_by_id`+`to_media_attachment`、tags は `tag_repository::tags_for_status`、interactions は `interaction_repository::exists_favourite/exists_bookmark/exists_pin/find_reblog`、poll は `PollService::poll`）はこのタスクで新規に書いた（design.md/以前のタスクのいずれにも存在しなかった）。`mentions`/`emojis` は既存の構造的ギャップ（永続化テーブル/shortcode解決パイプライン無し）によりゴールデン同様に空配列のまま。`/source` は `read:statuses` スコープを要求（`src/oauth/scope.rs` 既存の確立済みスコープ文字列、新規発明ではない）。reblog のネストは 1 階層のみ（判断による制限）。削除の応答は `ON DELETE CASCADE` 後の再照会のため media/tags/interactions が空/false になる（要件 7.1 は「削除された投稿の表現」のみを求めており凍結スナップショットは求めていないため許容）。**未解決の既知ギャップ（次タスクへの申し送り、ブロッカーではない）**: レビューで、19 ハンドラ中 `edit_status`/`status_history`/`status_source`/`status_context`/`unbookmark_status`/`unpin_status` にエンドポイントレベルの専用テストが無いことが指摘された（`status_service.rs` 775-869 行の所有権チェックがテスト済みの `delete_status` と同一パターンであることをコードリーディングで確認済みのため承認はされたが、将来のタスクでこれらのハンドラの HTTP レベルテストを追加することを推奨）。`StatusesEndpointsState` を実際の `AppState`/router へ組み込む完全な結合テストは 7.2 の境界（本タスクは test-local router + test-double ports で検証）。
+- 7.2: `src/statuses.rs` に `StatusesModule`/`build_statuses_module`/`ProdRemoteActorResolver`/`register_downstream_handlers` を実装し、`src/bootstrap.rs::build_state()` の `accounts_module` 構築直後に配線、`src/state.rs`（`AppState::statuses()`）・`src/server.rs`（`statuses_router()` + `FromRef<AppState>` ブリッジ、`build_router` へ `.merge`）・`src/config.rs`（`StatusesConfig`）に実装を追加した。要件 4.3（配送手段の分岐は federation-core 側）を満たすため `src/statuses/activity_builder.rs::StatusActivityBuilder` の `delivery` フィールドを所有値 `DeliveryService<D,L,H>` から `Arc<DeliveryService<D,L,H>>` へ変更（`Deref` 経由で既存呼び出しは無変更、`FederationModule::delivery_service()` が `&Arc<...>` しか公開しないため）。要件 14.1（受信ハンドラの実配線）を満たすため `src/federation/module.rs::build_federation_module` に `register_downstream: impl FnOnce(&mut InboundActivityDispatcher)` 引数を追加（`InboxService::new` 呼び出し前の唯一の登録可能ポイント、モジュール自身の doc コメントが本タスクを呼び出し元として明示）。この方式により federation-core 側に `use crate::statuses::...` は一切追加されず依存方向を維持（`src/federation/module.rs`/`src/federation/test_harness.rs`/`src/test_harness.rs` へのパラメータ配線のみ）。6.1 で未配線のまま残っていた `RemoteActorResolver`（`Send` 境界を要求するが `RemoteAccountFetcher::fetch_and_normalize` が非 `Send` の理由で blanket impl 不可）は `ProdRemoteActorResolver`（ローカルアクターは直接解決、リモートは `tokio::spawn` + `JoinHandle` 待機で `Send` 化）として本番実装を供給した。`tests/statuses_bootstrap_wiring_it.rs`（新規）が実際の `build_state()` 経路を起動し、投稿作成→取得、fav→`LikeHandler` ディスパッチループバック、reblog の E2E を検証（RED（wiring 差し戻し時に 3 件とも 405 で失敗）→GREEN を実装者・レビュアー双方が独立に再現済み）。**非ブロッキングの既知の未消化事項（次タスクへの申し送り）**: (1) `StatusesConfig`（max_content_chars/poll_max_options/poll_min_expiration/idempotency_key_retention_days）は design.md の「運用関連設定項目を追加する」を字面通り満たすフィールドとして追加・起動時検証されるが、`status_service.rs`/`poll_repository.rs`/`idempotency` 側の実施行ロジックへはまだ未結線（5.3 の poll 作成スコープ外パターンと同型の意図的境界、struct 自身の doc コメントに明記）。(2) `register_downstream` は「起動構築時の一度きりの登録」であり将来 social-graph 等の追加受信ハンドラも同じクロージャに合成登録する必要がある（`federation/module.rs` の doc コメントに明記）。(3) `tests/statuses_bootstrap_wiring_it.rs` の reblog シナリオは `NoRelationshipQuery`（3.1 の既定・空フォロワー）により reblog 自身の配送先が空集合になるため `AnnounceHandler` のディスパッチループバックまでは未検証（favourite シナリオが `LikeHandler` 経路で要件 14.1 の実配線を実証済みのため許容、テストファイル自身の doc コメントで開示済み）。
+- 6.2: `src/statuses/ingest_service.rs` に `StatusIngestService::{ingest_url, ingest_document}` を実装。6.1 の `CreateNoteHandler::handle` から Note 正規化・永続化本体を `ingest_note_object`（`inbound_handlers.rs` に `pub(crate)` で切り出し）として抽出し、受信ディスパッチ経路（`CreateNoteHandler`）と本経路（`StatusIngestService`）の双方がこの同一関数を呼ぶことで「受信ハンドラ経路と同一結果になる」（要件 14.1-14.3）を保証（`ingest_document_matches_the_inbound_dispatch_path_for_the_same_note` で実証済み）。`ingest_document` は `Create` でラップされていない裸の `Note` オブジェクト（AP オブジェクト URL の慣例的な参照先形状）を受け取る設計判断とした（design.md に `StatusIngestService` の専用インターフェース定義が無く、Boundary Commitments の一文のみが根拠）。**セキュリティ設計上の重要な差異（レビュー1周目で指摘・2周目で修正済み）**: 本経路は HTTP Signature 検証済み signer を持たない（能動的にドキュメントを fetch するため）ため、フェッチした Note 自身の `id` のホストと `attributedTo` のホストが一致することを検証する origin/authority チェック（`host_from_url` ヘルパー、`src/federation/signatures/signer.rs`/`src/federation/outbound/worker.rs` の既存重複実装と同一ロジック）を `resolve_remote_actor` 呼び出しの前に追加した。この検証が無いと、任意のホストが実在する無関係アクターの URI を `attributedTo` に詐称し、その実在アクターに紐づく `Status` を偽造できてしまう（`RemoteAccountFetcher::fetch_and_normalize` の「fetch した URI＝解決される identity」という保証とは異なり弱いトラストモデルであるため）。**残存する軽微な非ブロッキング事項**: `id` が欠落/非文字列の場合はこの origin チェック自体がスキップされ `resolve_remote_actor` が無検証の `attributedTo` に対して先に呼ばれる（`ingest_note_object` 側の既存の `id` 欠落 422 拒否により永続化はされないため悪用不能だが、無検証 URI への解決呼び出しという副作用は残る）。`register_status_handlers` 同様、本サービスもまだどこからも呼ばれていない（将来の search `RemoteResolver` 等が呼び出し元になる想定、配線は本タスクの境界外）。
+- 10.1: `src/statuses/activity_builder.rs::StatusActivityBuilder::deliver_create` に `poll: Option<(&Poll, &[PollOption])>` 引数を追加し、投票付き投稿の場合は `Note` の代わりに `type: "Question"` を出力し `Poll.multiple` に応じて `oneOf`（単一選択）/`anyOf`（複数選択）へ選択肢（各選択肢は `type: "Note"` + `name` + `replies: {type: Collection, totalItems: votes_count}` の AS2 慣例形）を格納、`endTime` を `Poll.expires_at`（`Some` のときのみ ISO8601 で出力）から導出した（Requirement 13.7）。`StatusService::create_status` は 9.2 追補で `PollRepository::insert_poll` に渡した `(Poll, Vec<PollOption>)` をそのまま `deliver_create` へ橋渡しする（再フェッチ・再構築なし）。`deliver_update` は本タスクの対象外（本 spec に poll 編集機能が無いため Update の poll 形状が変化する経路自体が無い）。ActivityStreams `closed` は意図的に非出力（`deliver_create` は作成時点で発火するため締切到達し得ず、要件 13.7 の文言・タスクの観測可能な完了も options/deadline/single-vs-multiple のみを要求）。design.md の `StatusActivityBuilder` Requirements 行（313 行目付近の表）に 13.7 が未反映のままである点は run-level レビューで指摘済みの非ブロッキングな記載漏れとして残置。
+- 10.2: `src/statuses/inbound_handlers.rs` の `AnnounceHandler`/`LikeHandler`/`CreateNoteHandler` に、9.2 で定義した `NotificationEventSink` への emit を追加した（Reblog/Favourite/Mention、状態遷移コミット後、対象/メンション先がローカルの場合のみ、自己宛は防御的に除外）。`CreateNoteHandler` のメンション解決は `status_service.rs::extract_content_tokens`/`Mention`（6.1 の `hashtags` 前例に倣い `pub(crate)` へ可視性拡張）をそのまま再利用し、二重実装しない。9.2 が要求する「同じシンクへ」を満たすため、`NotificationSinkRegistry` の単一インスタンスを `src/bootstrap.rs`/`src/test_harness.rs`/`src/federation/test_harness.rs` の各合成ルートで一度だけ構築し、`build_statuses_module`（ローカル起点）と `register_downstream_handlers`（リモート起点）の双方へ同一インスタンスを渡すよう配線した（レビューで実際に同一インスタンスであることをコード追跡で確認済み）。`MentionLookup`（`status_service.rs`、`Send` 境界なし）はこのモジュールの `Pin<Box<dyn Future + Send>>` ハンドラ境界を満たせないため、`RemoteActorResolver` と同型の理由で `LocalMentionResolver` という新規の `Send` 安全な薄いアダプタ trait を本モジュール内に定義した（`NotificationEventSink`/`NotificationEvent`/`NotificationType` 自体の再定義ではない）。既知の非ブロッキング事項: `CreateNoteHandler` のメンション emit ループがシンクエラーで中断した場合、再送は `already_ingested` 判定で早期リターンし残りのメンションへの再emitを行わない。これは 9.2 のローカル起点メンションループに既存の同型パターンであり（既定 `NoopSink` はエラーを返さないため現状到達不能）、本タスクが新規に持ち込んだ欠陥ではない。
+- 10.3: `ingest_note_object`（`src/statuses/inbound_handlers.rs`、`CreateNoteHandler`/`StatusIngestService` 双方が共有する単一経路）に、`tag` 配列の `Mention` エントリ（ローカル解決分のみ永続化、9.2/10.2 で確立済みの「メンション解決はローカルのみ」規約に整合）と `attachment` エントリの永続化を追加した（Requirement 14.2）。新規マイグレーション `migrations/0011_status_mentions_and_remote_attachments.sql` で `status_mentions`/`status_remote_attachments` の2テーブルを追加。添付は `status_media`（ローカル media-pipeline 実体への物理 FK）を再利用せず、`src/accounts/remote_fetcher.rs::RemoteAccountFetcher`（リモートアクターの avatar/header を実体化せず URL 文字列のまま保持する既存の前例）に倣い、`url`/`media_type`/`description` の軽量メタデータとして別テーブルに保持する設計判断とした（media-pipeline は本 spec の境界外であり `MediaService::accept_upload` は URL からの取り込みに対応していないため）。既知の非ブロッキング事項（run-level レビューで指摘）: 新規マイグレーションのヘッダコメントが「federation-core は 0008_federation.sql を所有」と記載しているが、実際には federation-core は `0004_federation.sql` として出荷済みであり、この記述は research.md の古い（未実現の）決定を引用した誤り。sqlx はマイグレーション番号の連番を要求しないため機能上の問題はないが、コメントの記述根拠は将来の修正が望ましい。
+- 10.4: `src/statuses/endpoints.rs`（`Status -> StatusRenderInput` 組み立てグルー、7.1 が所有すると note した箇所）に `resolve_emojis` ヘルパーを追加し、`extract_content_tokens`（3.6/5.1、`ExtractedTokens.emoji_shortcodes` を `pub(crate)` へ可視性拡張）が抽出したショートコードを `accounts::emoji_repository::resolve_emojis`（既存関数、無変更で再利用）へ渡して解決し、`StatusRenderInput.emojis`/`poll_to_json` へ反映した（Requirement 1.1, 3.6）。`status_to_json`/`poll_to_json` 自体（3.3 note のとおり事前解決済み値を受け取る設計）は無変更。Poll 側は投稿本文ではなく `PollOption::title` 全体を結合してスキャンする形で対応（Poll は `content` を持たないため要件 2.1 の `emojis` を満たす唯一の入力経路であり、run-level レビューで scope creep ではなく必須の解釈と判定済み）。未登録ショートコードはエラーではなく単に結果集合から欠落する形で無視され（Requirement 15.2 系の寛容規約と整合）、DB 障害は `?` 経由で `AccountRef` 等と同様に `AppError` として正しく伝播する。
+- 10.5: 7.1 が指摘した6ハンドラのうち `edit_status`/`status_source`/`status_context` は、本タスク開始前（コミット `a002045`）に追加された既存の `tests/status_crud_it.rs::editing_a_status_updates_it_records_history_and_exposes_source_owner_only` と `tests/status_context_it.rs`（4テスト）により実質的なエンドポイントレベル網羅が既に成立していたと判定し（run-level レビューで独立に再確認・妥当性確認済み）、重複テストは追加しなかった。代わりに実際に未網羅だった `status_history` の可視性ゲート（`show` と同一の可視性規則に従うと文書化されているが、これまで所有者自身の視点でしか検証されていなかった）、`unpin_status` の所有権チェック（`pin` の拒否のみテスト済みで `unpin` 自身の同一ガードは未検証だった）、`unbookmark_status`（ブックマーク一覧テストの副次的経路としてのみ間接テストされていた）を実際のルータ経由の専用テストで埋めた。加えて投票+メンション同時投稿の結合テスト（`RecordingNotificationSink` を実際の `NotificationSinkRegistry` へ登録し、投票は `GET /polls/:id` の独立ラウンドトリップで永続化を確認、メンション通知は emit 回数を検証）と、`tests/account_statuses_provider_it.rs` への実 `create_status` 経由投票付き投稿の `GET /accounts/:id/statuses` 描画確認テストを追加した（計5件の新規テスト）。本タスクは production コード変更ゼロのテスト専用タスクとして完了。
+- Group 10 追加（2026-07-29、ユーザー指示によるフィーチャー完了後の技術的負債タスク化）: run-level `kiro-validate-impl`・run-level 最終レビュー・design alignment 検証で見つかった非ブロッキングの既知ギャップ（投票の連合 wire 形式未実装、リモート起点 interaction の通知未 emit、要件14.2の一部未充足、絵文字ショートコード未解決、一部エンドポイントのテスト不足）を、記録に留めず実行可能なタスクとして 10.1-10.5 に起票した。10.1 は当初いずれの要件にも規定されていなかったため、requirements.md に新規 AC 13.7 を追加してから起票している（filler task を作らず、まず要件側のギャップを埋める `kiro-spec-tasks` の原則に従った）。あわせて design alignment 検証で判明した記載漏れ（statuses-core/design.md の Allowed Dependencies に actor-model が未記載、social-graph/design.md に本 spec 所有の `RelationshipQuery` ポートへの言及が無い）をこの run で直接修正済み。Group 10 は spec.json の `approvals.tasks.approved: true` を維持したまま追加した（ユーザーの対話的指示を承認と扱い、フィーチャー全体の再承認は求めていない）ため、実行前に spec.json の approvals 欄が Group 10 を含む前提で妥当か再確認すること。

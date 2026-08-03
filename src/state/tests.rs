@@ -20,15 +20,26 @@ use std::time::Duration;
 use sqlx::postgres::PgPoolOptions;
 
 use super::*;
+use crate::accounts::{self, AccountsModule};
+use crate::accounts::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::actor::keys::cache::KeyCache;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
 use crate::actor::{ActorModule, build_actor_module};
 use crate::config::{
-    ActorConfig, AppConfig, DatabaseConfig, LogConfig, LogLevel, OauthConfig, OwnerConfig, Secret,
-    ServerConfig,
+    ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, MediaConfig,
+    OauthConfig, OwnerConfig, Secret, ServerConfig, StatusesConfig,
 };
+use crate::federation::signatures::ReqwestFederationHttpClient;
+use crate::federation::{FederationModule, FederationWiringConfig, build_federation_module};
+use crate::media::{self, MediaModule};
+use crate::notifications::{NotificationModule, build_notification_module};
 use crate::oauth::OauthModule;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
+use crate::search::{SearchModule, build_search_module};
+use crate::social_graph::{SocialGraphModule, build_social_graph_module};
+use crate::statuses::notification_sink::NotificationSinkRegistry;
+use crate::statuses::{StatusesModule, build_statuses_module};
+use crate::timelines::{TimelinesModule, build_timelines_module};
 
 const LAZY_TEST_DB_URL: &str = "postgres://lazy-user:lazy-pw@127.0.0.1:5432/lazy-test-db";
 
@@ -73,6 +84,40 @@ fn sample_config(domain: &str, max_connections: u32) -> AppConfig {
         oauth: OauthConfig {
             token_hash_key: Secret::new(TEST_TOKEN_HASH_KEY),
         },
+        federation: FederationConfig {
+            secure_mode: false,
+            public_key_cache_ttl: Duration::from_secs(24 * 60 * 60),
+            received_activity_retention_days: 14,
+        },
+        // media-pipeline task 1.2: fixed, non-production values mirroring
+        // `load_config_from`'s own defaults (`src/config.rs`) — this test
+        // harness constructs `AppConfig` directly rather than through TOML/
+        // env parsing, the same way every other startup-config group above
+        // is fixed here rather than loaded.
+        media: MediaConfig {
+            storage_root: std::path::PathBuf::from("media_storage"),
+            max_upload_size_bytes: 10 * 1024 * 1024,
+            thumbnail_target_width: 400,
+            thumbnail_target_height: 400,
+            supported_formats: vec![
+                "image/jpeg".to_string(),
+                "image/png".to_string(),
+                "image/gif".to_string(),
+                "image/webp".to_string(),
+            ],
+            worker_concurrency: 2,
+            max_retry_attempts: 5,
+            lease_duration: Duration::from_secs(5 * 60),
+        },
+        // statuses-core task 7.2: fixed, non-production values mirroring
+        // `load_config_from`'s own defaults, the same convention every other
+        // startup-config group above already follows in this fixture.
+        statuses: StatusesConfig {
+            max_content_chars: 500,
+            poll_max_options: 4,
+            poll_min_expiration: Duration::from_secs(5 * 60),
+            idempotency_key_retention_days: 7,
+        },
     }
 }
 
@@ -100,13 +145,231 @@ fn sample_actor_module(pool: sqlx::PgPool, runtime: RuntimeContext) -> ActorModu
 /// (see this module's own doc comment), and `OauthModule::new` only stores
 /// `pool`/`runtime`/the secret material, matching `sample_actor_module`'s
 /// identical "no real I/O" property.
-fn sample_oauth_module(pool: sqlx::PgPool, runtime: RuntimeContext, config: &AppConfig) -> OauthModule {
+fn sample_oauth_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    config: &AppConfig,
+) -> OauthModule {
     OauthModule::new(
         pool,
         runtime,
         config.oauth.token_hash_key.clone(),
         config.owner.clone(),
         false,
+    )
+}
+
+/// Builds a `FederationModule` sharing `pool`/`runtime`/`directory` (task
+/// 5.4), mirroring `sample_actor_module`/`sample_oauth_module`'s own "no
+/// real I/O beyond what construction itself needs" property:
+/// `build_federation_module`'s own constructors only ever store `pool`
+/// (never dial it), so this is safe against the same `connect_lazy` pool
+/// this suite's other fixtures use. The returned background-tasks handle is
+/// deliberately dropped without calling `.spawn()` — these tests assert only
+/// on `AppState`'s own bundling/cloning behavior, not on federation-core's
+/// live delivery/pruning loops, so there is nothing for a background task to
+/// usefully do here (and spawning one against a `connect_lazy` pool pointed
+/// at a fake URL would just be a source of unrelated background log noise).
+fn sample_federation_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    directory: Arc<crate::actor::ActorDirectory>,
+) -> FederationModule {
+    let (federation, _background_tasks_not_spawned) = build_federation_module(
+        pool,
+        runtime,
+        directory,
+        FederationWiringConfig::production(
+            "state-test.federation.internal".to_string(),
+            false,
+            time::Duration::hours(24),
+            time::Duration::days(14),
+        ),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        |_dispatcher| {
+            // No downstream `InboundActivityHandler` registration needed for
+            // this `AppState`-bundling test (statuses-core's task 7.2 added
+            // this parameter; see `build_federation_module`'s own doc
+            // comment).
+        },
+    );
+    federation
+}
+
+/// Builds a `MediaModule` sharing `pool`/`runtime`/`config.media` (task
+/// 5.2), mirroring `sample_federation_module`'s own "no real I/O beyond what
+/// construction itself needs" property: `build_media_module`'s own
+/// constructors only ever store `pool`/config values (never dial it), so
+/// this is safe against the same `connect_lazy` pool this suite's other
+/// fixtures use. The returned background-workers handle is deliberately
+/// dropped without calling `.spawn()` for the same reason
+/// `sample_federation_module` never spawns its own background tasks — these
+/// tests assert only on `AppState`'s own bundling/cloning behavior, not on
+/// the resident `ProcessingWorker` pool's live behavior.
+fn sample_media_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    config: &AppConfig,
+) -> MediaModule {
+    let (media, _background_workers_not_spawned) =
+        media::build_media_module(pool, runtime, config.media.clone());
+    media
+}
+
+/// Builds an `AccountsModule` (task 5.1), mirroring
+/// `sample_federation_module`/`sample_media_module`'s own "no real I/O
+/// beyond what construction itself needs" property: `build_accounts_module`
+/// only ever stores `pool`/`runtime`/config values and clones the
+/// caller-supplied `directory`/`store` handles (never dials the database or
+/// the network itself), so this is safe against the same `connect_lazy` pool
+/// this suite's other fixtures use.
+fn sample_accounts_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    directory: Arc<crate::actor::ActorDirectory>,
+    store: crate::media::LocalFsStore,
+    media: Arc<crate::media::MediaService<crate::media::LocalFsStore>>,
+    media_config: MediaConfig,
+) -> AccountsModule {
+    accounts::build_accounts_module(
+        pool,
+        runtime,
+        "state-test.accounts.internal".to_string(),
+        directory,
+        Arc::new(ReqwestFederationHttpClient::new()),
+        store,
+        media,
+        media_config,
+    )
+}
+
+/// Builds a `StatusesModule` (task 7.2), mirroring
+/// `sample_accounts_module`'s own "no real I/O beyond what construction
+/// itself needs" property: `build_statuses_module` only ever stores
+/// `pool`/`runtime`/config values and clones the caller-supplied
+/// `delivery` `Arc` (never dials the database or the network itself), so
+/// this is safe against the same `connect_lazy` pool this suite's other
+/// fixtures use. `delivery` is `federation`'s own already-built
+/// `Arc<ConcreteDeliveryService>` (`FederationModule::delivery_service`),
+/// cloned *before* `federation` is moved into `AppState::new` at each call
+/// site below.
+fn sample_statuses_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    federation: &FederationModule,
+) -> StatusesModule {
+    build_statuses_module(
+        pool,
+        runtime,
+        "state-test.statuses.internal".to_string(),
+        Arc::clone(federation.delivery_service()),
+        NotificationSinkRegistry::new(),
+    )
+}
+
+/// Builds a `SocialGraphModule` (task 5.2), mirroring `sample_statuses_module`'s
+/// own "no real I/O beyond what construction itself needs" property:
+/// `build_social_graph_module` only ever stores `pool`/`runtime`/config
+/// values, clones the caller-supplied `directory`/`delivery` `Arc`s, and
+/// calls `set_policy`/`set_relationship_provider`/`set_counts_provider` on
+/// already-constructed, `connect_lazy`-safe registries (no real I/O either)
+/// — so this is safe against the same `connect_lazy` pool this suite's
+/// other fixtures use.
+fn sample_social_graph_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    directory: Arc<crate::actor::ActorDirectory>,
+    federation: &FederationModule,
+    statuses: &StatusesModule,
+    accounts: &AccountsModule,
+) -> SocialGraphModule {
+    let fetcher = Arc::new(RemoteAccountFetcher::new(
+        pool.clone(),
+        Arc::new(ReqwestFederationHttpClient::new()),
+        runtime.clone(),
+        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
+    ));
+    build_social_graph_module(
+        pool,
+        runtime,
+        "state-test.social-graph.internal".to_string(),
+        directory,
+        fetcher,
+        Arc::clone(federation.delivery_service()),
+        federation.block_policy(),
+        &statuses.relationship_query_registry(),
+        accounts.ports(),
+        accounts.service(),
+        NotificationSinkRegistry::new(),
+    )
+}
+
+/// Builds a `TimelinesModule` (task 5.2), mirroring
+/// `sample_social_graph_module`'s own "no real I/O beyond what construction
+/// itself needs" property: `build_timelines_module` only ever stores
+/// `pool`/`runtime` values and clones the caller-supplied `accounts`
+/// `Arc`/`media_store` handle (never dials the database or the network
+/// itself), so this is safe against the same `connect_lazy` pool this
+/// suite's other fixtures use.
+fn sample_timelines_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    accounts: &AccountsModule,
+    media: &MediaModule,
+) -> TimelinesModule {
+    build_timelines_module(pool, runtime, accounts.service(), media.store().clone())
+}
+
+/// Builds a `NotificationModule` (task 4.2), mirroring
+/// `sample_timelines_module`'s own "no real I/O beyond what construction
+/// itself needs" property: `build_notification_module` only ever stores
+/// `pool`/`runtime`/config values, clones the caller-supplied `accounts`
+/// `Arc`/`media_store` handle, and calls `set_event_sink`/`set_sink` on
+/// already-constructed, `connect_lazy`-safe registries (no real I/O either)
+/// — so this is safe against the same `connect_lazy` pool this suite's
+/// other fixtures use.
+fn sample_notification_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    accounts: &AccountsModule,
+    media: &MediaModule,
+) -> NotificationModule {
+    build_notification_module(
+        pool,
+        runtime,
+        "state-test.notifications.internal".to_string(),
+        accounts.service(),
+        media.store().clone(),
+        NotificationSinkRegistry::new(),
+    )
+}
+
+/// Builds a `SearchModule` (task 5.3), mirroring `sample_notification_module`'s
+/// own "no real I/O beyond what construction itself needs" property:
+/// `build_search_module`'s own constructors (`PgSearchBackend::new`,
+/// `SearchHydrator::new`, `RemoteResolver::new`, `ProdRemoteActorResolver::new`,
+/// `StatusIngestService::new`, `RemoteAccountFetcher::new`) only ever store
+/// `pool`/`runtime`/config values and clone the caller-supplied
+/// `directory`/`accounts`/`media` handles (never dial the database or the
+/// network itself), so this is safe against the same `connect_lazy` pool
+/// this suite's other fixtures use.
+fn sample_search_module(
+    pool: sqlx::PgPool,
+    runtime: RuntimeContext,
+    directory: Arc<crate::actor::ActorDirectory>,
+    accounts: &AccountsModule,
+    media: &MediaModule,
+    statuses: &StatusesModule,
+) -> SearchModule {
+    build_search_module(
+        pool,
+        runtime,
+        "state-test.search.internal".to_string(),
+        directory,
+        accounts.service(),
+        accounts.ports(),
+        media.store().clone(),
+        statuses.relationship_query_registry(),
     )
 }
 
@@ -122,8 +385,53 @@ async fn app_state_exposes_the_pool_runtime_context_and_config_it_was_built_with
     let pool = lazy_pool(config.database.max_connections);
     let actor = sample_actor_module(pool.clone(), runtime.clone());
     let oauth = sample_oauth_module(pool.clone(), runtime.clone(), &config);
+    let federation =
+        sample_federation_module(pool.clone(), runtime.clone(), Arc::clone(actor.directory()));
+    let media = sample_media_module(pool.clone(), runtime.clone(), &config);
+    let accounts = sample_accounts_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        media.store().clone(),
+        media.service(),
+        config.media.clone(),
+    );
+    let statuses = sample_statuses_module(pool.clone(), runtime.clone(), &federation);
+    let social_graph = sample_social_graph_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        &federation,
+        &statuses,
+        &accounts,
+    );
+    let timelines = sample_timelines_module(pool.clone(), runtime.clone(), &accounts, &media);
+    let notifications =
+        sample_notification_module(pool.clone(), runtime.clone(), &accounts, &media);
+    let search = sample_search_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        &accounts,
+        &media,
+        &statuses,
+    );
 
-    let state = AppState::new(pool, runtime, config.clone(), actor, oauth);
+    let state = AppState::new(
+        pool,
+        runtime,
+        config.clone(),
+        actor,
+        oauth,
+        federation,
+        media,
+        accounts,
+        statuses,
+        social_graph,
+        timelines,
+        notifications,
+        search,
+    );
 
     // Config values are retrievable and match what was supplied.
     assert_eq!(state.config().server.domain, "state.example.test");
@@ -172,8 +480,53 @@ async fn cloning_app_state_shares_the_same_inner_handle_instead_of_deep_copying(
     let pool = lazy_pool(config.database.max_connections);
     let actor = sample_actor_module(pool.clone(), runtime.clone());
     let oauth = sample_oauth_module(pool.clone(), runtime.clone(), &config);
+    let federation =
+        sample_federation_module(pool.clone(), runtime.clone(), Arc::clone(actor.directory()));
+    let media = sample_media_module(pool.clone(), runtime.clone(), &config);
+    let accounts = sample_accounts_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        media.store().clone(),
+        media.service(),
+        config.media.clone(),
+    );
+    let statuses = sample_statuses_module(pool.clone(), runtime.clone(), &federation);
+    let social_graph = sample_social_graph_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        &federation,
+        &statuses,
+        &accounts,
+    );
+    let timelines = sample_timelines_module(pool.clone(), runtime.clone(), &accounts, &media);
+    let notifications =
+        sample_notification_module(pool.clone(), runtime.clone(), &accounts, &media);
+    let search = sample_search_module(
+        pool.clone(),
+        runtime.clone(),
+        Arc::clone(actor.directory()),
+        &accounts,
+        &media,
+        &statuses,
+    );
 
-    let state = AppState::new(pool, runtime, config, actor, oauth);
+    let state = AppState::new(
+        pool,
+        runtime,
+        config,
+        actor,
+        oauth,
+        federation,
+        media,
+        accounts,
+        statuses,
+        social_graph,
+        timelines,
+        notifications,
+        search,
+    );
     assert_eq!(Arc::strong_count(&state.inner), 1);
 
     let cloned = state.clone();
