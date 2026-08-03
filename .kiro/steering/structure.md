@@ -1,6 +1,6 @@
 # Project Structure
 
-> 実装が進行中（`core-runtime` / `actor-model` スペックの主要タスクが実装済み）。以下は実コードから確認された構成原則。
+> Phase 1（MVP）の全 11 spec（core-runtime / actor-model / api-foundation / federation-core / media-pipeline / accounts-and-instance / statuses-core / social-graph / timelines / notifications / search）が実装済み。以下は実コードから確認された構成原則。
 
 ## Organization Philosophy
 
@@ -22,6 +22,9 @@ clock / id generator / RNG / 署名鍵は具体実装に直接依存させず、
 
 ### 独自連合方言の正規化境界
 絵文字リアクション・引用は実装ごとに方言が乱立する（Misskey `Like`+`_misskey_reaction` / Pleroma `EmojiReact` / `quoteUrl` / FEP-e232 等）。**受信時の正規化／送信時の出し分け**を専用の境界に集約し、コア状態モデルから方言を隔離する。
+
+### Ports & Adapters（差し替え境界）の置き場
+下流所有情報や外部副作用への依存を抽象境界の背後に隔離する spec（accounts-and-instance / media-pipeline / notifications / search 等）は、各モジュールの `<module>/ports.rs` にトレイト定義・既定実装（no-op や PostgreSQL 標準実装）・swap-in テストダブルをまとめる（例：`search/ports.rs` の `SearchBackend` + `StubSearchBackend`、`accounts/ports.rs` の `*Provider` 群、`notifications/ports.rs` の `*Sink` + `NoopSink`）。design.md 側では該当コンポーネントを「Port」と呼ぶ。ただし境界が 1 モジュールに閉じ単純な場合（`media/store.rs` の `MediaStore`、`runtime/signing_key.rs` の `SigningKeyProvider`）はトレイトを実装ファイルに直接置いてよく、`ports.rs` への分離は必須ではない。
 
 ### バックエンド一体配信
 フロント（React）のビルド済み資産・DB マイグレーション・SPA 配信はバックエンドバイナリに同梱する前提で構成する（別 Web サーバーを構造に持ち込まない）。
