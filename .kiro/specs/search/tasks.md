@@ -43,7 +43,7 @@
   - _Depends: 2.1_
 
 - [ ] 3. 照合: 標準 PostgreSQL 最小バックエンド
-- [ ] 3.1 PgSearchBackend のアカウント・投稿照合を実装する
+- [x] 3.1 PgSearchBackend のアカウント・投稿照合を実装する
   - `src/search/pg_backend.rs` に `search_accounts`（ローカル/既知リモートの display_name/username/acct 部分一致で `AccountRef` 群）と `search_statuses`（閲覧者可視候補の投稿 `Id` 群、`account_id` 絞り、本文部分一致）を標準 SQL（`ILIKE`）で実装し、`limit`/`offset` を反映する
   - 観測可能な完了条件: アカウント/投稿照合が識別子のみを返し、`account_id` 絞り・`limit`/`offset` が効き、必須拡張なしで動作する統合テストが通る
   - _Requirements: 3.1, 3.4, 4.1, 4.3, 4.4, 4.5, 4.6, 7.2_
@@ -127,3 +127,6 @@
 
 - グループ1 (1.1-1.4) を通じて: `notifications`/`statuses`/`timelines` 等の既存テストで「無関係な事前失敗」の件数がラン毎に大きく変動する現象を確認（同一コード状態で 15/22/49/65 件など）。原因は `src/test_harness.rs` の共有テスト用 Postgres プールが `max_connections: 1` に設定されていることによる並列実行時のコネクション競合と推定される（`search` 配下のテストは DB を使わないため影響を受けない）。今後のタスクレビューで「事前失敗件数」を回帰の判定基準として使う場合は、この既知のフレーキー要因を差し引いて判断すること。search spec 自体の修正対象ではないため本タスクでは対応しない。
 - タスク 1.1: `tasks.md`/`design.md` が指定するマイグレーション番号 `0010` は実際には未使用の予約済み欠番だった（`migrations/` は 0001-0007/0009/0011/0012 まで既に埋まっており、0008/0010 は他 spec の design.md が並列生成時に重複して主張した未使用番号であることが `social-graph/tasks.md` の Implementation Notes で先に判明済み）。次の空き番号 `migrations/0013_search.sql` を採用した。番号以外は design.md の Physical Data Model ブロックと完全一致（`search_tags`/`search_status_tags`/`search_index_watermark`、`text_pattern_ops` 前方一致索引、シングルトン CHECK 制約、`CREATE EXTENSION` なし）。今後 search 内で新規マイグレーションが必要になった場合は 0014 以降を使うこと。
+- タスク 3.1: `PgSearchBackend::search_accounts` のローカルアカウント一致対象は design.md の「`PgSearchBackend` が依存する upstream カラム」表に厳密に従い `account_profiles.display_name` のみとした（`local_actors` のユーザー名/ハンドル列は表に存在せず、表は「上記以外のカラムは参照しない」と明言）。requirements.md 3.1 の「表示名・ユーザー名・ハンドル（acct）」という文言はより広い読み方も可能だが、本タスクでは design.md の upstream カラム表を権威あるソースとして扱った（レビューで許容済み、CONCERN として明記）。将来この境界を見直す場合は design.md の当該表と requirements.md 3.1 の整合を先に取ること。
+- タスク 3.1: `PgSearchBackend::search_statuses` は `viewer`/可視性を一切フィルタしない（`ports.rs` の `StatusQuery` doc comment と design.md の記述どおり、候補抽出のみを担い最終可視性はタスク 4.2 の `SearchHydrator` が再適用する設計）。タスク 4.2 実装時にこの前提（`PgSearchBackend` からは不可視投稿を含む候補が返り得る）を踏まえること。
+- タスク 3.1: 投稿検索のオーバーフェッチマージンは design.md が具体値を指定していないため実装定数 `STATUS_OVERFETCH_MARGIN = 20`（SQL `LIMIT` は `max(limit*2, limit+20)`、`OFFSET` は要求値のまま）をコード中に明文化して採用した。タスク 4.2 の `SearchHydrator` 側の切り詰めロジックはこの規約を前提にできる。

@@ -67,19 +67,34 @@
 //!   `PgSearchBackend` happens here — that is task 3.2's job, strictly
 //!   downstream of this module.
 //!
+//! - Task 3.1 (`Boundary: PgSearchBackend`): the standard-PostgreSQL default
+//!   [`ports::SearchBackend`] implementation —
+//!   [`pg_backend::PgSearchBackend::search_accounts`] (local
+//!   `account_profiles.display_name` / known-remote `remote_accounts.
+//!   username`/`domain`/`display_name`/synthesized-acct partial match,
+//!   `ILIKE`) and
+//!   [`pg_backend::PgSearchBackend::search_statuses`] (`statuses.content`
+//!   partial match, optional `account_id` scope, design.md's overfetch
+//!   convention), both `limit`/`offset`-aware and extension-free
+//!   (Requirements 3.1, 3.4, 4.1, 4.3, 4.4, 4.5, 4.6, 7.2). `search_hashtags`
+//!   is a documented `unimplemented!()` placeholder — that is task 3.2's
+//!   job, strictly downstream of this module. See [`pg_backend`]'s own doc
+//!   comment for the full SQL query surface and its CONCERNs.
+//!
 //! This file will eventually become the `SearchModule` composition point
 //! (design.md's File Structure Plan: "`src/search.rs` — SearchModule
-//! 組み立て...と公開・ルータ装着点") once later tasks (2.2-5.3:
-//! `hashtag_indexer`, `pg_backend`, `remote_resolver`, `hydrator`,
-//! `tag_serializer`, `result_serializer`, `service`, `endpoint`, and their
-//! wiring into `AppState`/bootstrap/server) land. For now it declares the
-//! `model`/`query_parser`/`ports`/`hashtag_repository` submodules and
-//! re-exports `model`'s/`ports`' types — no backend adapter, indexer,
-//! resolver, serializer, service, endpoint, or wiring code exists yet.
+//! 組み立て...と公開・ルータ装着点") once later tasks (3.2-5.3:
+//! `remote_resolver`, `hydrator`, `tag_serializer`, `result_serializer`,
+//! `service`, `endpoint`, and their wiring into `AppState`/bootstrap/server)
+//! land. For now it declares the `model`/`query_parser`/`ports`/
+//! `hashtag_repository`/`hashtag_indexer`/`pg_backend` submodules and
+//! re-exports `model`'s/`ports`' types — no remote resolver, hydrator,
+//! serializer, service, endpoint, or wiring code exists yet.
 
 pub mod hashtag_indexer;
 pub mod hashtag_repository;
 pub mod model;
+pub mod pg_backend;
 pub mod ports;
 pub mod query_parser;
 
