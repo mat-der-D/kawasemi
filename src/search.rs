@@ -107,18 +107,32 @@
 //!   `SearchMatches` identifiers into the JSON these two modules consume)
 //!   is not implemented yet.
 //!
+//! - Task 4.2 (`Boundary: SearchHydrator`): the identifier-to-JSON
+//!   concretization boundary — [`hydrator::SearchHydrator::hydrate_accounts`]
+//!   (dedup + `following`-scoped filter + accounts-and-instance Account
+//!   serialization), [`hydrator::SearchHydrator::hydrate_statuses`]
+//!   (statuses-core visible-status resolution via `crate::statuses::
+//!   visibility::is_visible` + Status serialization, truncated to the
+//!   requested `limit` after visibility filtering), and
+//!   [`hydrator::SearchHydrator::hydrate_hashtags`] (`TagMatch` ->
+//!   [`model::TagView`] re-resolution -> [`tag_serializer::TagSerializer::
+//!   build_tag`]). See [`hydrator`]'s own doc comment for the full
+//!   reasoning. `RemoteResolver` (task 4.3), `SearchService`/`SearchEndpoint`
+//!   (task 5.x), and `SearchModule` wiring are not implemented yet.
+//!
 //! This file will eventually become the `SearchModule` composition point
 //! (design.md's File Structure Plan: "`src/search.rs` — SearchModule
-//! 組み立て...と公開・ルータ装着点") once later tasks (4.2-5.3:
-//! `remote_resolver`, `hydrator`, `service`, `endpoint`, and their wiring
-//! into `AppState`/bootstrap/server) land. For now it declares the
+//! 組み立て...と公開・ルータ装着点") once later tasks (4.3-5.3:
+//! `remote_resolver`, `service`, `endpoint`, and their wiring into
+//! `AppState`/bootstrap/server) land. For now it declares the
 //! `model`/`query_parser`/`ports`/`hashtag_repository`/`hashtag_indexer`/
-//! `pg_backend`/`tag_serializer`/`result_serializer` submodules and
-//! re-exports `model`'s/`ports`' types — no remote resolver, hydrator,
-//! service, endpoint, or wiring code exists yet.
+//! `pg_backend`/`tag_serializer`/`result_serializer`/`hydrator` submodules
+//! and re-exports `model`'s/`ports`'/`hydrator`'s types — no remote
+//! resolver, service, endpoint, or wiring code exists yet.
 
 pub mod hashtag_indexer;
 pub mod hashtag_repository;
+pub mod hydrator;
 pub mod model;
 pub mod pg_backend;
 pub mod ports;
@@ -126,6 +140,7 @@ pub mod query_parser;
 pub mod result_serializer;
 pub mod tag_serializer;
 
+pub use hydrator::SearchHydrator;
 pub use model::{
     ParsedQuery, SearchMatches, SearchParams, SearchType, TagHistoryEntry, TagMatch, TagView,
 };

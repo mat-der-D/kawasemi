@@ -63,7 +63,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
   - _Boundary: TagSerializer, SearchResultSerializer_
   - _Depends: 1.2_
-- [ ] 4.2 検索ハイドレータを実装する
+- [x] 4.2 検索ハイドレータを実装する
   - `src/search/hydrator.rs` に `hydrate_accounts`（accounts-and-instance の Account シリアライズ・複数 ID 一括・一意化・`following` 最終フィルタ）/ `hydrate_statuses`（statuses-core 可視投稿解決 + `VisibilityPolicy` で不可視除外 + Status シリアライズ）/ `hydrate_hashtags`（`TagView`→`TagSerializer`）を実装する
   - 観測可能な完了条件: 重複アカウントが一意化され、閲覧者不可視の投稿が必ず除外され、ハッシュタグが Tag JSON 化される統合テストが通る
   - _Requirements: 1.2, 3.2, 3.3, 3.5, 4.2, 5.2_
@@ -132,3 +132,4 @@
 - タスク 3.1: 投稿検索のオーバーフェッチマージンは design.md が具体値を指定していないため実装定数 `STATUS_OVERFETCH_MARGIN = 20`（SQL `LIMIT` は `max(limit*2, limit+20)`、`OFFSET` は要求値のまま）をコード中に明文化して採用した。タスク 4.2 の `SearchHydrator` 側の切り詰めロジックはこの規約を前提にできる。
 - タスク 4.1: `tests/search_contract_it.rs`（design.md File Structure Plan・`Boundary: search_contract_it`）は本タスクでは作成しなかった。同ファイル/境界はタスク 6.1 所有（`_Depends: 5.3_`、`SearchService`/`SearchEndpoint`/`AppState` 配線完了後）であり、本タスクのゴールデンは notifications タスク 2.1 vs 5.1・accounts-and-instance タスク 3.5 vs 7.3・statuses-core タスク 8.2 と同じ「純粋関数の単体ゴールデンを先に登録し、フルパイプラインの契約テストは配線完了後の別タスクに委ねる」既存慣行に従い `src/search/tag_serializer/tests.rs` / `src/search/result_serializer/tests.rs` に `crate::contract::assert_golden` で登録した。
 - タスク 4.1: `TagSerializer::build_tag` の `url` はリクエストごとの `X-Forwarded-*` を考慮しない固定 `https://{domain}` オリジン（コンストラクタ供給）から構築した。design.md の `build_tag(&self, tag: &TagView)` シグネチャにはリクエスト/オリジン引数がなく、既存の `NotificationService::origin` と同一の前提（「この深さではライブなリクエストごとのオリジンを取得できない」）に倣った判断（レビューで許容済み）。
+- タスク 4.2: `hydrate_accounts` は crate 内に複数 ID 一括解決 API が存在しないため（`AccountService::show_account` は単一 ID のみ）、`AccountStatusesProviderImpl`/`NotificationService`/`StatusHydrator` と同じ単一 ID ループ規約を踏襲した。`hydrate_statuses` も同様に `StatusService` を経由せず `crate::statuses::visibility::is_visible` + `RelationshipQueryRegistry` を直接呼ぶ既存規約（`AccountStatusesProviderImpl`/`NotificationService`）に倣った（レビューで確認済み）。Status JSON 組み立てのグルーコード（`render_status`/`leaf_render_input` 等）はこれで crate 内 4 箇所目の重複となっており、将来の共通ヘルパー抽出候補として記録するが本タスクの境界外のため未対応。`hydrate_hashtags` は `SearchBackend::search_hashtags` が識別子のみの `TagMatch` を返す契約（7.2）に合わせ、`HashtagIndexRepository::match_hashtags` をタグ名ごとに再照会して `TagView` を復元する（`search_tags.name` の UNIQUE 制約 + 完全一致フィルタで安全性を担保）。
