@@ -110,7 +110,7 @@
   - _Requirements: 3.1, 3.3, 3.4, 3.5, 4.1, 4.2, 4.3, 4.6, 5.1, 5.3, 5.4, 5.5_
   - _Boundary: search_accounts_it, search_statuses_it, search_hashtags_it_
   - _Depends: 5.3_
-- [ ] 6.3 (P) リモート解決・type/スコープの統合テスト
+- [x] 6.3 (P) リモート解決・type/スコープの統合テスト
   - `resolve=true` 認証時の `acct:`→Account（WebFinger モック）・URL→Status・取得失敗の除外・未認証/`resolve=false` のローカル限定、`type` 絞りの他種別空配列、空クエリ 422、`read:search` 認証/スコープ（401/403）を検証する
   - 観測可能な完了条件: リモート解決が認証・resolve 条件どおり振る舞い失敗を除外し、type 絞り・空クエリ拒否・スコープ制御が成立する統合テストが通る
   - _Requirements: 2.2, 2.4, 6.1, 6.2, 6.3, 6.4, 6.5, 9.1, 9.2_
