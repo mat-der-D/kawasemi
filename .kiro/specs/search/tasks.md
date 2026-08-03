@@ -98,7 +98,7 @@
   - _Depends: 5.2_
 
 - [ ] 6. 検証
-- [ ] 6.1 (P) SearchResults / Tag 契約のゴールデンテスト
+- [x] 6.1 (P) SearchResults / Tag 契約のゴールデンテスト
   - 決定的 `RuntimeContext` で SearchResults（空配列規律・`accounts`/`statuses` の上流埋め込み形）と Tag（`name`/`url`/`history`）のゴールデンを固定し、実クライアントキャプチャをフィクスチャ登録する
   - 観測可能な完了条件: ゴールデンが決定的に再現され、空種別が `[]`、Account/Status が上流出力のまま格納されることが契約テストで確認できる
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
