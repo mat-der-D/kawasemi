@@ -82,7 +82,7 @@ fn query(term: &str, limit: u32, offset: u32) -> AccountQuery {
 #[tokio::test]
 async fn search_accounts_matches_local_account_by_display_name_substring() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     let alice = insert_local_account(&app, "Alice Wonderland").await;
 
     let matches = backend
@@ -101,7 +101,7 @@ async fn search_accounts_matches_local_account_by_display_name_substring() {
 #[tokio::test]
 async fn search_accounts_matches_remote_account_by_username_substring() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     let bob = insert_remote_account(&app, "bobby", "example.social", "Bob Marley").await;
 
     let matches = backend
@@ -120,7 +120,7 @@ async fn search_accounts_matches_remote_account_by_username_substring() {
 #[tokio::test]
 async fn search_accounts_matches_remote_account_by_synthesized_acct() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     let carol = insert_remote_account(&app, "carol", "remote.example", "Carol Danvers").await;
 
     let matches = backend
@@ -141,7 +141,7 @@ async fn search_accounts_matches_remote_account_by_synthesized_acct() {
 #[tokio::test]
 async fn search_accounts_only_returns_accounts_that_actually_match() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     let alice = insert_local_account(&app, "Alice Wonderland").await;
     insert_remote_account(&app, "bobby", "example.social", "Bob Marley").await;
 
@@ -160,7 +160,7 @@ async fn search_accounts_only_returns_accounts_that_actually_match() {
 #[tokio::test]
 async fn search_accounts_applies_limit_and_offset() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     let first = insert_local_account(&app, "Tagalpha").await;
     let second = insert_local_account(&app, "Tagbeta").await;
     let third = insert_remote_account(&app, "taggamma", "example.social", "Tag Gamma").await;
@@ -196,7 +196,7 @@ async fn search_accounts_applies_limit_and_offset() {
 #[tokio::test]
 async fn search_accounts_returns_empty_for_no_match() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     insert_local_account(&app, "Alice Wonderland").await;
 
     let matches = backend

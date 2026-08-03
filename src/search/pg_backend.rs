@@ -1,20 +1,25 @@
 //! `PgSearchBackend` (design.md "Search Port / 照合境界層" ->
 //! `SearchBackend(ports) / PgSearchBackend`, Requirements 3.1, 3.4, 4.1,
-//! 4.3, 4.4, 4.5, 4.6, 7.2; task 3.1, `Boundary: PgSearchBackend`): the
-//! standard-PostgreSQL default [`crate::search::ports::SearchBackend`]
-//! implementation — `search_accounts` (local/known-remote display_name/
-//! username/acct partial match) and `search_statuses` (visibility-candidate
-//! post body partial match, optional `account_id` scope), both via plain SQL
-//! `ILIKE` (Requirement 4.4/8.1: no required PostgreSQL extension).
+//! 4.3, 4.4, 4.5, 4.6, 5.1, 5.3, 5.5, 7.2; tasks 3.1 and 3.2, `Boundary:
+//! PgSearchBackend`): the standard-PostgreSQL default
+//! [`crate::search::ports::SearchBackend`] implementation —
+//! `search_accounts` (local/known-remote display_name/username/acct
+//! partial match), `search_statuses` (visibility-candidate post body
+//! partial match, optional `account_id` scope), both via plain SQL `ILIKE`
+//! (Requirement 4.4/8.1: no required PostgreSQL extension), and
+//! `search_hashtags` (task 3.2: on-demand `HashtagIndexer` catch-up scan
+//! followed by `HashtagIndexRepository` name matching, see this module's
+//! own doc comment "`search_hashtags`: on-demand catch-up then read-index
+//! match" further down).
 //!
-//! Scope: this module owns exactly this task's own two methods on
-//! [`PgSearchBackend`] — `search_accounts` and `search_statuses`. It does
-//! not touch `src/search/ports.rs`, `src/search/model.rs`,
+//! Scope: task 3.1 owns [`PgSearchBackend`]'s `search_accounts` and
+//! `search_statuses` methods; task 3.2 (this task) owns exactly its
+//! `search_hashtags` method, wiring it to
+//! [`crate::search::hashtag_indexer::catch_up_from_watermark`] and
+//! [`crate::search::hashtag_repository::match_hashtags`] — both already
+//! implemented/committed by earlier tasks and not modified here. This
+//! module does not touch `src/search/ports.rs`, `src/search/model.rs`,
 //! `src/search/hashtag_repository.rs`, or `src/search/hashtag_indexer.rs`.
-//! `search_hashtags` (task 3.2's job, `HashtagIndexRepository` wiring) is a
-//! documented placeholder here only so this struct compiles as a full
-//! [`crate::search::ports::SearchBackend`] impl — see this module's own doc
-//! comment further down for why.
 //!
 //! ## SQL query surface (design.md's own "`PgSearchBackend` が依存する
 //! upstream カラム" table, authoritative over a broader reading of
@@ -88,23 +93,35 @@
 //! "返却件数はオーバーフェッチ件数以下で `limit` を超えうる（切り詰めは Hydrator
 //! 側の責務）").
 //!
-//! ## `search_hashtags` is an out-of-boundary placeholder (task 3.2's job)
-//! [`crate::search::ports::SearchBackend`] requires all three methods for
-//! `impl SearchBackend for PgSearchBackend` to compile at all, but this
-//! task's own instructions are explicit that `search_hashtags`
-//! (`HashtagIndexRepository` wiring) is task 3.2's job, strictly downstream
-//! of and outside this task's boundary, and that this task must not
-//! implement it beyond a documented placeholder. This module's
-//! `search_hashtags` therefore `unimplemented!()`s with a doc comment
-//! pointing at task 3.2 — it is never called by any test this task adds.
-//! Flagged as a CONCERN in this task's status report per this task's own
-//! brief.
+//! ## `search_hashtags`: on-demand catch-up then read-index match (task 3.2)
+//! design.md's "ハッシュタグ照合と読み取りインデックス導出" flow diagram
+//! places "on demand catch up scan from watermark" *before* "hashtag index
+//! repository name match", inside the same request — not a separately
+//! scheduled background job. [`PgSearchBackend::search_hashtags`] therefore
+//! always calls
+//! [`crate::search::hashtag_indexer::catch_up_from_watermark`] first, every
+//! call (unconditionally — this task's own instruction is explicit the
+//! catch-up runs "検索直前までのタグ状態に追いつかせ", i.e. immediately
+//! before matching, not merely on a first request), so that a post inserted
+//! upstream after the read index's watermark was last advanced is still
+//! found by this same call, then matches `q.term` against the now
+//! caught-up index via
+//! [`crate::search::hashtag_repository::match_hashtags`] (Requirements 5.1,
+//! 5.3), with `q.limit`/`q.offset` applied in that function's own SQL
+//! (Requirement 5.5). `match_hashtags` returns
+//! [`crate::search::model::TagView`] (`name`/`url`/`history`) — this method
+//! maps each down to the bare [`TagMatch`] (`name` only) this port's return
+//! type requires (Requirement 7.2); `url`/`history` are dropped here as
+//! `TagSerializer`'s (task 4.1's) concern, not this port's.
 
 use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
+use crate::runtime::RuntimeContext;
+use crate::search::hashtag_indexer::catch_up_from_watermark;
+use crate::search::hashtag_repository::match_hashtags;
 use crate::search::model::TagMatch;
 use crate::search::ports::{AccountQuery, HashtagQuery, SearchBackend, StatusQuery};
 
@@ -136,12 +153,15 @@ fn overfetch_limit(limit: u32) -> u32 {
 /// implementing an `&self` async port (see this module's own doc comment).
 pub struct PgSearchBackend {
     pool: PgPool,
+    runtime: RuntimeContext,
 }
 
 impl PgSearchBackend {
-    /// Builds a `PgSearchBackend` against `pool`.
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    /// Builds a `PgSearchBackend` against `pool`, using `runtime` (time/id
+    /// sourcing, this crate's established DI boundary) for
+    /// `search_hashtags`'s on-demand `catch_up_from_watermark` scan.
+    pub fn new(pool: PgPool, runtime: RuntimeContext) -> Self {
+        Self { pool, runtime }
     }
 }
 
@@ -222,10 +242,29 @@ impl SearchBackend for PgSearchBackend {
         Ok(rows.into_iter().map(|(id,)| Id::from_i64(id)).collect())
     }
 
-    /// Not implemented by this task — see this module's own doc comment
-    /// ("`search_hashtags` is an out-of-boundary placeholder"). Task 3.2
-    /// wires this method to `crate::search::hashtag_repository`.
-    async fn search_hashtags(&self, _q: &HashtagQuery) -> Result<Vec<TagMatch>, AppError> {
-        unimplemented!("PgSearchBackend::search_hashtags: task 3.2's job, not task 3.1's")
+    /// Runs the on-demand `HashtagIndexer` catch-up scan
+    /// ([`crate::search::hashtag_indexer::catch_up_from_watermark`]) first,
+    /// bringing this spec's own read index (`search_tags`/
+    /// `search_status_tags`) up to date with every `statuses` row newer
+    /// than its watermark, then matches `q.term` against that freshly
+    /// caught-up index via
+    /// [`crate::search::hashtag_repository::match_hashtags`] (Requirements
+    /// 5.1, 5.3), applying `q.limit`/`q.offset` in SQL (Requirement 5.5).
+    /// The richer [`crate::search::model::TagView`] `match_hashtags`
+    /// returns is mapped down to the bare [`TagMatch`] identifier this
+    /// port's return type requires (Requirement 7.2) — `url`/`history` are
+    /// dropped here, not this task's concern (see design.md's flow, "on
+    /// demand catch up scan from watermark" happens before "hashtag index
+    /// repository name match", inside this single request, every call —
+    /// never a separate background job).
+    async fn search_hashtags(&self, q: &HashtagQuery) -> Result<Vec<TagMatch>, AppError> {
+        catch_up_from_watermark(&self.pool, &self.runtime).await?;
+
+        let views = match_hashtags(&self.pool, &q.term, q.limit, q.offset).await?;
+
+        Ok(views
+            .into_iter()
+            .map(|view| TagMatch { name: view.name })
+            .collect())
     }
 }

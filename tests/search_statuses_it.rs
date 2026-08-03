@@ -85,7 +85,7 @@ fn query(term: &str, viewer: Id, account_id: Option<Id>, limit: u32, offset: u32
 #[tokio::test]
 async fn search_statuses_matches_content_substring() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     let author = app.runtime.ids.next_id();
     let viewer = app.runtime.ids.next_id();
     let matching = insert_test_status(&app, author, "hello rustlang world", 0).await;
@@ -106,7 +106,7 @@ async fn search_statuses_matches_content_substring() {
 #[tokio::test]
 async fn search_statuses_scopes_to_account_id() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     let viewer = app.runtime.ids.next_id();
     let author_a = app.runtime.ids.next_id();
     let author_b = app.runtime.ids.next_id();
@@ -146,7 +146,7 @@ async fn search_statuses_scopes_to_account_id() {
 #[tokio::test]
 async fn search_statuses_applies_limit_and_offset() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     let author = app.runtime.ids.next_id();
     let viewer = app.runtime.ids.next_id();
     let gamma = insert_test_status(&app, author, "paginate gamma", 0).await;
@@ -193,7 +193,7 @@ async fn search_statuses_applies_limit_and_offset() {
 #[tokio::test]
 async fn search_statuses_may_overfetch_beyond_requested_limit() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     let author = app.runtime.ids.next_id();
     let viewer = app.runtime.ids.next_id();
     for i in 0..5 {
@@ -224,7 +224,7 @@ async fn search_statuses_may_overfetch_beyond_requested_limit() {
 #[tokio::test]
 async fn search_statuses_offset_is_not_scaled_by_overfetch() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     let author = app.runtime.ids.next_id();
     let viewer = app.runtime.ids.next_id();
     let oldest = insert_test_status(&app, author, "offsetterm row zero", 0).await;
@@ -245,7 +245,7 @@ async fn search_statuses_offset_is_not_scaled_by_overfetch() {
 #[tokio::test]
 async fn search_statuses_returns_empty_for_no_match() {
     let app = spawn_test_app().await;
-    let backend = PgSearchBackend::new(app.pool.clone());
+    let backend = PgSearchBackend::new(app.pool.clone(), app.runtime.clone());
     let author = app.runtime.ids.next_id();
     let viewer = app.runtime.ids.next_id();
     insert_test_status(&app, author, "hello rustlang world", 0).await;

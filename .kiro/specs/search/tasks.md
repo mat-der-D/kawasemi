@@ -49,7 +49,7 @@
   - _Requirements: 3.1, 3.4, 4.1, 4.3, 4.4, 4.5, 4.6, 7.2_
   - _Boundary: PgSearchBackend_
   - _Depends: 1.4_
-- [ ] 3.2 PgSearchBackend のハッシュタグ照合を結線する
+- [x] 3.2 PgSearchBackend のハッシュタグ照合を結線する
   - `pg_backend.rs` の `search_hashtags` で、まず `HashtagIndexer::catch_up_from_watermark` をオンデマンド実行して検索直前までのタグ状態に追いつかせ、続けて `HashtagIndexRepository::match_hashtags` へ結線して `TagMatch` 群を `limit`/`offset` 付きで返す
   - 観測可能な完了条件: ハッシュタグ照合の直前に watermark 以降の新規投稿が取り込まれたうえで、読み取りインデックス経由の `TagMatch` が返る統合テストが通る
   - _Requirements: 5.1, 5.3, 5.5_
