@@ -84,7 +84,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.5, 5.4, 6.3, 6.5, 7.1, 9.5_
   - _Boundary: SearchService_
   - _Depends: 3.2, 4.2, 4.3_
-- [ ] 5.2 検索エンドポイントを実装する
+- [x] 5.2 検索エンドポイントを実装する
   - `src/search/endpoint.rs` に `GET /api/v2/search` ハンドラを実装し、Bearer + `read:search` を要求、`q`/`type`/`resolve`/`following`/`account_id`/`limit`/`offset`/`exclude_unreviewed` を抽出して `SearchParams` を構築（`limit`/`offset` は api-foundation 規約で丸め）、失敗は Mastodon 互換エラー本文で返す
   - 観測可能な完了条件: 認証時に SearchResults が返り、未認証 401・`read:search` 欠落 403・空クエリ 422 になり、`limit`/`offset` が規約どおり丸められる統合テストが通る
   - _Requirements: 2.3, 2.4, 9.1, 9.2, 9.3_

@@ -148,16 +148,31 @@
 //!   and `SearchModule`/`AppState`/bootstrap/router wiring (task 5.3) are
 //!   not implemented yet.
 //!
+//! - Task 5.2 (`Boundary: SearchEndpoint`): the `GET /api/v2/search` HTTP
+//!   handler — [`endpoint::search`] requires Bearer + `read:search`
+//!   (Requirement 9.1), extracts `q`/`type`/`resolve`/`following`/
+//!   `account_id`/`limit`/`offset`/`exclude_unreviewed` into a
+//!   [`model::SearchParams`] (`limit`/`offset` rounded per the
+//!   api-foundation convention, Requirements 2.5, 9.3), and delegates the
+//!   entire pipeline to [`service::SearchService::search`] — never
+//!   reimplementing it. Every failure renders through `AppError`'s already-
+//!   wired Mastodon-compatible `IntoResponse` impl (Requirement 9.2). See
+//!   [`endpoint`]'s own doc comment for the full reasoning and this task's
+//!   own documented CONCERNs. `SearchModule`/`AppState`/bootstrap/router
+//!   wiring (task 5.3) is not implemented yet — this handler is not mounted
+//!   onto the live application.
+//!
 //! This file will eventually become the `SearchModule` composition point
 //! (design.md's File Structure Plan: "`src/search.rs` — SearchModule
-//! 組み立て...と公開・ルータ装着点") once the remaining tasks (5.2-5.3:
-//! `endpoint` and its wiring into `AppState`/bootstrap/server) land. For now
-//! it declares the `model`/`query_parser`/`ports`/`hashtag_repository`/
-//! `hashtag_indexer`/`pg_backend`/`tag_serializer`/`result_serializer`/
-//! `hydrator`/`remote_resolver`/`service` submodules and re-exports each
-//! one's public types — no endpoint or `AppState`/bootstrap/router wiring
-//! code exists yet.
+//! 組み立て...と公開・ルータ装着点") once the remaining task (5.3: wiring
+//! into `AppState`/bootstrap/server) lands. For now it declares the
+//! `model`/`query_parser`/`ports`/`hashtag_repository`/`hashtag_indexer`/
+//! `pg_backend`/`tag_serializer`/`result_serializer`/`hydrator`/
+//! `remote_resolver`/`service`/`endpoint` submodules and re-exports each
+//! one's public types — no `AppState`/bootstrap/router wiring code exists
+//! yet.
 
+pub mod endpoint;
 pub mod hashtag_indexer;
 pub mod hashtag_repository;
 pub mod hydrator;
@@ -170,6 +185,7 @@ pub mod result_serializer;
 pub mod service;
 pub mod tag_serializer;
 
+pub use endpoint::{SEARCH_PATH, SearchEndpointsState, search};
 pub use hydrator::SearchHydrator;
 pub use model::{
     ParsedQuery, SearchMatches, SearchParams, SearchType, TagHistoryEntry, TagMatch, TagView,
