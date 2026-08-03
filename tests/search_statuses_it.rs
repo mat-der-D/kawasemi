@@ -24,10 +24,49 @@
 //! repository function), mirroring `src/statuses/tag_repository/tests.rs`'s
 //! established convention for building genuine `statuses` rows in a search-
 //! adjacent spec's own test file.
+//!
+//! ## Task 6.2 additions: invisible posts never leak through the real, full
+//! pipeline (search spec task 6.2, `Boundary: search_statuses_it`;
+//! Requirements 3.3 (viewer-scoped visibility, applied to statuses via
+//! `statuses-core`'s own policy), 4.1, 4.2)
+//!
+//! The tests above prove `PgSearchBackend::search_statuses` itself performs
+//! no visibility filtering at all (by design — see this file's own doc
+//! comment, "Scope: visibility is NOT enforced by this backend") and
+//! `src/search/hydrator/tests.rs` already proves `SearchHydrator::
+//! hydrate_statuses` excludes an invisible candidate id in isolation — but
+//! always by handing hand-picked ids directly to `hydrate_statuses`, never
+//! by actually running them through `PgSearchBackend::search_statuses`'s own
+//! content-`ILIKE` matching first. This task's own dispatch brief calls out
+//! this exact gap ("不可視投稿が漏れず" verified as one continuous, real
+//! pipeline). The tests below close it by driving a real
+//! `GET /api/v2/search?type=statuses` request through the actual HTTP router
+//! (`crate::server::build_router`, mirroring `tests/search_contract_it.rs`'s
+//! established full-pipeline technique): a genuinely `Direct`-visibility
+//! post (matched by `PgSearchBackend`'s own `ILIKE`, since this backend does
+//! not filter by visibility) must never appear in a non-author searcher's
+//! `statuses` results, while a `Public` post matching the same term does —
+//! proving the real, wired-together `PgSearchBackend` -> `SearchHydrator`
+//! (-> `crate::statuses::visibility::is_visible`, via the real
+//! `social_graph::providers::RelationshipQueryImpl`) chain never leaks an
+//! invisible candidate end to end, not merely that `SearchHydrator`'s own
+//! filter is correct against hand-picked ids.
 
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
+use serde_json::Value;
+use tower::ServiceExt;
+
+use kawasemi::actor::owner::create_owner;
+use kawasemi::actor::{ActorType, Handle, NewActor, ResolvedActor};
 use kawasemi::domain::{Id, Visibility};
+use kawasemi::oauth::app_repository::{self, NewApp};
+use kawasemi::oauth::model::ScopeSet as ModelScopeSet;
+use kawasemi::oauth::token_repository::{self, NewAccessToken};
 use kawasemi::search::pg_backend::PgSearchBackend;
 use kawasemi::search::ports::{SearchBackend, StatusQuery};
+use kawasemi::server;
 use kawasemi::statuses::model::Status;
 use kawasemi::statuses::status_repository::insert_status;
 use kawasemi::test_harness::{TestApp, spawn_test_app};
@@ -255,6 +294,240 @@ async fn search_statuses_returns_empty_for_no_match() {
         .await
         .expect("search_statuses must succeed even with no matches");
     assert!(matches.is_empty());
+
+    app.cleanup().await;
+}
+
+// ==========================================================================
+// Task 6.2 additions: invisible posts never leak through the real, full
+// pipeline (Requirements 3.3, 4.1, 4.2). See this file's own doc comment,
+// "Task 6.2 additions", for why this drives the actual
+// `GET /api/v2/search` HTTP endpoint rather than calling `SearchHydrator`
+// directly.
+//
+// Fixture plumbing below mirrors `tests/search_contract_it.rs`'s own
+// already-reviewed helpers of the same names (each `tests/*.rs` file is its
+// own compiled crate, so this deliberately duplicates rather than imports).
+// ==========================================================================
+
+async fn insert_actor_fixture(app: &TestApp, handle_str: &str) -> ResolvedActor {
+    let owner_id = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+    create_owner(&app.pool, owner_id, now)
+        .await
+        .expect("creating the owner fixture must succeed");
+
+    let actor = app
+        .actor
+        .actor_service()
+        .create_actor(NewActor {
+            owner_id,
+            handle: Handle::new(handle_str).expect("test handle must be valid"),
+            actor_type: ActorType::Person,
+            display_name: format!("Search Statuses IT {handle_str}"),
+            summary: "an actor used by the search_statuses_it integration test".to_string(),
+        })
+        .await
+        .expect("create_actor (with signing key provisioning) must succeed");
+
+    app.actor
+        .directory()
+        .resolve_actor_by_handle(&actor.handle)
+        .await
+        .expect("resolving the just-created actor must succeed")
+        .expect("the just-created actor must be resolvable")
+}
+
+async fn register_test_app(app: &TestApp) -> Id {
+    let now = app.runtime.clock.now();
+    let registered = app_repository::register_app(
+        &app.pool,
+        app.runtime.ids.as_ref(),
+        app.runtime.rng.as_ref(),
+        app.state.oauth().token_hash_key(),
+        now,
+        NewApp {
+            name: "Search Statuses IT Client".to_string(),
+            redirect_uris: vec!["https://client.example/callback".to_string()],
+            scopes: ModelScopeSet::new(["read", "write"]),
+        },
+    )
+    .await
+    .expect("register_app must succeed");
+    registered.id
+}
+
+async fn issue_test_token(app: &TestApp, app_id: Id, actor_id: Id, scopes: &[&str]) -> String {
+    let now = app.runtime.clock.now();
+    let issued = token_repository::issue_token(
+        &app.pool,
+        app.runtime.ids.as_ref(),
+        app.runtime.rng.as_ref(),
+        app.state.oauth().token_hash_key(),
+        now,
+        NewAccessToken {
+            app_id,
+            actor_id,
+            scopes: ModelScopeSet::new(scopes.iter().copied()),
+        },
+    )
+    .await
+    .expect("issue_token must succeed");
+    issued.plaintext.expose_secret().to_string()
+}
+
+/// A variant of this file's own `insert_test_status` that additionally
+/// takes `visibility` (that helper hardcodes `Visibility::Public`, unsuited
+/// to this section's own need to build a genuinely non-`Public` post).
+async fn insert_test_status_with_visibility(
+    app: &TestApp,
+    actor_id: Id,
+    content: &str,
+    visibility: Visibility,
+    created_offset_secs: i64,
+) -> Id {
+    let id = app.runtime.ids.next_id();
+    let status = Status {
+        id,
+        actor_id,
+        uri: format!("https://example.test/statuses/{}", id.as_i64()),
+        url: None,
+        content: content.to_string(),
+        visibility,
+        sensitive: false,
+        spoiler_text: String::new(),
+        in_reply_to_id: None,
+        in_reply_to_account_id: None,
+        reblog_of_id: None,
+        poll_id: None,
+        language: None,
+        reblogs_count: 0,
+        favourites_count: 0,
+        replies_count: 0,
+        local: true,
+        created_at: app.runtime.clock.now() + time::Duration::seconds(created_offset_secs),
+        edited_at: None,
+    };
+    insert_status(&app.pool, &status)
+        .await
+        .expect("insert_status must succeed");
+    id
+}
+
+const TEST_DOMAIN: &str = "test-harness.kawasemi.internal";
+
+fn req(method: &str, path: &str, token: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("x-forwarded-proto", "https")
+        .header("x-forwarded-host", TEST_DOMAIN);
+    if let Some(token) = token {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    builder.body(Body::empty()).expect("build request")
+}
+
+async fn send(router: &Router, request: Request<Body>) -> (StatusCode, Value) {
+    let response = router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router must not fail to produce a response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read response body");
+    let value: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("response body must be valid JSON")
+    };
+    (status, value)
+}
+
+async fn search(router: &Router, token: &str, query: &str) -> (StatusCode, Value) {
+    send(
+        router,
+        req("GET", &format!("/api/v2/search?{query}"), Some(token)),
+    )
+    .await
+}
+
+fn status_ids(body: &Value) -> Vec<String> {
+    body["statuses"]
+        .as_array()
+        .expect("statuses must be a JSON array")
+        .iter()
+        .map(|status| status["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// Requirements 3.3, 4.1, 4.2: a `Direct`-visibility post (matched by
+/// `PgSearchBackend`'s own content `ILIKE`, since that backend does not
+/// filter by visibility -- see this file's own doc comment, "Scope:
+/// visibility is NOT enforced by this backend") never appears in a
+/// non-author searcher's `GET /api/v2/search` results, while a `Public` post
+/// matching the exact same term does -- proven end to end through the real
+/// HTTP endpoint, the real `PgSearchBackend`, and the real `SearchHydrator`
+/// (backed by the real `social_graph::providers::RelationshipQueryImpl`).
+#[tokio::test]
+async fn search_excludes_an_invisible_post_through_the_full_pipeline() {
+    let app = spawn_test_app().await;
+    let router = server::build_router(app.state.clone());
+
+    let author = insert_actor_fixture(&app, "search_stat_it_author").await;
+    let searcher = insert_actor_fixture(&app, "search_stat_it_searcher").await;
+
+    let direct_post = insert_test_status_with_visibility(
+        &app,
+        author.id,
+        "leakguardterm this must never leak",
+        Visibility::Direct,
+        0,
+    )
+    .await;
+    let public_post = insert_test_status_with_visibility(
+        &app,
+        author.id,
+        "leakguardterm this is public",
+        Visibility::Public,
+        1,
+    )
+    .await;
+
+    let app_id = register_test_app(&app).await;
+    let searcher_token = issue_test_token(&app, app_id, searcher.id, &["read:search"]).await;
+
+    let (status, body) = search(&router, &searcher_token, "q=leakguardterm&type=statuses").await;
+    assert_eq!(status, StatusCode::OK, "got: {body:?}");
+
+    let ids = status_ids(&body);
+    assert_eq!(
+        ids,
+        vec![public_post.as_i64().to_string()],
+        "the Direct-visibility post must never leak to a non-author searcher, even though \
+         PgSearchBackend's own content match includes it as a candidate"
+    );
+    assert!(
+        !ids.contains(&direct_post.as_i64().to_string()),
+        "the Direct-visibility post's own id must not appear at all"
+    );
+
+    // The post's own author always sees it regardless of visibility
+    // (`crate::statuses::visibility::is_visible`'s own author-always-visible
+    // branch) -- confirms the exclusion above is genuinely visibility-based,
+    // not e.g. an unrelated matching failure.
+    let author_token = issue_test_token(&app, app_id, author.id, &["read:search"]).await;
+    let (status, author_body) =
+        search(&router, &author_token, "q=leakguardterm&type=statuses").await;
+    assert_eq!(status, StatusCode::OK, "got: {author_body:?}");
+    let author_ids = status_ids(&author_body);
+    assert_eq!(
+        author_ids.len(),
+        2,
+        "the post's own author must see both the Direct and Public post"
+    );
 
     app.cleanup().await;
 }
