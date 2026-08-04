@@ -68,6 +68,14 @@ use crate::statuses::status_repository;
 use crate::statuses::status_service::extract_content_tokens;
 use crate::statuses::tag_repository;
 
+/// The future [`PollResolver::resolve_many`] returns.
+///
+/// Spelled out as an alias because the trait is deliberately `dyn`-safe —
+/// see [`PollResolver`] for why a boxed future beats a generic parameter
+/// here — and the boxed form is otherwise unreadable at five impl sites.
+pub(crate) type PollResolution<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<(Id, Poll, PollTally)>, AppError>> + Send + 'a>>;
+
 /// How a caller's polls are fetched, and what it means when the row is not
 /// there.
 ///
@@ -83,11 +91,7 @@ pub(crate) trait PollResolver: Send + Sync {
     /// A key absent from the returned map means "this poll does not exist
     /// and that is acceptable"; an implementation for which it is *not*
     /// acceptable returns `Err` instead of omitting the entry.
-    fn resolve_many<'a>(
-        &'a self,
-        poll_ids: &'a [Id],
-        viewer: Option<Id>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(Id, Poll, PollTally)>, AppError>> + Send + 'a>>;
+    fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a>;
 }
 
 /// Which `:shortcode:` tokens a caller resolves into the `emojis` arrays.

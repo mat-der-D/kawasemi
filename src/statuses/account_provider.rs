@@ -148,12 +148,10 @@ use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::media::local_fs::LocalFsStore;
 use crate::runtime::RuntimeContext;
 use crate::statuses::interaction_repository;
-use crate::statuses::model::Poll;
 use crate::statuses::model::Status;
 use crate::statuses::poll_repository;
-use crate::statuses::poll_repository::PollTally;
 use crate::statuses::render_assembler::{
-    EmojiResolution, PollResolver, RenderContext, StatusRenderAssembler,
+    EmojiResolution, PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
 use crate::statuses::status_repository;
 use crate::statuses::visibility::{self, RelationshipQuery, RelationshipQueryRegistry};
@@ -320,12 +318,7 @@ struct RequiredPolls {
 }
 
 impl PollResolver for RequiredPolls {
-    fn resolve_many<'a>(
-        &'a self,
-        poll_ids: &'a [Id],
-        viewer: Option<Id>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(Id, Poll, PollTally)>, AppError>> + Send + 'a>>
-    {
+    fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
             let mut out = Vec::with_capacity(poll_ids.len());
             for &poll_id in poll_ids {

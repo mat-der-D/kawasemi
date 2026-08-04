@@ -148,8 +148,6 @@
 mod tests;
 
 use std::collections::HashSet;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -167,12 +165,10 @@ use crate::runtime::RuntimeContext;
 use crate::search::hashtag_repository::match_hashtags;
 use crate::search::model::TagMatch;
 use crate::search::tag_serializer::TagSerializer;
-use crate::statuses::model::Poll;
 use crate::statuses::model::Status;
 use crate::statuses::poll_repository;
-use crate::statuses::poll_repository::PollTally;
 use crate::statuses::render_assembler::{
-    EmojiResolution, PollResolver, RenderContext, StatusRenderAssembler,
+    EmojiResolution, PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
 use crate::statuses::status_repository;
 use crate::statuses::visibility::{RelationshipQuery, RelationshipQueryRegistry, is_visible};
@@ -420,12 +416,7 @@ struct TolerantPolls {
 }
 
 impl PollResolver for TolerantPolls {
-    fn resolve_many<'a>(
-        &'a self,
-        poll_ids: &'a [Id],
-        viewer: Option<Id>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(Id, Poll, PollTally)>, AppError>> + Send + 'a>>
-    {
+    fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
             let mut out = Vec::with_capacity(poll_ids.len());
             for &poll_id in poll_ids {

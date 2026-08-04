@@ -116,12 +116,7 @@ fn origin() -> ForwardedOrigin {
 struct TolerantPolls(PgPool);
 
 impl PollResolver for TolerantPolls {
-    fn resolve_many<'a>(
-        &'a self,
-        poll_ids: &'a [Id],
-        viewer: Option<Id>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(Id, Poll, PollTally)>, AppError>> + Send + 'a>>
-    {
+    fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
             let mut out = Vec::new();
             for &poll_id in poll_ids {
@@ -141,12 +136,7 @@ impl PollResolver for TolerantPolls {
 struct StrictPolls(PgPool);
 
 impl PollResolver for StrictPolls {
-    fn resolve_many<'a>(
-        &'a self,
-        poll_ids: &'a [Id],
-        viewer: Option<Id>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(Id, Poll, PollTally)>, AppError>> + Send + 'a>>
-    {
+    fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
             let mut out = Vec::new();
             for &poll_id in poll_ids {

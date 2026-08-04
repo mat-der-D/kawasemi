@@ -202,8 +202,6 @@
 #[cfg(test)]
 mod tests;
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::Json;
@@ -230,12 +228,10 @@ use crate::oauth::scope::ScopeSet;
 use crate::runtime::RuntimeContext;
 use crate::statuses::activity_builder::ActorHandleLookup;
 use crate::statuses::interaction_service::InteractionService;
-use crate::statuses::model::Poll;
 use crate::statuses::model::{Status, StatusEdit};
-use crate::statuses::poll_repository::PollTally;
 use crate::statuses::poll_service::PollService;
 use crate::statuses::render_assembler::{
-    EmojiResolution, PollResolver, RenderContext, StatusRenderAssembler,
+    EmojiResolution, PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
 use crate::statuses::serializer::{SerializeContext, poll_to_json};
 
@@ -456,12 +452,7 @@ where
     H: DeliverySink + 'static,
     R: RelationshipQuery + 'static,
 {
-    fn resolve_many<'a>(
-        &'a self,
-        poll_ids: &'a [Id],
-        viewer: Option<Id>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(Id, Poll, PollTally)>, AppError>> + Send + 'a>>
-    {
+    fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
             let mut out = Vec::with_capacity(poll_ids.len());
             for &poll_id in poll_ids {

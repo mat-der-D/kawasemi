@@ -175,8 +175,6 @@
 //! and no wiring into `crate::state`/`crate::bootstrap`/`crate::server`
 //! (task 5.2) live here.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -188,12 +186,10 @@ use crate::domain::Id;
 use crate::error::AppError;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::media::local_fs::LocalFsStore;
-use crate::statuses::model::Poll;
 use crate::statuses::model::Status;
 use crate::statuses::poll_repository;
-use crate::statuses::poll_repository::PollTally;
 use crate::statuses::render_assembler::{
-    EmojiResolution, PollResolver, RenderContext, StatusRenderAssembler,
+    EmojiResolution, PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
 use crate::statuses::status_repository;
 use crate::statuses::visibility::{ViewerRelation, is_visible};
@@ -324,12 +320,7 @@ struct TolerantPolls {
 }
 
 impl PollResolver for TolerantPolls {
-    fn resolve_many<'a>(
-        &'a self,
-        poll_ids: &'a [Id],
-        viewer: Option<Id>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(Id, Poll, PollTally)>, AppError>> + Send + 'a>>
-    {
+    fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
             let mut out = Vec::with_capacity(poll_ids.len());
             for &poll_id in poll_ids {
