@@ -153,7 +153,7 @@
   - _Requirements: 5.1, 5.5_
   - _Boundary: InteractionRepository_
 
-- [ ] 4.4 (P) 投票の一括取得を追加する
+- [x] 4.4 (P) 投票の一括取得を追加する
   - 複数の投票 id から投票実体の対応表と集計結果の対応表をそれぞれ一度に引く関数を追加する。集計は閲覧者の投票済み判定を含む
   - 完了状態：「単数版 N 回 == 複数版 1 回」の単体テストが通り、閲覧者の投票済み判定が単数版と一致する
   - _Requirements: 5.1_
@@ -312,6 +312,14 @@
 - **一括取得の戻り値は関数ごとに粒度が違う。** `media_ids_for_statuses` は id だけを返し、
   `tags_for_statuses` は `Tag` 実体（id/name/created_at）を返す。どちらも design.md の
   Service Interface どおりなので揃えないこと。task 4.5 の呼び出し側で取り違えやすい。
+- **design.md の Open Question「`tally` の SQL を素直に複数化できるか」の答えは「できる」。**
+  単数版 `tally` は 1 本の複合クエリではなく独立した 4 本（存在確認 / `poll_options` を
+  `ORDER BY idx` / `COUNT(DISTINCT actor_id)` / viewer の `choice`）で、相関サブクエリも
+  JOIN も無い。各本を `= ANY` に広げ `ORDER BY` の先頭に `poll_id` を足すだけで済んだ。
+  **`votes_count` と `voters_count` は別クエリのまま保つこと**（1 本の JOIN にまとめると
+  option 行 × vote 行で双方が膨張する）。クエリ数は viewer が `Some` で 4・`None` で 3 の定数。
+  `tally_many` の結果マップのキーは `polls` 行から作る（option 行由来にすると
+  「存在するが選択肢ゼロの poll」がキーごと消え、空 `options` を返す単数版と食い違う）。
 - **`reblogged_status_ids` が返すのは「ブースト元 status の id」であってブースト行自身の id ではない。**
   単数版 `find_reblog` はブースト行（`Status`）を返すので、単数版と複数版で値の空間が違う。
   複数版は「入力に渡した id のうち viewer がブーストしたもの」の部分集合を返す。

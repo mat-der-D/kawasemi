@@ -13,7 +13,12 @@
 //! [`tally`] — design.md's `PollRepository` Service Interface (design.md
 //! lines 443-445) — plus [`find_poll_by_id`], a thin additive read function
 //! task 5.3 (`PollService`) added on top (see that function's own doc
-//! comment for why). No `StatusRepository`/`InteractionRepository`/
+//! comment for why), plus the batched forms of those two reads,
+//! [`find_polls_by_ids`] and [`tally_many`] (added later, by
+//! structural-refactor task 4.4, Requirement 5.1, so a list endpoint's poll
+//! lookups stop scaling with the number of statuses it renders; the singular
+//! reads stay, they have other callers). No
+//! `StatusRepository`/`InteractionRepository`/
 //! `TagRepository` functionality, no `IdempotencyStore` (sibling module, not
 //! this file), no `PollService`/`StatusActivityBuilder`/`PollSerializer`
 //! orchestration, and no HTTP surface lives here.
@@ -112,6 +117,8 @@
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
+
 use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
@@ -196,6 +203,61 @@ pub async fn find_poll_by_id(pool: &PgPool, poll_id: Id) -> Result<Option<Poll>,
         expires_at,
         multiple,
     }))
+}
+
+/// The batched form of [`find_poll_by_id`] (structural-refactor task 4.4,
+/// Requirement 5.1): resolves every id in `poll_ids` in one query instead of
+/// one query per poll, so a list endpoint's poll lookups stop scaling with
+/// the number of statuses it renders.
+///
+/// Equivalent to calling [`find_poll_by_id`] once per id, by construction:
+/// same table, same columns, same `WHERE id = ...` scoping (a `polls` row
+/// carries no viewer/visibility dimension for either function to disagree
+/// about), just widened to `= ANY`. Ordering is unconstrained because the
+/// result is a map keyed by poll id, and `polls` has exactly one row per id
+/// — there is no per-key sequence for the two forms to disagree about.
+///
+/// An id matching no `polls` row has **no entry** in the returned map rather
+/// than an error (the returned keys are the subset of `poll_ids` that exist)
+/// — the same "no row -> absent" contract
+/// [`tags_for_statuses`](crate::statuses::tag_repository::tags_for_statuses)
+/// carries, and the batched counterpart of [`find_poll_by_id`]'s own
+/// `Ok(None)`: the caller, not this function, decides whether a missing poll
+/// is a `404`. An empty `poll_ids` returns an empty map without issuing a
+/// query at all: `= ANY` on an empty array would match nothing anyway, so
+/// the round trip would be pure cost.
+pub async fn find_polls_by_ids(
+    pool: &PgPool,
+    poll_ids: &[Id],
+) -> Result<HashMap<Id, Poll>, AppError> {
+    if poll_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let raw_ids: Vec<i64> = poll_ids.iter().map(|id| id.as_i64()).collect();
+    let rows: Vec<(i64, i64, Option<OffsetDateTime>, bool)> = sqlx::query_as(
+        "SELECT id, status_id, expires_at, multiple FROM polls WHERE id = ANY($1::bigint[])",
+    )
+    .bind(&raw_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, status_id, expires_at, multiple)| {
+            let id = Id::from_i64(id);
+            (
+                id,
+                Poll {
+                    id,
+                    status_id: Id::from_i64(status_id),
+                    expires_at,
+                    multiple,
+                },
+            )
+        })
+        .collect())
 }
 
 /// The (currently single-variant) success report for [`record_vote`] — see
@@ -409,4 +471,126 @@ pub async fn tally(pool: &PgPool, poll_id: Id, viewer: Option<Id>) -> Result<Pol
         voters_count,
         own_votes,
     })
+}
+
+/// The batched form of [`tally`] (structural-refactor task 4.4, Requirement
+/// 5.1): resolves every id in `poll_ids` with a fixed number of queries
+/// instead of a fixed number *per poll*, so a list endpoint's poll-aggregate
+/// lookups stop scaling with the number of statuses it renders.
+///
+/// Equivalent to calling [`tally`] once per id, by construction: [`tally`]'s
+/// four queries each widen to `= ANY` with the same `WHERE` scoping and the
+/// same `ORDER BY`, and none of them is folded into another — in particular
+/// the per-option `votes_count` (a `poll_options` column) and the
+/// `voters_count` (a `COUNT(DISTINCT actor_id)` over `poll_votes`) stay
+/// separate queries rather than becoming one join, which would multiply
+/// option rows by vote rows and inflate both. The leading `poll_id` added to
+/// each `ORDER BY` only groups one poll's rows together; it cannot reorder
+/// rows *within* one poll, which is the ordering [`tally`] actually promises
+/// (`ORDER BY idx` for options, `ORDER BY choice` for `own_votes`). The
+/// result is keyed off the `polls` rows themselves — the batched form of
+/// [`tally`]'s own existence check — rather than off option or vote rows, so
+/// an existing poll with no options and no votes still gets an entry (an
+/// empty `options`, a zero `voters_count`), exactly as [`tally`] reports it.
+///
+/// `viewer`'s own selections populate each entry's `own_votes` when `viewer`
+/// is `Some` (the extra query is skipped entirely when it is `None`, mirroring
+/// [`tally`]'s own branch); a poll `viewer` has not voted in gets the same
+/// empty `own_votes` [`tally`] returns for it.
+///
+/// An id matching no `polls` row has **no entry** in the returned map rather
+/// than the `404` [`tally`] raises for it — the same "no row -> absent"
+/// contract [`find_polls_by_ids`] carries, and what lets one batched call
+/// stand in for N singular ones over a list whose ids are not all guaranteed
+/// to resolve. An empty `poll_ids` returns an empty map without issuing a
+/// query at all: `= ANY` on an empty array would match nothing anyway, so the
+/// round trips would be pure cost.
+pub async fn tally_many(
+    pool: &PgPool,
+    poll_ids: &[Id],
+    viewer: Option<Id>,
+) -> Result<HashMap<Id, PollTally>, AppError> {
+    if poll_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let raw_ids: Vec<i64> = poll_ids.iter().map(|id| id.as_i64()).collect();
+
+    let existing: Vec<(i64,)> = sqlx::query_as("SELECT id FROM polls WHERE id = ANY($1::bigint[])")
+        .bind(&raw_ids)
+        .fetch_all(pool)
+        .await
+        .map_err(map_server_error)?;
+
+    let mut tallies: HashMap<Id, PollTally> = existing
+        .into_iter()
+        .map(|(id,)| {
+            let poll_id = Id::from_i64(id);
+            (
+                poll_id,
+                PollTally {
+                    poll_id,
+                    options: Vec::new(),
+                    voters_count: 0,
+                    own_votes: Vec::new(),
+                },
+            )
+        })
+        .collect();
+
+    let option_rows: Vec<(i64, i32, String, i64)> = sqlx::query_as(
+        "SELECT poll_id, idx, title, votes_count FROM poll_options \
+         WHERE poll_id = ANY($1::bigint[]) ORDER BY poll_id, idx",
+    )
+    .bind(&raw_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    for (poll_id, idx, title, votes_count) in option_rows {
+        let poll_id = Id::from_i64(poll_id);
+        if let Some(entry) = tallies.get_mut(&poll_id) {
+            entry.options.push(PollOption {
+                poll_id,
+                idx,
+                title,
+                votes_count,
+            });
+        }
+    }
+
+    let voter_rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT poll_id, COUNT(DISTINCT actor_id) FROM poll_votes \
+         WHERE poll_id = ANY($1::bigint[]) GROUP BY poll_id",
+    )
+    .bind(&raw_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    for (poll_id, voters_count) in voter_rows {
+        if let Some(entry) = tallies.get_mut(&Id::from_i64(poll_id)) {
+            entry.voters_count = voters_count;
+        }
+    }
+
+    if let Some(viewer) = viewer {
+        let vote_rows: Vec<(i64, i32)> = sqlx::query_as(
+            "SELECT poll_id, choice FROM poll_votes \
+             WHERE poll_id = ANY($1::bigint[]) AND actor_id = $2 ORDER BY poll_id, choice",
+        )
+        .bind(&raw_ids)
+        .bind(viewer.as_i64())
+        .fetch_all(pool)
+        .await
+        .map_err(map_server_error)?;
+
+        for (poll_id, choice) in vote_rows {
+            if let Some(entry) = tallies.get_mut(&Id::from_i64(poll_id)) {
+                entry.own_votes.push(choice);
+            }
+        }
+    }
+
+    Ok(tallies)
 }
