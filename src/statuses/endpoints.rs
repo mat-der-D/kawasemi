@@ -233,7 +233,6 @@ use crate::statuses::poll_service::PollService;
 use crate::statuses::render_assembler::{
     PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
-use crate::statuses::serializer::{SerializeContext, poll_to_json};
 
 use crate::statuses::status_service::{
     CreateStatus, CreateStatusPoll, EditStatus, MentionLookup, StatusService,
@@ -1168,16 +1167,11 @@ where
         .poll_service
         .vote(ctx.actor_id, id, &body.choices)
         .await?;
-    // CONCERN: this renders with no custom emoji resolved (`&[]`), while
-    // `get_poll` above resolves them from the option titles. The two
-    // therefore disagree on `poll.emojis` for the same poll depending on
-    // whether the client just voted. Preserved verbatim here because this
-    // refactor is behavior-preserving by construction; flagged for a
-    // follow-up that is allowed to change what clients observe.
-    let ctx_ser = SerializeContext {
-        viewer: Some(ctx.actor_id),
-        now: state.runtime.clock.now(),
-    };
-    let body = poll_to_json(&poll, &tally, &[], &ctx_ser);
+    // Rendered through the same assembler `get_poll` uses, so a poll does
+    // not change shape depending on whether the client just voted on it.
+    let body = state
+        .assembler()
+        .render_poll(&poll, &tally, Some(ctx.actor_id), state.runtime.clock.now())
+        .await?;
     Ok((StatusCode::OK, Json(body)).into_response())
 }
