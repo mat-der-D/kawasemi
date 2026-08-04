@@ -11,7 +11,13 @@
 //! `crate::statuses::status_repository::insert_status` before associating
 //! tags with them.
 
-use super::{associate_tag, find_tag_by_name, status_ids_for_tag, tags_for_status, upsert_tag};
+use std::collections::HashMap;
+
+use super::{
+    associate_tag, find_tag_by_name, status_ids_for_tag, tags_for_status, tags_for_statuses,
+    upsert_tag,
+};
+use crate::domain::Id;
 use crate::domain::Visibility;
 use crate::statuses::model::{Status, Tag};
 use crate::statuses::status_repository::insert_status;
@@ -265,6 +271,100 @@ async fn deleting_a_status_cascades_its_tag_associations() {
     assert!(tags.is_empty());
     let status_ids = status_ids_for_tag(&app.pool, tag.id).await.unwrap();
     assert!(status_ids.is_empty());
+
+    app.cleanup().await;
+}
+
+// -- tags_for_statuses (task 4.2) -----------------------------------------
+
+/// Requirements 5.1, task 4.2's own completion condition ("単数版 N 回 ==
+/// 複数版 1 回"): `tags_for_statuses` returns, for every id, exactly what
+/// `tags_for_status` returns for that same id on its own — same `WHERE`
+/// scoping, same `ORDER BY tags.id` within each status, same treatment of a
+/// status carrying no tags at all.
+#[tokio::test]
+async fn tags_for_statuses_matches_calling_the_singular_version_per_status() {
+    let app = spawn_test_app().await;
+    let with_many = insert_test_status(&app).await;
+    let with_one = insert_test_status(&app).await;
+    let without_tags = insert_test_status(&app).await;
+
+    // Minted in ascending id order, but *named* in descending alphabetical
+    // order relative to that id order, so neither "no `ORDER BY` at all"
+    // (which would surface the association order below) nor an
+    // `ORDER BY tags.name` could coincidentally agree with the singular
+    // version's `ORDER BY tags.id`.
+    let low = sample_tag(&app, "zulu");
+    let mid = sample_tag(&app, "mike");
+    let high = sample_tag(&app, "alpha");
+    assert!(
+        low.id < mid.id && mid.id < high.id,
+        "sanity: the deterministic IdGenerator must mint ascending ids"
+    );
+    for tag in [&low, &mid, &high] {
+        upsert_tag(&app.pool, tag).await.unwrap();
+    }
+
+    // Deliberately associated in *descending* tag-id order.
+    for tag in [&high, &mid, &low] {
+        associate_tag(&app.pool, with_many.id, tag.id)
+            .await
+            .unwrap();
+    }
+    associate_tag(&app.pool, with_one.id, mid.id).await.unwrap();
+
+    // A status id no tag was ever associated with *and* that no `statuses`
+    // row exists for: the plural version must handle it exactly like the
+    // singular one does (no entry, not an error).
+    let unknown = Id::from_i64(i64::MAX - 17);
+    let ids = [with_many.id, with_one.id, without_tags.id, unknown];
+
+    let mut per_call: HashMap<Id, Vec<Tag>> = HashMap::new();
+    for &status_id in &ids {
+        let singular = tags_for_status(&app.pool, status_id)
+            .await
+            .expect("tags_for_status must succeed");
+        if !singular.is_empty() {
+            per_call.insert(status_id, singular);
+        }
+    }
+
+    let batched = tags_for_statuses(&app.pool, &ids)
+        .await
+        .expect("tags_for_statuses must succeed");
+    assert_eq!(
+        batched, per_call,
+        "one batched call must agree with N singular calls"
+    );
+
+    // Spelled out too, so the comparison above cannot pass vacuously if both
+    // sides were to degrade the same way.
+    assert_eq!(
+        batched.get(&with_many.id),
+        Some(&vec![low.clone(), mid.clone(), high]),
+        "tags.id order, not association or name order, must be preserved"
+    );
+    assert_eq!(batched.get(&with_one.id), Some(&vec![mid]));
+    assert_eq!(batched.get(&without_tags.id), None);
+    assert_eq!(batched.get(&unknown), None);
+
+    app.cleanup().await;
+}
+
+/// Task 4.2's precondition: an empty `status_ids` returns an empty map
+/// *without issuing a query*. Closing the pool first is what makes that
+/// second half observable — every statement against a closed `PgPool` fails
+/// with `sqlx::Error::PoolClosed`, so an `Ok` here can only mean the
+/// function short-circuited before touching the database.
+#[tokio::test]
+async fn tags_for_statuses_returns_empty_for_an_empty_slice_without_querying() {
+    let app = spawn_test_app().await;
+    app.pool.close().await;
+
+    let batched = tags_for_statuses(&app.pool, &[])
+        .await
+        .expect("an empty slice must succeed even against a closed pool");
+    assert!(batched.is_empty());
 
     app.cleanup().await;
 }

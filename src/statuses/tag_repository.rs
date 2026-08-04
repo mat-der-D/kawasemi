@@ -9,7 +9,7 @@
 //! Scope: design.md's Service Interface block does not itemize a concrete
 //! signature list for this component the way it does for `StatusRepository`
 //! (it is described only in prose, in the Boundary Commitments section) —
-//! this module's five functions are this task's own construction, scoped
+//! this module's functions are that task's own construction, scoped
 //! tightly to what that prose commits to and what this task's own
 //! instruction asks for ("`tags` / `status_tags` へのタグ関連付け永続化と、
 //! 照会可能な読み取り境界（タグ→投稿・投稿→タグ）"):
@@ -22,7 +22,10 @@
 //! - [`find_tag_by_name`]: a plain read lookup by normalized name.
 //! - [`associate_tag`]: persists one `status_tags` edge, deduplicated by
 //!   the table's own `(status_id, tag_id)` primary key.
-//! - [`tags_for_status`]: the status -> tag read direction.
+//! - [`tags_for_status`]: the status -> tag read direction, plus its batched
+//!   form [`tags_for_statuses`] (added later, by task 4.2, so a list
+//!   endpoint's tag lookups do not scale with the number of statuses it
+//!   renders).
 //! - [`status_ids_for_tag`]: the tag -> status read direction (downstream:
 //!   timelines' tag timeline, search's hashtag index, per this task's own
 //!   instruction). Returns `Id`s rather than full `Status` rows deliberately
@@ -42,6 +45,8 @@
 
 #[cfg(test)]
 mod tests;
+
+use std::collections::HashMap;
 
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
@@ -136,6 +141,58 @@ pub async fn tags_for_status(pool: &PgPool, status_id: Id) -> Result<Vec<Tag>, A
     .map_err(map_server_error)?;
 
     Ok(rows.into_iter().map(row_to_tag).collect())
+}
+
+/// The batched form of [`tags_for_status`] (structural-refactor task 4.2,
+/// Requirement 5.1): resolves every id in `status_ids` in one query instead
+/// of one query per status, so a list endpoint's tag lookups stop scaling
+/// with the number of statuses it returns.
+///
+/// Equivalent to calling [`tags_for_status`] once per id, by construction:
+/// same join, same `WHERE` scoping (`status_tags.status_id` only — this
+/// association carries no viewer/visibility dimension for either function to
+/// disagree about), and the same `ORDER BY tags.id` within each status. The
+/// leading `status_tags.status_id` in the `ORDER BY` only groups each
+/// status's rows together; it cannot reorder rows *within* one status, which
+/// is the ordering [`tags_for_status`] actually promises.
+///
+/// A status with no associated tags has **no entry** in the returned map
+/// rather than an empty `Vec` (the returned keys are the subset of
+/// `status_ids` carrying at least one tag) — callers should read a miss as
+/// the empty tag list [`tags_for_status`] returns for that same id, which
+/// also means an id with no `statuses` row at all is not distinguished from
+/// an existing but untagged one. An empty `status_ids` returns an empty map
+/// without issuing a query at all: `= ANY` on an empty array would match
+/// nothing anyway, so the round trip would be pure cost.
+pub async fn tags_for_statuses(
+    pool: &PgPool,
+    status_ids: &[Id],
+) -> Result<HashMap<Id, Vec<Tag>>, AppError> {
+    if status_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let raw_ids: Vec<i64> = status_ids.iter().map(|id| id.as_i64()).collect();
+    let rows: Vec<(i64, i64, String, OffsetDateTime)> = sqlx::query_as(
+        "SELECT status_tags.status_id, tags.id, tags.name, tags.created_at FROM tags \
+         INNER JOIN status_tags ON status_tags.tag_id = tags.id \
+         WHERE status_tags.status_id = ANY($1::bigint[]) \
+         ORDER BY status_tags.status_id, tags.id",
+    )
+    .bind(&raw_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    let mut by_status: HashMap<Id, Vec<Tag>> = HashMap::new();
+    for (status_id, id, name, created_at) in rows {
+        by_status
+            .entry(Id::from_i64(status_id))
+            .or_default()
+            .push(row_to_tag((id, name, created_at)));
+    }
+
+    Ok(by_status)
 }
 
 /// Returns the `Id` of every status associated with `tag_id` (the tag ->

@@ -141,7 +141,7 @@
   - _Requirements: 5.1, 5.4_
   - _Boundary: StatusRepository, MediaRepository_
 
-- [ ] 4.2 (P) タグの一括取得を追加する
+- [x] 4.2 (P) タグの一括取得を追加する
   - 複数の投稿 id からタグの対応表を一度に引く関数を追加する。既存の単数版は残す
   - 完了状態：「単数版 N 回 == 複数版 1 回」の単体テストが通り、空スライスでクエリを発行しない
   - _Requirements: 5.1_
@@ -309,6 +309,9 @@
   「添付ゼロの既存 status」と「存在しない status」を区別せずどちらもキー不在に縮退する。
   task 4.5 の「一括取得の結果に含まれない id は縮退させる（メディアは黙って省く）」と一致する契約。
   規約は design.md ではなく各関数の doc comment に固定してあるので、呼び出し側を書くときはそちらを読む。
+- **一括取得の戻り値は関数ごとに粒度が違う。** `media_ids_for_statuses` は id だけを返し、
+  `tags_for_statuses` は `Tag` 実体（id/name/created_at）を返す。どちらも design.md の
+  Service Interface どおりなので揃えないこと。task 4.5 の呼び出し側で取り違えやすい。
 - **一括取得の `find_by_ids` は所有者スコープを持たない**（単数版 `find_by_id` と同じ `WHERE` にする
   design.md の制約に従った結果）。添付ハイドレーションには正しいが、**所有者スコープが要る経路
   （メディア編集系）は引き続き `find_owned` を使うこと。** task 4.5 / 5.1 で踏みやすい。
