@@ -18,9 +18,14 @@ use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
 use crate::actor::{ActorState, ActorType, Handle};
 use crate::domain::Visibility;
-use crate::statuses::model::PollOption;
+use crate::media::media_repository::insert_media;
+use crate::media::model::{Focus, Media, MediaState, MediaType};
+use crate::media::store::ObjectKey;
+use crate::statuses::interaction_repository::{add_bookmark, add_favourite, set_pin};
+use crate::statuses::model::{PollOption, Tag};
 use crate::statuses::poll_repository::{find_poll_by_id, insert_poll, tally};
-use crate::statuses::status_repository::insert_status;
+use crate::statuses::status_repository::{attach_media, insert_status};
+use crate::statuses::tag_repository::{associate_tag, upsert_tag};
 use crate::test_harness::{TestApp, spawn_test_app};
 
 // -- fixtures ---------------------------------------------------------------
@@ -578,6 +583,343 @@ async fn resolves_registered_shortcodes_in_poll_option_titles() {
         .expect("poll emojis must be an array");
     assert_eq!(emojis.len(), 1, "the option title's shortcode must resolve");
     assert_eq!(emojis[0]["shortcode"], serde_json::json!("yes"));
+
+    app.cleanup().await;
+}
+
+// -- resolved-material characterization -------------------------------------
+
+/// Inserts a ready `media` row owned by `actor_id` and returns its id.
+///
+/// No bytes are stored: [`to_media_attachment`](crate::media::serializer::to_media_attachment)
+/// derives its URLs from the id and the store's public-URL rule alone, so a
+/// row is the whole fixture a render needs.
+async fn create_test_media(app: &TestApp, actor_id: Id) -> Id {
+    let media_id = app.runtime.ids.next_id();
+    let media = Media {
+        id: media_id,
+        actor_id,
+        media_type: MediaType::Image,
+        state: MediaState::Ready,
+        description: Some("an attachment".to_string()),
+        focus: Focus::default(),
+        meta: None,
+        blurhash: None,
+        created_at: app.runtime.clock.now(),
+    };
+    insert_media(
+        &app.pool,
+        &media,
+        ObjectKey::original(media_id).as_str(),
+        "image/png",
+    )
+    .await
+    .expect("insert_media must succeed");
+
+    media_id
+}
+
+/// Registers `name` as a tag and associates it with `status_id`.
+async fn attach_tag(app: &TestApp, status_id: Id, name: &str) {
+    let tag = Tag {
+        id: app.runtime.ids.next_id(),
+        name: name.to_string(),
+        created_at: app.runtime.clock.now(),
+    };
+    let tag = upsert_tag(&app.pool, &tag)
+        .await
+        .expect("upsert_tag must succeed");
+    associate_tag(&app.pool, status_id, tag.id)
+        .await
+        .expect("associate_tag must succeed");
+}
+
+/// Pulls one field out of every element of a JSON array, tolerating a
+/// non-array (a `null` `poll` indexes to `null`, not a panic).
+fn field_list(items: &Value, field: &str) -> Vec<Value> {
+    items
+        .as_array()
+        .map(|items| items.iter().map(|item| item[field].clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Projects exactly the fields the assembler resolves for itself — the
+/// author's Account, the attachments, the tags, the emoji, the poll, and the
+/// viewer's interaction state — recursing into `reblog`.
+///
+/// Deliberately a projection rather than a whole-document snapshot: the rest
+/// of Status JSON is `status_to_json`'s contract, already pinned by that
+/// module's own golden tests, and pinning it a second time here would turn
+/// every unrelated contract change into a failure in the wrong file. What is
+/// left is precisely what changes if the assembly glue resolves a different
+/// set of materials, or the same set in a different order.
+fn material_fingerprint(json: &Value) -> Value {
+    serde_json::json!({
+        "account": json["account"]["id"],
+        "media": field_list(&json["media_attachments"], "id"),
+        "tags": field_list(&json["tags"], "name"),
+        "tag_urls": field_list(&json["tags"], "url"),
+        "emojis": field_list(&json["emojis"], "shortcode"),
+        "poll_options": field_list(&json["poll"]["options"], "title"),
+        "poll_emojis": field_list(&json["poll"]["emojis"], "shortcode"),
+        "favourited": json["favourited"],
+        "reblogged": json["reblogged"],
+        "bookmarked": json["bookmarked"],
+        "pinned": json["pinned"],
+        "muted": json["muted"],
+        "reblog": match json["reblog"] {
+            Value::Null => Value::Null,
+            ref reblog => material_fingerprint(reblog),
+        },
+    })
+}
+
+/// The characterization this module's batching is measured against: one
+/// batch carrying a boost of a status that has every kind of attached
+/// material at once — two attachments plus a reaped third, two tags, two
+/// shortcodes in its content, a poll whose option titles carry a third
+/// shortcode, and a viewer who has favourited, bookmarked and boosted it —
+/// alongside a second post by the *same* author, with a mute context that
+/// covers that author but not the booster.
+///
+/// Every expectation below was captured from the sequential implementation
+/// before the materials were batched, so a difference here is a difference
+/// in rendered output, which Requirement 5.7 does not permit. Four of them
+/// are load-bearing in ways a smaller fixture would miss:
+///
+/// - `emojis` comes back `["alpha", "zulu"]` while the content mentions
+///   `:zulu:` first: resolution order is the repository's `ORDER BY
+///   shortcode`, not the content's first-appearance order. Batching the
+///   resolution must not turn that back into appearance order.
+/// - `media` skips the reaped middle attachment and keeps the surviving two
+///   in `position` order.
+/// - `tags` is ordered by tag id, not by name (`zebra` was registered
+///   first).
+/// - `muted` is `true` on the boosted post and `false` on the boost, from a
+///   single mute set — each status judged by its own author.
+#[tokio::test]
+async fn a_rich_batch_keeps_every_resolved_material_and_its_order() {
+    let app = spawn_test_app().await;
+    let booster = create_test_actor(&app, "richbatch_booster").await;
+    let author = create_test_actor(&app, "richbatch_author").await;
+    let viewer = create_test_actor(&app, "richbatch_viewer").await;
+    let now = app.runtime.clock.now();
+
+    for shortcode in ["alpha", "zulu", "yes"] {
+        seed_custom_emoji(&app, shortcode).await;
+    }
+
+    // The boosted post: content shortcodes deliberately out of alphabetical
+    // order, a poll whose option titles carry a shortcode of their own.
+    let poll_id = app.runtime.ids.next_id();
+    let target_id = app.runtime.ids.next_id();
+    let target = sample_status(
+        target_id,
+        author,
+        "boosted :zulu: and :alpha:",
+        Some(poll_id),
+        now,
+    );
+    insert_status(&app.pool, &target)
+        .await
+        .expect("insert_status must succeed");
+    insert_poll(
+        &app.pool,
+        &Poll {
+            id: poll_id,
+            status_id: target_id,
+            expires_at: None,
+            multiple: false,
+        },
+        &[
+            PollOption {
+                poll_id,
+                idx: 0,
+                title: "definitely :yes:".to_string(),
+                votes_count: 0,
+            },
+            PollOption {
+                poll_id,
+                idx: 1,
+                title: "no".to_string(),
+                votes_count: 0,
+            },
+        ],
+    )
+    .await
+    .expect("insert_poll must succeed");
+
+    let first_media = create_test_media(&app, author).await;
+    let reaped_media = app.runtime.ids.next_id(); // associated, never inserted
+    let last_media = create_test_media(&app, author).await;
+    attach_media(
+        &app.pool,
+        target_id,
+        &[first_media, reaped_media, last_media],
+    )
+    .await
+    .expect("attach_media must succeed");
+
+    attach_tag(&app, target_id, "zebra").await;
+    attach_tag(&app, target_id, "apple").await;
+
+    add_favourite(&app.pool, viewer, target_id, now)
+        .await
+        .expect("add_favourite must succeed");
+    add_bookmark(&app.pool, app.runtime.ids.next_id(), viewer, target_id, now)
+        .await
+        .expect("add_bookmark must succeed");
+    // The viewer's own boost of the target: a `statuses` row, not an
+    // interaction row, and the only thing `reblogged` reads.
+    let viewer_boost_id = app.runtime.ids.next_id();
+    let mut viewer_boost = sample_status(viewer_boost_id, viewer, "", None, now);
+    viewer_boost.reblog_of_id = Some(target_id);
+    insert_status(&app.pool, &viewer_boost)
+        .await
+        .expect("insert_status must succeed");
+
+    // The boost the batch renders, and a second post by the same author as
+    // the boosted one — the case author memoization exists for.
+    let mut boost = create_test_status(&app, booster, "").await;
+    boost.reblog_of_id = Some(target_id);
+    let sibling = create_test_status(&app, author, "plain :alpha: post").await;
+    set_pin(&app.pool, viewer, sibling.id, true, now)
+        .await
+        .expect("set_pin must succeed");
+
+    let muted: HashSet<Id> = HashSet::from([author]);
+    let polls = TolerantPolls(app.pool.clone());
+    let origin = origin();
+    let ctx = RenderContext {
+        viewer: Some(viewer),
+        now,
+        origin: &origin,
+        muted: Some(&muted),
+        polls: &polls,
+    };
+
+    let rendered = assembler(&app)
+        .assemble_many(
+            &[boost.clone(), sibling.clone()],
+            &[Some(target.clone()), None],
+            &ctx,
+        )
+        .await
+        .expect("assembling must succeed");
+
+    assert_eq!(rendered.len(), 2);
+    assert_eq!(
+        rendered[0]["id"],
+        serde_json::json!(boost.id.as_i64().to_string()),
+        "the boost stays first"
+    );
+    assert_eq!(
+        rendered[1]["id"],
+        serde_json::json!(sibling.id.as_i64().to_string()),
+        "the sibling post stays second"
+    );
+
+    let tag_url = |name: &str| format!("https://kawasemi.example/tags/{name}");
+    assert_eq!(
+        material_fingerprint(&rendered[0]),
+        serde_json::json!({
+            "account": booster.as_i64().to_string(),
+            "media": [],
+            "tags": [],
+            "tag_urls": [],
+            "emojis": [],
+            "poll_options": [],
+            "poll_emojis": [],
+            "favourited": false,
+            "reblogged": false,
+            "bookmarked": false,
+            "pinned": false,
+            "muted": false,
+            "reblog": {
+                "account": author.as_i64().to_string(),
+                "media": [
+                    first_media.as_i64().to_string(),
+                    last_media.as_i64().to_string(),
+                ],
+                "tags": ["zebra", "apple"],
+                "tag_urls": [tag_url("zebra"), tag_url("apple")],
+                "emojis": ["alpha", "zulu"],
+                "poll_options": ["definitely :yes:", "no"],
+                "poll_emojis": ["yes"],
+                "favourited": true,
+                "reblogged": true,
+                "bookmarked": true,
+                "pinned": false,
+                "muted": true,
+                "reblog": null,
+            },
+        }),
+    );
+
+    assert_eq!(
+        material_fingerprint(&rendered[1]),
+        serde_json::json!({
+            "account": author.as_i64().to_string(),
+            "media": [],
+            "tags": [],
+            "tag_urls": [],
+            "emojis": ["alpha"],
+            "poll_options": [],
+            "poll_emojis": [],
+            "favourited": false,
+            "reblogged": false,
+            "bookmarked": false,
+            "pinned": true,
+            "muted": true,
+            "reblog": null,
+        }),
+    );
+
+    app.cleanup().await;
+}
+
+/// The same fixture shape, read without a viewer: every interaction flag is
+/// `false` regardless of the rows that exist, and `muted` — which is not
+/// viewer-scoped — still follows the supplied mute context.
+#[tokio::test]
+async fn an_unauthenticated_batch_reports_no_interactions_but_still_mutes() {
+    let app = spawn_test_app().await;
+    let author = create_test_actor(&app, "anonbatch_author").await;
+    let viewer = create_test_actor(&app, "anonbatch_viewer").await;
+    let now = app.runtime.clock.now();
+
+    let status = create_test_status(&app, author, "hello").await;
+    add_favourite(&app.pool, viewer, status.id, now)
+        .await
+        .expect("add_favourite must succeed");
+    add_bookmark(&app.pool, app.runtime.ids.next_id(), viewer, status.id, now)
+        .await
+        .expect("add_bookmark must succeed");
+    set_pin(&app.pool, viewer, status.id, true, now)
+        .await
+        .expect("set_pin must succeed");
+
+    let muted: HashSet<Id> = HashSet::from([author]);
+    let polls = TolerantPolls(app.pool.clone());
+    let origin = origin();
+    let ctx = RenderContext {
+        viewer: None,
+        now,
+        origin: &origin,
+        muted: Some(&muted),
+        polls: &polls,
+    };
+
+    let rendered = assembler(&app)
+        .assemble_many(std::slice::from_ref(&status), &[None], &ctx)
+        .await
+        .expect("assembling must succeed");
+
+    assert_eq!(rendered[0]["favourited"], serde_json::json!(false));
+    assert_eq!(rendered[0]["bookmarked"], serde_json::json!(false));
+    assert_eq!(rendered[0]["pinned"], serde_json::json!(false));
+    assert_eq!(rendered[0]["reblogged"], serde_json::json!(false));
+    assert_eq!(rendered[0]["muted"], serde_json::json!(true));
 
     app.cleanup().await;
 }

@@ -165,6 +165,10 @@
   - アカウント解決は 1 回の組み立て呼び出し内で著者ごとにメモ化する。**呼び出しをまたぐキャッシュは持たない**（ステイルなデータを返す新しい失敗モードを作らないため）
   - 一括取得の結果に含まれない id は現行の各経路の規約どおり縮退させる（メディアは黙って省く、投票は解決ポートの実装が決める）
   - 出力の並び順は入力の順を維持する
+  - **1 件ずつ `assemble_one` をループしている 3 つの一覧経路（アカウント別投稿一覧・検索・通知）を、
+    ページ分をまとめて `assemble_many` を 1 回呼ぶ形に変える。** ブースト先の解決と可視性の再判定は
+    ループの外へ持ち上げる（各経路の判定規約そのものは変えない）。これをやらないと当該 3 経路は
+    件数比例のまま残り、Requirement 5.1 が未達になり、著者メモ化の項目も一度も効かない
   - 完了状態：5 経路すべての既存テストと golden 契約テストがグリーンで、一覧レスポンスの JSON と並び順がバッチ化前と一致する
   - _Requirements: 1.1, 1.6, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7_
   - _Depends: 4.1, 4.2, 4.3, 4.4_
@@ -312,6 +316,28 @@
 - **一括取得の戻り値は関数ごとに粒度が違う。** `media_ids_for_statuses` は id だけを返し、
   `tags_for_statuses` は `Tag` 実体（id/name/created_at）を返す。どちらも design.md の
   Service Interface どおりなので揃えないこと。task 4.5 の呼び出し側で取り違えやすい。
+- **`PollResolver` の 5 実装は投票 id をループして単数版を呼んでいる**（4.5-A のレビューで判明）。
+  そのため task 4.4 で追加した `find_polls_by_ids` / `tally_many` には本番の呼び出し元が
+  1 つも無く、**投票だけが件数比例のまま残っている**。Requirement 5.1 は投票を明示的に
+  列挙しているので、配線するまで 5.1 は未達。5 実装の位置は `timelines/hydrator.rs:318`、
+  `search/hydrator.rs:414`、`statuses/account_provider.rs:316`、`notifications/service.rs:410`、
+  `statuses/endpoints.rs:442`。**うち 2 つ（timelines と endpoints）は一覧経路の変換対象
+  3 ファイルに含まれない**ので、別立てで拾うこと。
+- **`assemble_many` の実クエリ数は viewer 有りで `9 + K`・無しで `5 + K`**（K は著者の異なり数）。
+  内訳は media_ids 1 + find_by_ids 1 + tags 1 + interaction 4 + resolve_many 1 + resolve_emojis 1。
+  件数 M には依存しない。`render_input` を同期関数にしてあるため、描画ループにリポジトリ
+  呼び出しを入れることが構造的に不可能になっている（この性質を壊さないこと）。
+- **`tests/notification_contract_it.rs` は HEAD 時点で 9 件失敗する（本 spec のスコープ外）。**
+  テストは `tests/golden/notifications/notification_contract_it_*.json` を参照するが、
+  実ファイルは `notification_*.json`。notifications spec の着地時点（`d212228`）からの
+  ファイル名不一致。**task 4.5 の完了条件「golden 契約テストがグリーン」は通知については
+  満たせない。** task 7 の既存不具合リストに載せること。
+- **`assemble_many` を呼んでいたのはタイムラインだけだった**（2026-08-04 に判明）。
+  アカウント別投稿一覧 (`account_provider.rs:361`)・検索 (`search/hydrator.rs:316`)・
+  通知 (`notifications/service.rs:351`) は 1 件ずつ `assemble_one` をループしていた。
+  アセンブラ内部だけをバッチ化しても当該 3 経路は件数比例のまま残るため、**ユーザー判断により
+  task 4.5 のスコープを広げ、3 経路も `assemble_many` 呼び出しへ変換する**ことにした。
+  実装は 2 段階に分ける（アセンブラ内部 → 呼び出し側）。順序が逆だと検証できないため。
 - **design.md の Open Question「`tally` の SQL を素直に複数化できるか」の答えは「できる」。**
   単数版 `tally` は 1 本の複合クエリではなく独立した 4 本（存在確認 / `poll_options` を
   `ORDER BY idx` / `COUNT(DISTINCT actor_id)` / viewer の `choice`）で、相関サブクエリも
