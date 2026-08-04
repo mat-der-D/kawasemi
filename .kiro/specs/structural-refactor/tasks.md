@@ -147,7 +147,7 @@
   - _Requirements: 5.1_
   - _Boundary: TagRepository_
 
-- [ ] 4.3 (P) インタラクション状態の一括取得を追加する
+- [x] 4.3 (P) インタラクション状態の一括取得を追加する
   - 閲覧者と複数の投稿 id から、お気に入り済み／ブックマーク済み／ピン留め済み／ブースト済みの投稿 id 集合をそれぞれ一度に引く 4 関数を追加する
   - 完了状態：4 関数それぞれについて「個別存在チェックを N 回した結果と一括取得 1 回の結果が一致する」単体テストが通る
   - _Requirements: 5.1, 5.5_
@@ -312,6 +312,11 @@
 - **一括取得の戻り値は関数ごとに粒度が違う。** `media_ids_for_statuses` は id だけを返し、
   `tags_for_statuses` は `Tag` 実体（id/name/created_at）を返す。どちらも design.md の
   Service Interface どおりなので揃えないこと。task 4.5 の呼び出し側で取り違えやすい。
+- **`reblogged_status_ids` が返すのは「ブースト元 status の id」であってブースト行自身の id ではない。**
+  単数版 `find_reblog` はブースト行（`Status`）を返すので、単数版と複数版で値の空間が違う。
+  複数版は「入力に渡した id のうち viewer がブーストしたもの」の部分集合を返す。
+  `statuses` に `(actor_id, reblog_of_id)` の一意制約は無いが `HashSet` が重複を吸うため
+  `LIMIT 1` の対応物は置いていない。task 4.5 の呼び出し側で取り違えやすい。
 - **一括取得の `find_by_ids` は所有者スコープを持たない**（単数版 `find_by_id` と同じ `WHERE` にする
   design.md の制約に従った結果）。添付ハイドレーションには正しいが、**所有者スコープが要る経路
   （メディア編集系）は引き続き `find_owned` を使うこと。** task 4.5 / 5.1 で踏みやすい。

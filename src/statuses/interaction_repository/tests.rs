@@ -13,6 +13,8 @@
 //! ids stay plain synthetic `Id`s, same as `status_repository/tests.rs`,
 //! since nothing here depends on a real `local_actors` row existing).
 
+use std::collections::HashSet;
+
 use crate::api::pagination::PageParams;
 use crate::domain::{Id, Visibility};
 use crate::statuses::model::Status;
@@ -20,8 +22,9 @@ use crate::statuses::status_repository::insert_status;
 use crate::test_harness::{TestApp, spawn_test_app};
 
 use super::{
-    add_bookmark, add_favourite, exists_bookmark, exists_favourite, exists_pin, find_reblog,
-    list_bookmarks, remove_bookmark, remove_favourite, set_pin,
+    add_bookmark, add_favourite, bookmarked_status_ids, exists_bookmark, exists_favourite,
+    exists_pin, favourited_status_ids, find_reblog, list_bookmarks, pinned_status_ids,
+    reblogged_status_ids, remove_bookmark, remove_favourite, set_pin,
 };
 
 /// Builds a ready-to-insert `Status`, using the harness's deterministic
@@ -604,6 +607,291 @@ async fn find_reblog_is_scoped_to_the_requesting_actor() {
             .expect("find_reblog must succeed")
             .is_none(),
         "a different actor's own (non-existent) boost must not be found"
+    );
+
+    app.cleanup().await;
+}
+
+// -- batched interaction state (task 4.3) -----------------------------------
+
+/// The fixture shape shared by all four of task 4.3's "singular N times ==
+/// batched once" comparisons. Every one of the four batched functions is
+/// viewer-scoped, so each fixture deliberately contains a status that a
+/// *different* actor interacted with: without it, a batched query that
+/// dropped its `actor_id` predicate entirely would still agree with the
+/// singular version on every id under test.
+struct BatchFixture {
+    viewer: Id,
+    other_actor: Id,
+    /// The status `viewer` interacts with — must end up in the batched set.
+    mine: Status,
+    /// The status only `other_actor` interacts with — must stay out of
+    /// `viewer`'s batched set (the viewer-scoping probe).
+    theirs: Status,
+    /// A real status nobody interacted with.
+    untouched: Status,
+    /// An id with no `statuses` row at all.
+    unknown: Id,
+    /// Every id above, as handed to the batched call.
+    ids: Vec<Id>,
+}
+
+async fn batch_fixture(app: &TestApp) -> BatchFixture {
+    let viewer = app.runtime.ids.next_id();
+    let other_actor = app.runtime.ids.next_id();
+    let author = app.runtime.ids.next_id();
+    let mine = insert_target_status(app, author).await;
+    let theirs = insert_target_status(app, author).await;
+    let untouched = insert_target_status(app, author).await;
+    let unknown = Id::from_i64(i64::MAX - 17);
+
+    BatchFixture {
+        viewer,
+        other_actor,
+        ids: vec![mine.id, theirs.id, untouched.id, unknown],
+        mine,
+        theirs,
+        untouched,
+        unknown,
+    }
+}
+
+/// Spells out the membership every batched result must have, so a comparison
+/// against the singular version cannot pass vacuously by both sides
+/// degrading the same way.
+fn assert_batch_membership(batched: &HashSet<Id>, fixture: &BatchFixture, what: &str) {
+    assert!(
+        batched.contains(&fixture.mine.id),
+        "{what}: the viewer's own interaction must be present"
+    );
+    assert!(
+        !batched.contains(&fixture.theirs.id),
+        "{what}: another actor's interaction must not leak into the viewer's set"
+    );
+    assert!(
+        !batched.contains(&fixture.untouched.id),
+        "{what}: an uninteracted status must be absent"
+    );
+    assert!(
+        !batched.contains(&fixture.unknown),
+        "{what}: an id with no status row must be absent"
+    );
+    assert_eq!(batched.len(), 1, "{what}: nothing else may be present");
+}
+
+/// Requirement 5.5, task 4.3's own completion condition ("個別存在チェックを
+/// N 回した結果と一括取得 1 回の結果が一致する"): `favourited_status_ids`
+/// agrees with N calls to [`exists_favourite`], including its viewer scoping.
+#[tokio::test]
+async fn favourited_status_ids_matches_calling_the_singular_version_per_status() {
+    let app = spawn_test_app().await;
+    let fixture = batch_fixture(&app).await;
+    let now = app.runtime.clock.now();
+
+    add_favourite(&app.pool, fixture.viewer, fixture.mine.id, now)
+        .await
+        .expect("add_favourite must succeed");
+    add_favourite(&app.pool, fixture.other_actor, fixture.theirs.id, now)
+        .await
+        .expect("add_favourite must succeed");
+
+    let mut per_call: HashSet<Id> = HashSet::new();
+    for &status_id in &fixture.ids {
+        if exists_favourite(&app.pool, fixture.viewer, status_id)
+            .await
+            .expect("exists_favourite must succeed")
+        {
+            per_call.insert(status_id);
+        }
+    }
+
+    let batched = favourited_status_ids(&app.pool, fixture.viewer, &fixture.ids)
+        .await
+        .expect("favourited_status_ids must succeed");
+    assert_eq!(
+        batched, per_call,
+        "one batched call must agree with N singular calls"
+    );
+    assert_batch_membership(&batched, &fixture, "favourited_status_ids");
+
+    app.cleanup().await;
+}
+
+/// Requirement 5.5 / task 4.3, for bookmarks: `bookmarked_status_ids` agrees
+/// with N calls to [`exists_bookmark`], including its viewer scoping.
+#[tokio::test]
+async fn bookmarked_status_ids_matches_calling_the_singular_version_per_status() {
+    let app = spawn_test_app().await;
+    let fixture = batch_fixture(&app).await;
+    let now = app.runtime.clock.now();
+
+    let mine_bookmark = app.runtime.ids.next_id();
+    add_bookmark(
+        &app.pool,
+        mine_bookmark,
+        fixture.viewer,
+        fixture.mine.id,
+        now,
+    )
+    .await
+    .expect("add_bookmark must succeed");
+    let theirs_bookmark = app.runtime.ids.next_id();
+    add_bookmark(
+        &app.pool,
+        theirs_bookmark,
+        fixture.other_actor,
+        fixture.theirs.id,
+        now,
+    )
+    .await
+    .expect("add_bookmark must succeed");
+
+    let mut per_call: HashSet<Id> = HashSet::new();
+    for &status_id in &fixture.ids {
+        if exists_bookmark(&app.pool, fixture.viewer, status_id)
+            .await
+            .expect("exists_bookmark must succeed")
+        {
+            per_call.insert(status_id);
+        }
+    }
+
+    let batched = bookmarked_status_ids(&app.pool, fixture.viewer, &fixture.ids)
+        .await
+        .expect("bookmarked_status_ids must succeed");
+    assert_eq!(
+        batched, per_call,
+        "one batched call must agree with N singular calls"
+    );
+    assert_batch_membership(&batched, &fixture, "bookmarked_status_ids");
+
+    app.cleanup().await;
+}
+
+/// Requirement 5.5 / task 4.3, for pins: `pinned_status_ids` agrees with N
+/// calls to [`exists_pin`]. A pin is conventionally an author's pin of their
+/// own post, but the `pins` table is keyed `(actor_id, status_id)` exactly
+/// like `favourites`/`bookmarks`, and [`exists_pin`] scopes by `actor_id`
+/// with no ownership check at this layer — so the batched form is scoped the
+/// same way, and a different actor's pin must not leak in.
+#[tokio::test]
+async fn pinned_status_ids_matches_calling_the_singular_version_per_status() {
+    let app = spawn_test_app().await;
+    let fixture = batch_fixture(&app).await;
+    let now = app.runtime.clock.now();
+
+    set_pin(&app.pool, fixture.viewer, fixture.mine.id, true, now)
+        .await
+        .expect("set_pin must succeed");
+    set_pin(&app.pool, fixture.other_actor, fixture.theirs.id, true, now)
+        .await
+        .expect("set_pin must succeed");
+
+    let mut per_call: HashSet<Id> = HashSet::new();
+    for &status_id in &fixture.ids {
+        if exists_pin(&app.pool, fixture.viewer, status_id)
+            .await
+            .expect("exists_pin must succeed")
+        {
+            per_call.insert(status_id);
+        }
+    }
+
+    let batched = pinned_status_ids(&app.pool, fixture.viewer, &fixture.ids)
+        .await
+        .expect("pinned_status_ids must succeed");
+    assert_eq!(
+        batched, per_call,
+        "one batched call must agree with N singular calls"
+    );
+    assert_batch_membership(&batched, &fixture, "pinned_status_ids");
+
+    app.cleanup().await;
+}
+
+/// Requirement 5.5 / task 4.3, for boosts: `reblogged_status_ids` agrees with
+/// N calls to [`find_reblog`]. The reblog relation lives in `statuses` itself
+/// (a boost is a row with `reblog_of_id` set), so the batched form keys its
+/// result on `reblog_of_id` — the *boosted* status's id, which is what the
+/// caller asked about — not on the boost row's own id.
+#[tokio::test]
+async fn reblogged_status_ids_matches_calling_the_singular_version_per_status() {
+    let app = spawn_test_app().await;
+    let fixture = batch_fixture(&app).await;
+
+    let my_boost = sample_status(&app, fixture.viewer, Some(fixture.mine.id));
+    insert_status(&app.pool, &my_boost)
+        .await
+        .expect("insert_status of the boost row must succeed");
+    let their_boost = sample_status(&app, fixture.other_actor, Some(fixture.theirs.id));
+    insert_status(&app.pool, &their_boost)
+        .await
+        .expect("insert_status of the boost row must succeed");
+
+    let mut per_call: HashSet<Id> = HashSet::new();
+    for &status_id in &fixture.ids {
+        if find_reblog(&app.pool, fixture.viewer, status_id)
+            .await
+            .expect("find_reblog must succeed")
+            .is_some()
+        {
+            per_call.insert(status_id);
+        }
+    }
+
+    let batched = reblogged_status_ids(&app.pool, fixture.viewer, &fixture.ids)
+        .await
+        .expect("reblogged_status_ids must succeed");
+    assert_eq!(
+        batched, per_call,
+        "one batched call must agree with N singular calls"
+    );
+    assert_batch_membership(&batched, &fixture, "reblogged_status_ids");
+    assert!(
+        !batched.contains(&my_boost.id),
+        "the result must key on the boosted status's id, not the boost row's own id"
+    );
+
+    app.cleanup().await;
+}
+
+/// Task 4.3's precondition, for all four functions at once: an empty
+/// `status_ids` returns an empty set *without issuing a query*. Closing the
+/// pool first is what makes that second half observable — every statement
+/// against a closed `PgPool` fails with `sqlx::Error::PoolClosed`, so an `Ok`
+/// here can only mean the function short-circuited before touching the
+/// database. All four share one closed pool rather than one test app each,
+/// since the assertion is identical and test apps are the scarce resource
+/// (each holds its own connection pool).
+#[tokio::test]
+async fn batched_interaction_state_returns_empty_for_an_empty_slice_without_querying() {
+    let app = spawn_test_app().await;
+    let viewer = app.runtime.ids.next_id();
+    app.pool.close().await;
+
+    assert!(
+        favourited_status_ids(&app.pool, viewer, &[])
+            .await
+            .expect("an empty slice must succeed even against a closed pool")
+            .is_empty()
+    );
+    assert!(
+        bookmarked_status_ids(&app.pool, viewer, &[])
+            .await
+            .expect("an empty slice must succeed even against a closed pool")
+            .is_empty()
+    );
+    assert!(
+        pinned_status_ids(&app.pool, viewer, &[])
+            .await
+            .expect("an empty slice must succeed even against a closed pool")
+            .is_empty()
+    );
+    assert!(
+        reblogged_status_ids(&app.pool, viewer, &[])
+            .await
+            .expect("an empty slice must succeed even against a closed pool")
+            .is_empty()
     );
 
     app.cleanup().await;
