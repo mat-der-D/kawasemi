@@ -76,21 +76,26 @@
 //! `AccountsEndpointsState` itself already made.
 //!
 //! ## `StatusRenderInput` assembly glue: what each field actually resolves to
-//! [`StatusesEndpointsState::render_status_json`] (and its helper
-//! [`StatusesEndpointsState::leaf_render_input`]) is the "no existing helper
-//! resolves `Status -> StatusRenderInput`" glue this task's own brief calls
-//! out. Concretely, against the `pool: PgPool` this bundle holds directly
-//! (needed for exactly this glue — repository-level reads
-//! `StatusService`/`InteractionService`/`PollService` do not themselves
-//! expose, the same reason `MediaEndpointsState`'s own doc comment gives for
-//! holding a bare `store: S` alongside `Arc<MediaService<S>>`):
+//! [`StatusesEndpointsState::render_status_json`] (one status) and
+//! [`StatusesEndpointsState::render_status_page`] (a list of them) are what
+//! remains of the "no existing helper resolves `Status -> StatusRenderInput`" glue
+//! this module was first written around. The resolution of the fields below
+//! now belongs to
+//! [`crate::statuses::render_assembler::StatusRenderAssembler`], which every
+//! module that renders statuses goes through; what stays here is only the
+//! part that is genuinely this surface's own — which boost target is
+//! visible, to whom, and how a poll is fetched. The `pool: PgPool` this
+//! bundle holds directly is what the assembler is handed to read through
+//! (the same reason `MediaEndpointsState`'s own doc comment gives for
+//! holding a bare `store: S` alongside `Arc<MediaService<S>>`). Field by
+//! field:
 //! - `account`: `AccountService::show_account(&status.actor_id.as_i64().to_string(), None, origin)`
 //!   — reusing accounts-and-instance's already-reviewed Account JSON
 //!   wholesale (never re-derived here).
-//! - `media_attachments`: `status_repository::media_ids_for_status` + one
-//!   `media_repository::find_by_id`/`media::to_media_attachment` call per
-//!   attached medium.
-//! - `tags`: `tag_repository::tags_for_status`, mapped to [`TagJson`] with a
+//! - `media_attachments`: `status_repository::media_ids_for_statuses` +
+//!   `media_repository::find_by_ids`/`media::to_media_attachment`.
+//! - `tags`: `tag_repository::tags_for_statuses`, mapped to
+//!   [`crate::statuses::serializer::TagJson`] with a
 //!   URL this module builds itself from the request's own resolved
 //!   `ForwardedOrigin` (`{scheme}://{host}/tags/{name}`) — `serializer.rs`'s
 //!   own doc comment explicitly named this as the endpoint layer's job
@@ -122,24 +127,47 @@
 //!   `content` — Requirement 2.1 lists `emojis` as a Poll field in its own
 //!   right, not merely inherited from the parent Status) when
 //!   `status.poll_id.is_some()`.
-//! - `interactions`: `interaction_repository::exists_favourite`/
-//!   `exists_bookmark`/`exists_pin`/`find_reblog` against the *viewer*
-//!   (never the post's own author unless they are also the viewer) —
-//!   `Default` (all `false`) when unauthenticated, matching
+//! - `interactions`: `interaction_repository::favourited_status_ids`/
+//!   `bookmarked_status_ids`/`pinned_status_ids`/`reblogged_status_ids`
+//!   against the *viewer* (never the post's own author unless they are also
+//!   the viewer) — `Default` (all `false`) when unauthenticated, matching
 //!   `StatusInteractionState`'s own doc comment. `muted` is always `false`
 //!   (no mute feature exists in this spec's dependency set, same documented
-//!   gap `tasks.md`'s own Implementation Notes name for `InteractionService`).
+//!   gap `tasks.md`'s own Implementation Notes name for `InteractionService`):
+//!   this surface has no mute context to offer, so it passes
+//!   `RenderContext::muted: None` (Requirement 4.4 of structural-refactor).
 //! - `reblog`: **at most one level of nesting.** When `status.reblog_of_id`
-//!   is `Some`, the target is fetched via `StatusService::show` (a
-//!   visibility-gated fetch — a reblog of a post the *current* viewer can no
-//!   longer see, e.g. because the target went private after the boost was
-//!   made, renders with `reblog: None` rather than erroring the whole
-//!   response) and rendered via [`leaf_render_input`](StatusesEndpointsState::leaf_render_input),
-//!   whose own `reblog` field is unconditionally `None` — this module does
-//!   not recurse into a boost-of-a-boost. Real Mastodon does not expose
+//!   is `Some`, the target is fetched via `StatusService::show`
+//!   ([`StatusesEndpointsState::resolve_reblog_target`]) — a
+//!   visibility-gated fetch — and the rendered target's own `reblog` field
+//!   is unconditionally `None`, so this module does not recurse into a
+//!   boost-of-a-boost. Real Mastodon does not expose
 //!   nested-more-than-one-level boosts either (boosting a boost normalizes
 //!   to the original), and no requirement or design.md text asks for deeper
 //!   nesting here.
+//!
+//! ## Page rendering is one batch per list — except polls
+//! The three list-shaped handlers here ([`status_context`]'s `ancestors`
+//! and `descendants`, and [`list_bookmarks`]'s page) hoist boost-target
+//! resolution out of their loop and hand the whole list to
+//! [`StatusesEndpointsState::render_status_page`], which makes exactly one
+//! `assemble_many` call per list. Media, tags, emoji, interaction state and
+//! author Accounts are therefore fetched a number of times that does not
+//! depend on how many statuses the list holds, with an author appearing
+//! twice resolved once (structural-refactor's Requirements 5.1, 5.2, 5.3,
+//! 5.6, 5.7).
+//!
+//! **Polls are the deliberate exception, and remain proportional to the
+//! number of statuses in the list that have one.** [`PollServiceResolver`]
+//! resolves through `PollService::poll`, which applies its own
+//! `visible_poll_and_status` check per poll; batching it would need a new
+//! visibility-aware multi-poll method on `PollService`, which is a different
+//! component's boundary. design.md's `#### PollResolver` Implementation
+//! Notes permits this on the grounds that "この経路は単一 Status の取得が
+//! 主用途" — but that premise is narrower than it reads: these three list
+//! handlers are on this surface too, so a bookmark page of N poll-bearing
+//! statuses issues N `PollService::poll` calls. Requirement 5.1 names 投票
+//! explicitly, so this is a real residual, not a satisfied criterion.
 //!
 //! ## Wire-shape judgment calls not fixed by design.md's API Contract table
 //! - **id path segments are `404`, not `422`, when unparseable** — mirrors
@@ -393,35 +421,106 @@ where
         )
     }
 
-    /// Resolves `status` (owned) into its full Mastodon-compatible JSON
-    /// representation.
+    /// Fetches a boost's target through `StatusService::show`, so the
+    /// visibility rules this endpoint surface owns decide whether it is
+    /// rendered at all.
     ///
     /// Boost-target resolution stays here rather than moving into the
-    /// assembler: this module resolves it through `StatusService::show`,
-    /// which applies the visibility rules this endpoint surface owns.
-    /// `status` is taken by value so the target fetched inside this
-    /// function can be borrowed from a local that outlives the render.
-    async fn render_status_json(
+    /// assembler — design.md's `Status 一覧の組み立て` flow, "ブースト先の
+    /// 解決と可視性判定は**呼び出し元に残る**". A target the *current*
+    /// viewer may no longer see (the post went private after the boost was
+    /// made, say) is dropped whole, rendering `reblog: null` rather than
+    /// erroring the response or rendering it partially.
+    async fn resolve_reblog_target(
         &self,
         viewer: Option<Id>,
-        status: Status,
-        origin: &crate::api::pagination::ForwardedOrigin,
-    ) -> Result<Value, AppError> {
-        let reblog_target = match status.reblog_of_id {
-            Some(target_id) => self.status_service.show(viewer, target_id).await?,
-            None => None,
-        };
-        let polls = PollServiceResolver(Arc::clone(&self.poll_service));
-        let ctx = RenderContext {
+        status: &Status,
+    ) -> Result<Option<Status>, AppError> {
+        match status.reblog_of_id {
+            Some(target_id) => self.status_service.show(viewer, target_id).await,
+            None => Ok(None),
+        }
+    }
+
+    /// The one [`RenderContext`] this surface builds, shared by the single-
+    /// status and page paths so neither can acquire a render policy the
+    /// other lacks.
+    ///
+    /// `polls` is supplied by the caller rather than built here because
+    /// [`RenderContext`] borrows it; it has to live in a frame that outlives
+    /// the context.
+    fn render_context<'a>(
+        &self,
+        viewer: Option<Id>,
+        origin: &'a crate::api::pagination::ForwardedOrigin,
+        polls: &'a dyn PollResolver,
+    ) -> RenderContext<'a> {
+        RenderContext {
             viewer,
+            // Resolved once per call, so within one response every value it
+            // feeds — a poll's `expired` flag — is answered consistently.
             now: self.runtime.clock.now(),
             origin,
             // This surface has no mute context to offer, so every status it
             // renders reports `muted: false` — the behavior it has always
             // had, now stated rather than hard-coded downstream.
             muted: None,
-            polls: &polls,
-        };
+            polls,
+        }
+    }
+
+    /// Resolves `statuses` into their full Mastodon-compatible JSON
+    /// representations, in the order given.
+    ///
+    /// Every boost target is resolved first, so the whole page — targets
+    /// included (Requirement 5.6) — reaches
+    /// [`StatusRenderAssembler::assemble_many`] as one batch and its
+    /// per-status materials are fetched a number of times that does not
+    /// depend on how many statuses the page holds (Requirement 5.1), with an
+    /// author appearing twice resolved once (Requirements 5.2, 5.3). See
+    /// this module's doc comment ("Page rendering is one batch per list")
+    /// for what this does *not* cover: [`PollServiceResolver`] still issues
+    /// one query pair per poll-bearing status.
+    async fn render_status_page(
+        &self,
+        viewer: Option<Id>,
+        statuses: &[Status],
+        origin: &crate::api::pagination::ForwardedOrigin,
+    ) -> Result<Vec<Value>, AppError> {
+        let mut reblog_targets = Vec::with_capacity(statuses.len());
+        for status in statuses {
+            reblog_targets.push(self.resolve_reblog_target(viewer, status).await?);
+        }
+
+        let polls = PollServiceResolver(Arc::clone(&self.poll_service));
+        let ctx = self.render_context(viewer, origin, &polls);
+        self.assembler()
+            .assemble_many(statuses, &reblog_targets, &ctx)
+            .await
+    }
+
+    /// Resolves `status` (owned) into its full Mastodon-compatible JSON
+    /// representation — the path every single-status handler in this module
+    /// takes (create/show/delete/edit and each interaction toggle).
+    ///
+    /// Renders through [`StatusRenderAssembler::assemble_one`], which is
+    /// itself `assemble_many` over a one-element slice, so this path and
+    /// [`render_status_page`](Self::render_status_page) cannot drift apart:
+    /// they resolve the boost target through the same
+    /// [`resolve_reblog_target`](Self::resolve_reblog_target), build the
+    /// same [`render_context`](Self::render_context), and meet again inside
+    /// the assembler. This is also the crate's last `assemble_one` call
+    /// site — the other four render paths are list-shaped and reach
+    /// `assemble_many` directly.
+    async fn render_status_json(
+        &self,
+        viewer: Option<Id>,
+        status: Status,
+        origin: &crate::api::pagination::ForwardedOrigin,
+    ) -> Result<Value, AppError> {
+        let reblog_target = self.resolve_reblog_target(viewer, &status).await?;
+        let polls = PollServiceResolver(Arc::clone(&self.poll_service));
+        let ctx = self.render_context(viewer, origin, &polls);
         self.assembler()
             .assemble_one(&status, reblog_target.as_ref(), &ctx)
             .await
@@ -431,6 +530,15 @@ where
 /// Resolves polls through [`PollService`], so this surface keeps applying
 /// that service's own visibility check — and keeps raising when a poll is
 /// missing or hidden, rather than silently rendering a poll-less status.
+///
+/// **Deliberately still one query pair per poll id.** `PollService::poll`
+/// applies `visible_poll_and_status` per poll, and no multi-poll method
+/// carrying that check exists; adding one is `PollService`'s own boundary,
+/// not this module's. The consequence is that the three list handlers here
+/// issue poll lookups proportional to the number of statuses in the page
+/// that carry a poll, even though every other material they need is now
+/// fetched in one batch — see this module's doc comment ("Page rendering is
+/// one batch per list — except polls").
 struct PollServiceResolver<A, D, L, H, R>(Arc<PollService<A, D, L, H, R>>)
 where
     A: ActorHandleLookup,
@@ -805,14 +913,17 @@ where
     let viewer = ctx.map(|c| c.actor_id);
     let context = state.status_service.context(viewer, id).await?;
 
-    let mut ancestors = Vec::with_capacity(context.ancestors.len());
-    for status in context.ancestors {
-        ancestors.push(state.render_status_json(viewer, status, &origin).await?);
-    }
-    let mut descendants = Vec::with_capacity(context.descendants.len());
-    for status in context.descendants {
-        descendants.push(state.render_status_json(viewer, status, &origin).await?);
-    }
+    // One batch per list rather than one per status. `ancestors` and
+    // `descendants` stay separate batches because they are separate response
+    // arrays whose order must be preserved independently; merging them would
+    // buy one fewer round of queries at the cost of splitting the result
+    // back apart afterwards.
+    let ancestors = state
+        .render_status_page(viewer, &context.ancestors, &origin)
+        .await?;
+    let descendants = state
+        .render_status_page(viewer, &context.descendants, &origin)
+        .await?;
 
     let body = json!({ "ancestors": ancestors, "descendants": descendants });
     Ok((StatusCode::OK, Json(body)).into_response())
@@ -1096,14 +1207,12 @@ where
         .list_bookmarks(ctx.actor_id, page_params)
         .await?;
 
-    let mut items = Vec::with_capacity(page.items.len());
-    for status in page.items.clone() {
-        items.push(
-            state
-                .render_status_json(Some(ctx.actor_id), status, &origin)
-                .await?,
-        );
-    }
+    // One batch for the whole page. `page` is borrowed rather than consumed
+    // so its cursors — which the `Link` header below is built from — are
+    // still available afterwards.
+    let items = state
+        .render_status_page(Some(ctx.actor_id), &page.items, &origin)
+        .await?;
 
     let mut uri_ctx = RequestUriContext::new(origin, BOOKMARKS_PATH.to_string());
     if let Some(limit) = limit {

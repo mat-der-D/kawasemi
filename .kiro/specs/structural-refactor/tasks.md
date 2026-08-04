@@ -159,7 +159,7 @@
   - _Requirements: 5.1_
   - _Boundary: PollRepository_
 
-- [ ] 4.5 組み立ての N 件経路を一括取得とメモ化に切り替える
+- [x] 4.5 組み立ての N 件経路を一括取得とメモ化に切り替える
   - N 件版の組み立てを、対象となる全投稿（ブースト先を含む）の id・著者 id・投票 id を先にまとめてから、一括取得を呼ぶ形に変える
   - 絵文字は全投稿の本文と投票選択肢のタイトルから短縮コードを集めて 1 回で解決する
   - アカウント解決は 1 回の組み立て呼び出し内で著者ごとにメモ化する。**呼び出しをまたぐキャッシュは持たない**（ステイルなデータを返す新しい失敗モードを作らないため）
@@ -324,6 +324,18 @@
   `#### PollResolver` Implementation Notes が「この経路は単一 Status の取得が主用途なので
   順に `poll_service.poll()` に渡す実装で構わない（Requirement 5.1 が対象とするのは一覧経路）」と
   明文で許容しており、一括化には `PollService` に可視性チェック付きの複数版が要るため。
+- **`endpoints.rs` の 3 経路では投票だけが件数比例のまま残る**（4.5-C3、ユーザー判断）。
+  `PollServiceResolver` は `PollService::poll` 経由で投票ごとに `visible_poll_and_status` を
+  かけるため据え置いた。一括化には `PollService` に可視性チェック付きの複数版が要る。
+  **design.md の `#### PollResolver` が据え置きを認めた根拠「この経路は単一 Status の取得が
+  主用途」は、context とブックマーク一覧が同じ surface にある以上、読める範囲より狭い。**
+  Requirement 5.1 は投票を明示列挙しているので、これは満たされた基準ではなく実在の残余。
+  モジュール doc と `PollServiceResolver` の doc に記載済み（design.md は編集していない）。
+- **`assemble_one` の本番呼び出し元は `endpoints.rs:525` の 1 箇所だけになった**（4.5-C3）。
+  `render_status_json` を `render_status_page` へ委譲させると本番呼び出し元がゼロになり
+  `dead_code` で `-D warnings` が落ちる。design.md:269 が `assemble_one` を「長さ 1 の
+  薄いラッパー」と明示規定しているので設計準拠ではあるが、残すかは `render_assembler.rs` を
+  所有する立場で別途決めること。
 - **通知経路には件数比例が残る（受入基準は充足、Objective は未達）**（4.5-C2 のレビューで確定）。
   エンベロープの `account_json`（= `show_account`）が通知ごとに N 回、関連投稿と
   ブースト先の `find_by_id` が最大 2N 回。Requirement 5.1 が列挙するのはメディア・タグ・
