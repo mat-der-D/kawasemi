@@ -202,6 +202,8 @@
 #[cfg(test)]
 mod tests;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::Json;
@@ -212,39 +214,34 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sqlx::postgres::PgPool;
 use time::Duration as TimeDuration;
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use crate::accounts::account_service::AccountService;
-use crate::accounts::emoji_repository;
-use crate::accounts::model::CustomEmojiView;
 use crate::api::pagination::{PageParams, RequestUriContext, build_link_header};
+use crate::api::query::parse_optional_limit;
+use crate::api::time::format_time;
 use crate::domain::{Id, Visibility};
 use crate::error::AppError;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::federation::{DeliverySink, LocalActorLookup};
 use crate::media::ResolvedOrigin;
 use crate::media::local_fs::LocalFsStore;
-use crate::media::media_repository;
-use crate::media::serializer::to_media_attachment;
 use crate::oauth::middleware::{AuthState, OptionalActor, RequiredActor, require_scope};
 use crate::oauth::scope::ScopeSet;
 use crate::runtime::RuntimeContext;
 use crate::statuses::activity_builder::ActorHandleLookup;
-use crate::statuses::interaction_repository;
 use crate::statuses::interaction_service::InteractionService;
+use crate::statuses::model::Poll;
 use crate::statuses::model::{Status, StatusEdit};
+use crate::statuses::poll_repository::PollTally;
 use crate::statuses::poll_service::PollService;
-use crate::statuses::serializer::{
-    SerializeContext, StatusInteractionState, StatusRenderInput, TagJson, poll_to_json,
-    status_to_json,
+use crate::statuses::render_assembler::{
+    EmojiResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
-use crate::statuses::status_repository;
+use crate::statuses::serializer::{SerializeContext, poll_to_json};
+
 use crate::statuses::status_service::{
     CreateStatus, CreateStatusPoll, EditStatus, MentionLookup, StatusService,
-    extract_content_tokens,
 };
-use crate::statuses::tag_repository;
 use crate::statuses::visibility::RelationshipQuery;
 
 // ---- Route paths (axum 0.8 `{id}` syntax, mirroring
@@ -312,16 +309,6 @@ fn parse_id(raw: &str) -> Result<Id, AppError> {
 /// `media::endpoints::header_str`'s identical established pattern.
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
-}
-
-/// Renders `when` as an RFC 3339 timestamp string — mirrors
-/// `serializer.rs::format_time`'s identical, private-to-that-module
-/// convention (small helper duplication across sibling modules is this
-/// crate's own documented convention, see `tasks.md`'s Implementation Notes
-/// for 2.3/task 4.1's `UndoKind`).
-fn format_time(when: OffsetDateTime) -> String {
-    when.format(&Rfc3339)
-        .expect("a valid OffsetDateTime always formats as RFC 3339")
 }
 
 /// The router-local state every handler in this module closes over — see
@@ -397,174 +384,28 @@ where
     R: RelationshipQuery + 'static,
     M: MentionLookup + 'static,
 {
-    async fn account_json(
-        &self,
-        actor_id: Id,
-        origin: &crate::api::pagination::ForwardedOrigin,
-    ) -> Result<Value, AppError> {
-        self.accounts
-            .show_account(&actor_id.as_i64().to_string(), None, origin)
-            .await
-    }
-
-    async fn media_json(
-        &self,
-        status_id: Id,
-        origin: &crate::api::pagination::ForwardedOrigin,
-    ) -> Result<Vec<Value>, AppError> {
-        let media_ids = status_repository::media_ids_for_status(&self.pool, status_id).await?;
-        let mut out = Vec::with_capacity(media_ids.len());
-        for media_id in media_ids {
-            if let Some(media) = media_repository::find_by_id(&self.pool, media_id).await? {
-                out.push(
-                    serde_json::to_value(to_media_attachment(&media, &self.media_store, origin))
-                        .expect("MediaAttachmentJson always serializes to JSON"),
-                );
-            }
-        }
-        Ok(out)
-    }
-
-    async fn tags_json(
-        &self,
-        status_id: Id,
-        origin: &crate::api::pagination::ForwardedOrigin,
-    ) -> Result<Vec<TagJson>, AppError> {
-        let tags = tag_repository::tags_for_status(&self.pool, status_id).await?;
-        Ok(tags
-            .into_iter()
-            .map(|tag| TagJson {
-                url: format!("{}://{}/tags/{}", origin.scheme, origin.host, tag.name),
-                name: tag.name,
-            })
-            .collect())
-    }
-
-    /// Resolves `content`'s `:shortcode:` tokens (Requirement 3.6's
-    /// extraction, `status_service::extract_content_tokens`) against
-    /// accounts-and-instance's custom-emoji directory
-    /// (`emoji_repository::resolve_emojis`) — task 10.4's `emojis`-field
-    /// glue, shared by both the `Status`-content case and the `Poll`-option-
-    /// titles case (see this module's doc comment, "`StatusRenderInput`
-    /// assembly glue"). An unregistered shortcode is simply absent from the
-    /// result, never an error.
-    async fn resolve_emojis(&self, content: &str) -> Result<Vec<CustomEmojiView>, AppError> {
-        let shortcodes = extract_content_tokens(content).emoji_shortcodes;
-        if shortcodes.is_empty() {
-            return Ok(Vec::new());
-        }
-        emoji_repository::resolve_emojis(&self.pool, &shortcodes).await
-    }
-
-    async fn interaction_state(
-        &self,
-        viewer: Option<Id>,
-        status_id: Id,
-    ) -> Result<StatusInteractionState, AppError> {
-        let Some(actor_id) = viewer else {
-            return Ok(StatusInteractionState::default());
-        };
-        let favourited =
-            interaction_repository::exists_favourite(&self.pool, actor_id, status_id).await?;
-        let bookmarked =
-            interaction_repository::exists_bookmark(&self.pool, actor_id, status_id).await?;
-        let pinned = interaction_repository::exists_pin(&self.pool, actor_id, status_id).await?;
-        let reblogged = interaction_repository::find_reblog(&self.pool, actor_id, status_id)
-            .await?
-            .is_some();
-        Ok(StatusInteractionState {
-            favourited,
-            reblogged,
-            bookmarked,
-            pinned,
-            muted: false,
-        })
-    }
-
-    async fn poll_json(&self, viewer: Option<Id>, poll_id: Id) -> Result<Value, AppError> {
-        let (poll, tally) = self.poll_service.poll(viewer, poll_id).await?;
-        // Each option's own title is its own shortcode-bearing text,
-        // distinct from the owning Status's `content` (see this module's
-        // doc comment, "`StatusRenderInput` assembly glue" -> `poll`).
-        // Joined with a space so a scan across the boundary between two
-        // titles never spuriously merges them into one token.
-        let combined_titles = tally
-            .options
-            .iter()
-            .map(|option| option.title.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let emojis = self.resolve_emojis(&combined_titles).await?;
-        let ctx = SerializeContext {
-            viewer,
-            now: self.runtime.clock.now(),
-        };
-        Ok(poll_to_json(&poll, &tally, &emojis, &ctx))
-    }
-
-    /// The four/five pieces every rendered [`Status`] needs beyond the bare
-    /// row itself, shared by both the top-level render and a nested reblog
-    /// target's own (non-recursive) render — see this module's doc comment
-    /// ("`StatusRenderInput` assembly glue").
-    async fn resolve_common(
-        &self,
-        viewer: Option<Id>,
-        status: &Status,
-        origin: &crate::api::pagination::ForwardedOrigin,
-    ) -> Result<
-        (
-            Value,
-            Vec<Value>,
-            Vec<TagJson>,
-            Vec<CustomEmojiView>,
-            StatusInteractionState,
-            Option<Value>,
-        ),
-        AppError,
-    > {
-        let account = self.account_json(status.actor_id, origin).await?;
-        let media_attachments = self.media_json(status.id, origin).await?;
-        let tags = self.tags_json(status.id, origin).await?;
-        let emojis = self.resolve_emojis(&status.content).await?;
-        let interactions = self.interaction_state(viewer, status.id).await?;
-        let poll = match status.poll_id {
-            Some(poll_id) => Some(self.poll_json(viewer, poll_id).await?),
-            None => None,
-        };
-        Ok((account, media_attachments, tags, emojis, interactions, poll))
-    }
-
-    /// Builds a non-recursive [`StatusRenderInput`] (its own `reblog` field
-    /// always `None`) — used only for a reblog *target*, see this module's
-    /// doc comment ("at most one level of nesting").
-    async fn leaf_render_input<'a>(
-        &self,
-        viewer: Option<Id>,
-        status: &'a Status,
-        origin: &crate::api::pagination::ForwardedOrigin,
-    ) -> Result<StatusRenderInput<'a>, AppError> {
-        let (account, media_attachments, tags, emojis, interactions, poll) =
-            self.resolve_common(viewer, status, origin).await?;
-        Ok(StatusRenderInput {
-            status,
-            account,
-            media_attachments,
-            mentions: Vec::new(),
-            tags,
-            emojis,
-            poll,
-            interactions,
-            reblog: None,
-        })
+    /// Builds the shared Status assembler this module renders through.
+    ///
+    /// Constructed per render rather than held on the state bundle: all
+    /// three handles are cheap to clone, and threading a fourth field
+    /// through every construction site of this generic state struct buys
+    /// nothing at this call frequency.
+    fn assembler(&self) -> StatusRenderAssembler {
+        StatusRenderAssembler::new(
+            self.pool.clone(),
+            Arc::clone(&self.accounts),
+            self.media_store.clone(),
+        )
     }
 
     /// Resolves `status` (owned) into its full Mastodon-compatible JSON
-    /// representation — the `Status -> StatusRenderInput` assembly glue this
-    /// task's own brief calls out, followed by `serializer::status_to_json`.
-    /// `status` is taken by value (not `&Status`) so a reblog target fetched
-    /// *inside* this function can be borrowed from a local variable that
-    /// outlives the `StatusRenderInput` built from it, all within this
-    /// function's own body (never returned by reference).
+    /// representation.
+    ///
+    /// Boost-target resolution stays here rather than moving into the
+    /// assembler: this module resolves it through `StatusService::show`,
+    /// which applies the visibility rules this endpoint surface owns.
+    /// `status` is taken by value so the target fetched inside this
+    /// function can be borrowed from a local that outlives the render.
     async fn render_status_json(
         &self,
         viewer: Option<Id>,
@@ -575,26 +416,60 @@ where
             Some(target_id) => self.status_service.show(viewer, target_id).await?,
             None => None,
         };
-        let reblog_box = match &reblog_target {
-            Some(target) => Some(Box::new(
-                self.leaf_render_input(viewer, target, origin).await?,
-            )),
-            None => None,
+        let polls = PollServiceResolver(Arc::clone(&self.poll_service));
+        let ctx = RenderContext {
+            viewer,
+            now: self.runtime.clock.now(),
+            origin,
+            // This surface has no mute context to offer, so every status it
+            // renders reports `muted: false` — the behavior it has always
+            // had, now stated rather than hard-coded downstream.
+            muted: None,
+            polls: &polls,
+            emojis: EmojiResolution {
+                content: true,
+                poll_options: true,
+            },
         };
-        let (account, media_attachments, tags, emojis, interactions, poll) =
-            self.resolve_common(viewer, &status, origin).await?;
-        let input = StatusRenderInput {
-            status: &status,
-            account,
-            media_attachments,
-            mentions: Vec::new(),
-            tags,
-            emojis,
-            poll,
-            interactions,
-            reblog: reblog_box,
-        };
-        Ok(status_to_json(&input))
+        self.assembler()
+            .assemble_one(&status, reblog_target.as_ref(), &ctx)
+            .await
+    }
+}
+
+/// Resolves polls through [`PollService`], so this surface keeps applying
+/// that service's own visibility check — and keeps raising when a poll is
+/// missing or hidden, rather than silently rendering a poll-less status.
+struct PollServiceResolver<A, D, L, H, R>(Arc<PollService<A, D, L, H, R>>)
+where
+    A: ActorHandleLookup,
+    D: LocalActorLookup,
+    L: DeliverySink,
+    H: DeliverySink,
+    R: RelationshipQuery;
+
+impl<A, D, L, H, R> PollResolver for PollServiceResolver<A, D, L, H, R>
+where
+    A: ActorHandleLookup + 'static,
+    D: LocalActorLookup + 'static,
+    L: DeliverySink + 'static,
+    H: DeliverySink + 'static,
+    R: RelationshipQuery + 'static,
+{
+    fn resolve_many<'a>(
+        &'a self,
+        poll_ids: &'a [Id],
+        viewer: Option<Id>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<(Id, Poll, PollTally)>, AppError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(poll_ids.len());
+            for &poll_id in poll_ids {
+                let (poll, tally) = self.0.poll(viewer, poll_id).await?;
+                out.push((poll_id, poll, tally));
+            }
+            Ok(out)
+        })
     }
 }
 
@@ -1202,17 +1077,6 @@ pub struct BookmarksQueryParams {
     pub limit: Option<String>,
 }
 
-fn parse_optional_limit(raw: Option<&str>) -> Result<Option<u32>, AppError> {
-    match raw {
-        None => Ok(None),
-        Some(value) => value.parse::<u32>().map(Some).map_err(|_| {
-            rejected(format!(
-                "limit must be a non-negative integer, got {value:?}"
-            ))
-        }),
-    }
-}
-
 /// `GET /api/v1/bookmarks` (design.md's API Contract table): `read:bookmarks`
 /// scope (Requirement 11.3), delegating to
 /// `InteractionService::list_bookmarks`, attaching a `Link` header built
@@ -1285,7 +1149,11 @@ where
 {
     let id = parse_id(&id_raw)?;
     let viewer = ctx.map(|c| c.actor_id);
-    let body = state.poll_json(viewer, id).await?;
+    let (poll, tally) = state.poll_service.poll(viewer, id).await?;
+    let body = state
+        .assembler()
+        .render_poll(&poll, &tally, viewer, state.runtime.clock.now())
+        .await?;
     Ok((StatusCode::OK, Json(body)).into_response())
 }
 
@@ -1313,6 +1181,12 @@ where
         .poll_service
         .vote(ctx.actor_id, id, &body.choices)
         .await?;
+    // CONCERN: this renders with no custom emoji resolved (`&[]`), while
+    // `get_poll` above resolves them from the option titles. The two
+    // therefore disagree on `poll.emojis` for the same poll depending on
+    // whether the client just voted. Preserved verbatim here because this
+    // refactor is behavior-preserving by construction; flagged for a
+    // follow-up that is allowed to change what clients observe.
     let ctx_ser = SerializeContext {
         viewer: Some(ctx.actor_id),
         now: state.runtime.clock.now(),

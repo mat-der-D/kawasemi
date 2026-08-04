@@ -175,49 +175,30 @@
 //! and no wiring into `crate::state`/`crate::bootstrap`/`crate::server`
 //! (task 5.2) live here.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::accounts::account_service::AccountService;
-use crate::accounts::emoji_repository;
-use crate::accounts::model::CustomEmojiView;
 use crate::api::pagination::ForwardedOrigin;
 use crate::domain::Id;
 use crate::error::AppError;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::media::local_fs::LocalFsStore;
-use crate::media::media_repository;
-use crate::media::serializer::to_media_attachment;
-use crate::statuses::interaction_repository;
+use crate::statuses::model::Poll;
 use crate::statuses::model::Status;
 use crate::statuses::poll_repository;
-use crate::statuses::serializer::{
-    SerializeContext, StatusInteractionState, StatusRenderInput, TagJson, poll_to_json,
-    status_to_json,
+use crate::statuses::poll_repository::PollTally;
+use crate::statuses::render_assembler::{
+    EmojiResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
 use crate::statuses::status_repository;
-use crate::statuses::status_service::extract_content_tokens;
-use crate::statuses::tag_repository;
 use crate::statuses::visibility::{ViewerRelation, is_visible};
 
 use super::model::FilterContext;
-
-/// Every pre-resolved field [`status_to_json`] needs beyond the bare
-/// [`Status`] row, minus `reblog` (the caller assembles that one
-/// separately, since it recurses) — a private tuple return shape shared by
-/// [`StatusHydrator::hydrate_one`] and [`StatusHydrator::leaf_render_input`]
-/// (mirrors `StatusesEndpointsState::resolve_common`'s identical tuple
-/// shape).
-type ResolvedCommon = (
-    Value,
-    Vec<Value>,
-    Vec<TagJson>,
-    Vec<CustomEmojiView>,
-    StatusInteractionState,
-    Option<Value>,
-);
 
 /// Hydrates filtered timeline candidates into Status JSON (Requirements
 /// 10.1-10.4). See this module's doc comment for the full reasoning behind
@@ -262,258 +243,102 @@ impl StatusHydrator {
     /// (Requirement 10.4). See this module's doc comment ("Deliberate
     /// deviations") for why this takes `ctx`/`origin` rather than
     /// design.md's literal `viewer`/`now` pair, and is `async`/fallible.
+    /// Hydrates every status in `statuses`, in the given order, into Status
+    /// JSON reflecting `ctx.viewer`'s operation state with boosts nested
+    /// under `reblog`.
     pub async fn hydrate(
         &self,
         statuses: &[Status],
         ctx: &FilterContext,
         origin: &ForwardedOrigin,
     ) -> Result<Vec<Value>, AppError> {
-        let mut out = Vec::with_capacity(statuses.len());
+        let mut reblog_targets = Vec::with_capacity(statuses.len());
         for status in statuses {
-            out.push(self.hydrate_one(status, ctx, origin).await?);
+            reblog_targets.push(self.resolve_reblog_target(status, ctx).await?);
         }
-        Ok(out)
+
+        let polls = TolerantPolls {
+            pool: self.pool.clone(),
+        };
+        let render_ctx = RenderContext {
+            viewer: ctx.viewer,
+            now: ctx.now,
+            origin,
+            // The one path with real mute state in hand. Every other caller
+            // passes `None` and renders `muted: false`.
+            muted: Some(&ctx.muted),
+            polls: &polls,
+            emojis: EmojiResolution {
+                content: true,
+                poll_options: true,
+            },
+        };
+        self.assembler()
+            .assemble_many(statuses, &reblog_targets, &render_ctx)
+            .await
     }
 
-    /// Resolves `status` (a top-level timeline element, possibly a boost)
-    /// into its Status JSON — the `Status -> StatusRenderInput` assembly
-    /// glue this module's doc comment ("Scope") calls out.
-    async fn hydrate_one(
+    fn assembler(&self) -> StatusRenderAssembler {
+        StatusRenderAssembler::new(
+            self.pool.clone(),
+            Arc::clone(&self.accounts),
+            self.media_store.clone(),
+        )
+    }
+
+    /// Fetches a boost's target and re-checks its visibility against the
+    /// *target's own* author.
+    ///
+    /// A boost row's own visibility snapshot, already checked by
+    /// `TimelineFilter::keep`, says nothing about the target's author — so a
+    /// target that fails this check is treated exactly like a missing one:
+    /// `reblog: None`, never a partial render of content the viewer has no
+    /// right to see.
+    async fn resolve_reblog_target(
         &self,
         status: &Status,
         ctx: &FilterContext,
-        origin: &ForwardedOrigin,
-    ) -> Result<Value, AppError> {
-        let reblog_target = match status.reblog_of_id {
-            Some(target_id) => status_repository::find_by_id(&self.pool, target_id).await?,
-            None => None,
+    ) -> Result<Option<Status>, AppError> {
+        let Some(target_id) = status.reblog_of_id else {
+            return Ok(None);
         };
-        // Independent visibility re-check keyed to the *target's own*
-        // author — see this module's doc comment ("Why `poll`/reblog-target
-        // resolution bypasses `PollService`/`StatusService`"). A target that
-        // fails this check is treated exactly like a missing/dangling one:
-        // `reblog: None`, never a partial render of content the viewer has
-        // no right to see.
-        let reblog_target = reblog_target.filter(|target| Self::reblog_target_visible(target, ctx));
-        let reblog_box = match &reblog_target {
-            Some(target) => Some(Box::new(self.leaf_render_input(target, ctx, origin).await?)),
-            None => None,
-        };
-
-        let (account, media_attachments, tags, emojis, interactions, poll) =
-            self.resolve_common(status, ctx, origin).await?;
-
-        let input = StatusRenderInput {
-            status,
-            account,
-            media_attachments,
-            mentions: Vec::new(),
-            tags,
-            emojis,
-            poll,
-            interactions,
-            reblog: reblog_box,
-        };
-        Ok(status_to_json(&input))
+        let target = status_repository::find_by_id(&self.pool, target_id).await?;
+        Ok(target.filter(|target| Self::reblog_target_visible(target, ctx)))
     }
 
-    /// Independently checks a fetched boost's reblog `target`'s own
-    /// visibility, keyed to `target`'s own author — see this module's doc
-    /// comment ("Why `poll`/reblog-target resolution bypasses
-    /// `PollService`/`StatusService`") for why this exists at all (a boost
-    /// row's own visibility snapshot, already checked by
-    /// `TimelineFilter::keep`, says nothing about the *target's* author). A
-    /// direct call to the same pure visibility function `TimelineFilter::
-    /// keep` (`src/timelines/filter.rs`) itself calls, with a
-    /// [`ViewerRelation`] built the identical way, just keyed to `target`'s
-    /// `actor_id` rather than the booster's.
+    /// The same pure visibility function `TimelineFilter::keep` calls, with
+    /// a [`ViewerRelation`] built the identical way, just keyed to
+    /// `target`'s `actor_id` rather than the booster's.
     fn reblog_target_visible(target: &Status, ctx: &FilterContext) -> bool {
         let rel = ViewerRelation {
             is_follower: ctx.viewer.is_some() && ctx.following.contains(&target.actor_id),
         };
         is_visible(target, ctx.viewer, &rel)
     }
+}
 
-    /// Builds a non-recursive `StatusRenderInput` (its own `reblog` always
-    /// `None`) for a boost's own boosted-status target — see this module's
-    /// doc comment ("Non-recursive reblog nesting").
-    async fn leaf_render_input<'a>(
-        &self,
-        status: &'a Status,
-        ctx: &FilterContext,
-        origin: &ForwardedOrigin,
-    ) -> Result<StatusRenderInput<'a>, AppError> {
-        let (account, media_attachments, tags, emojis, interactions, poll) =
-            self.resolve_common(status, ctx, origin).await?;
-        Ok(StatusRenderInput {
-            status,
-            account,
-            media_attachments,
-            mentions: Vec::new(),
-            tags,
-            emojis,
-            poll,
-            interactions,
-            reblog: None,
-        })
-    }
+/// Reads polls straight from the repository and degrades to a poll-less
+/// status when the row is gone, rather than failing the whole page.
+struct TolerantPolls {
+    pool: PgPool,
+}
 
-    /// The pieces every rendered `Status` needs beyond the bare row itself,
-    /// shared by both a top-level render and a nested reblog target's own
-    /// (non-recursive) render — mirrors
-    /// `StatusesEndpointsState::resolve_common`'s identical structure.
-    async fn resolve_common(
-        &self,
-        status: &Status,
-        ctx: &FilterContext,
-        origin: &ForwardedOrigin,
-    ) -> Result<ResolvedCommon, AppError> {
-        let account = self.account_json(status.actor_id, origin).await?;
-        let media_attachments = self.media_json(status.id, origin).await?;
-        let tags = self.tags_json(status.id, origin).await?;
-        let emojis = self.resolve_emojis(&status.content).await?;
-        let interactions = self.interaction_state(status, ctx).await?;
-        let poll = match status.poll_id {
-            Some(poll_id) => self.poll_json(poll_id, ctx).await?,
-            None => None,
-        };
-        Ok((account, media_attachments, tags, emojis, interactions, poll))
-    }
-
-    /// Delegates Account JSON to accounts-and-instance wholesale
-    /// (Requirement 10.4) — never a locally-built representation.
-    async fn account_json(
-        &self,
-        actor_id: Id,
-        origin: &ForwardedOrigin,
-    ) -> Result<Value, AppError> {
-        self.accounts
-            .show_account(&actor_id.as_i64().to_string(), None, origin)
-            .await
-    }
-
-    /// Delegates MediaAttachment JSON to media-pipeline wholesale
-    /// (Requirement 10.4) — never a locally-built representation. A media
-    /// id with no resolvable row is simply omitted, mirroring
-    /// `StatusesEndpointsState::media_json`'s identical convention.
-    async fn media_json(
-        &self,
-        status_id: Id,
-        origin: &ForwardedOrigin,
-    ) -> Result<Vec<Value>, AppError> {
-        let media_ids = status_repository::media_ids_for_status(&self.pool, status_id).await?;
-        let mut out = Vec::with_capacity(media_ids.len());
-        for media_id in media_ids {
-            if let Some(media) = media_repository::find_by_id(&self.pool, media_id).await? {
-                out.push(
-                    serde_json::to_value(to_media_attachment(&media, &self.media_store, origin))
-                        .expect("MediaAttachmentJson always serializes to JSON"),
-                );
+impl PollResolver for TolerantPolls {
+    fn resolve_many<'a>(
+        &'a self,
+        poll_ids: &'a [Id],
+        viewer: Option<Id>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<(Id, Poll, PollTally)>, AppError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(poll_ids.len());
+            for &poll_id in poll_ids {
+                if let Some(poll) = poll_repository::find_poll_by_id(&self.pool, poll_id).await? {
+                    let tally = poll_repository::tally(&self.pool, poll_id, viewer).await?;
+                    out.push((poll_id, poll, tally));
+                }
             }
-        }
-        Ok(out)
-    }
-
-    /// Resolves `status_id`'s tags into `TagJson`, mirroring
-    /// `StatusesEndpointsState::tags_json`'s identical URL construction.
-    async fn tags_json(
-        &self,
-        status_id: Id,
-        origin: &ForwardedOrigin,
-    ) -> Result<Vec<TagJson>, AppError> {
-        let tags = tag_repository::tags_for_status(&self.pool, status_id).await?;
-        Ok(tags
-            .into_iter()
-            .map(|tag| TagJson {
-                url: format!("{}://{}/tags/{}", origin.scheme, origin.host, tag.name),
-                name: tag.name,
-            })
-            .collect())
-    }
-
-    /// Resolves `content`'s `:shortcode:` tokens against accounts-and-
-    /// instance's custom-emoji directory — mirrors
-    /// `StatusesEndpointsState::resolve_emojis`'s identical reuse of
-    /// `status_service::extract_content_tokens` +
-    /// `emoji_repository::resolve_emojis`. An unregistered shortcode is
-    /// simply absent from the result, never an error.
-    async fn resolve_emojis(&self, content: &str) -> Result<Vec<CustomEmojiView>, AppError> {
-        let shortcodes = extract_content_tokens(content).emoji_shortcodes;
-        if shortcodes.is_empty() {
-            return Ok(Vec::new());
-        }
-        emoji_repository::resolve_emojis(&self.pool, &shortcodes).await
-    }
-
-    /// Resolves `status`'s viewer-scoped operation state (Requirement
-    /// 10.2): `favourited`/`bookmarked`/`pinned`/`reblogged` from
-    /// `InteractionRepository`'s existence checks (all `false` when
-    /// `ctx.viewer` is `None`), and `muted` from `ctx.muted` — see this
-    /// module's doc comment ("Deliberate deviations", #1) for why the mute
-    /// signal comes from `FilterContext` rather than statuses-core (which
-    /// explicitly does not resolve it itself). `ctx.muted` is keyed by the
-    /// *other* account's id (`FilterContext`'s own doc comment), i.e.
-    /// exactly `status.actor_id` for the status currently being rendered —
-    /// applied per-status (the top-level status and a nested reblog target
-    /// each use their own author), never the outer boost's author for a
-    /// nested target's own `muted`.
-    async fn interaction_state(
-        &self,
-        status: &Status,
-        ctx: &FilterContext,
-    ) -> Result<StatusInteractionState, AppError> {
-        let muted = ctx.muted.contains(&status.actor_id);
-        let Some(viewer) = ctx.viewer else {
-            return Ok(StatusInteractionState {
-                muted,
-                ..StatusInteractionState::default()
-            });
-        };
-        let favourited =
-            interaction_repository::exists_favourite(&self.pool, viewer, status.id).await?;
-        let bookmarked =
-            interaction_repository::exists_bookmark(&self.pool, viewer, status.id).await?;
-        let pinned = interaction_repository::exists_pin(&self.pool, viewer, status.id).await?;
-        let reblogged = interaction_repository::find_reblog(&self.pool, viewer, status.id)
-            .await?
-            .is_some();
-        Ok(StatusInteractionState {
-            favourited,
-            reblogged,
-            bookmarked,
-            pinned,
-            muted,
+            Ok(out)
         })
-    }
-
-    /// Resolves `poll_id`'s Poll JSON (Requirement 10.4's Account/Media
-    /// delegation extends analogously to Poll: statuses-core's own
-    /// `poll_to_json` is reused, never reimplemented). See this module's
-    /// doc comment ("Why `poll`/reblog-target resolution bypasses
-    /// `PollService`/`StatusService`" and "Graceful degradation") for why
-    /// this reads `poll_repository` directly and degrades to `None` rather
-    /// than erroring when the referenced poll is missing.
-    async fn poll_json(&self, poll_id: Id, ctx: &FilterContext) -> Result<Option<Value>, AppError> {
-        let Some(poll) = poll_repository::find_poll_by_id(&self.pool, poll_id).await? else {
-            return Ok(None);
-        };
-        let tally = poll_repository::tally(&self.pool, poll_id, ctx.viewer).await?;
-        // Each option's own title is its own shortcode-bearing text,
-        // distinct from the owning Status's `content` — joined with a
-        // space so a scan across the boundary between two titles never
-        // spuriously merges them into one token (mirrors
-        // `StatusesEndpointsState::poll_json`'s identical convention).
-        let combined_titles = tally
-            .options
-            .iter()
-            .map(|option| option.title.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let emojis = self.resolve_emojis(&combined_titles).await?;
-        let serialize_ctx = SerializeContext {
-            viewer: ctx.viewer,
-            now: ctx.now,
-        };
-        Ok(Some(poll_to_json(&poll, &tally, &emojis, &serialize_ctx)))
     }
 }

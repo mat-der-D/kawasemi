@@ -160,6 +160,8 @@
 #[cfg(test)]
 mod tests;
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -167,27 +169,25 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::accounts::account_service::AccountService;
+use crate::api::origin::self_origin;
 use crate::api::pagination::{ForwardedOrigin, Page, PageParams};
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::media::LocalFsStore;
-use crate::media::media_repository;
-use crate::media::serializer::to_media_attachment;
 use crate::notifications::model::Notification;
 use crate::notifications::repository::{self, ListFilter};
 use crate::notifications::serializer::{NotificationRenderInput, notification_to_json};
 use crate::oauth::model::RequestActorContext;
 use crate::runtime::RuntimeContext;
-use crate::statuses::interaction_repository;
+use crate::statuses::model::Poll;
 use crate::statuses::model::Status;
 use crate::statuses::poll_repository;
-use crate::statuses::serializer::{
-    SerializeContext as StatusSerializeContext, StatusInteractionState, StatusRenderInput, TagJson,
-    poll_to_json, status_to_json,
+use crate::statuses::poll_repository::PollTally;
+use crate::statuses::render_assembler::{
+    EmojiResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
 use crate::statuses::status_repository;
-use crate::statuses::tag_repository;
 
 /// Requirements 3.2, 4.3's 404 — see this module's doc comment.
 fn notification_not_found(id: Id) -> AppError {
@@ -241,7 +241,7 @@ impl NotificationService {
 
     /// See this module's doc comment ("Rendering `account`/`status`").
     fn origin(&self) -> ForwardedOrigin {
-        ForwardedOrigin::resolve("https", &self.domain, None, None)
+        self_origin(&self.domain)
     }
 
     /// Resolves `account` (the notification's origin, or a related status's
@@ -253,113 +253,21 @@ impl NotificationService {
             .await
     }
 
-    async fn media_json(
-        &self,
-        status_id: Id,
-        origin: &ForwardedOrigin,
-    ) -> Result<Vec<Value>, AppError> {
-        let media_ids = status_repository::media_ids_for_status(&self.pool, status_id).await?;
-        let mut out = Vec::with_capacity(media_ids.len());
-        for media_id in media_ids {
-            if let Some(media) = media_repository::find_by_id(&self.pool, media_id).await? {
-                out.push(
-                    serde_json::to_value(to_media_attachment(&media, &self.media_store, origin))
-                        .expect("MediaAttachmentJson always serializes to JSON"),
-                );
-            }
-        }
-        Ok(out)
+    /// Builds the shared Status assembler this service renders through.
+    fn assembler(&self) -> StatusRenderAssembler {
+        StatusRenderAssembler::new(
+            self.pool.clone(),
+            Arc::clone(&self.accounts),
+            self.media_store.clone(),
+        )
     }
 
-    async fn tags_json(
-        &self,
-        status_id: Id,
-        origin: &ForwardedOrigin,
-    ) -> Result<Vec<TagJson>, AppError> {
-        let tags = tag_repository::tags_for_status(&self.pool, status_id).await?;
-        Ok(tags
-            .into_iter()
-            .map(|tag| TagJson {
-                url: format!("{}://{}/tags/{}", origin.scheme, origin.host, tag.name),
-                name: tag.name,
-            })
-            .collect())
-    }
-
-    /// The related post's interaction state, from `viewer` (the
-    /// notification's recipient)'s own viewpoint (Requirement 1.2's "受信者
-    /// 視点").
-    async fn interaction_state(
-        &self,
-        viewer: Id,
-        status_id: Id,
-    ) -> Result<StatusInteractionState, AppError> {
-        let favourited =
-            interaction_repository::exists_favourite(&self.pool, viewer, status_id).await?;
-        let bookmarked =
-            interaction_repository::exists_bookmark(&self.pool, viewer, status_id).await?;
-        let pinned = interaction_repository::exists_pin(&self.pool, viewer, status_id).await?;
-        let reblogged = interaction_repository::find_reblog(&self.pool, viewer, status_id)
-            .await?
-            .is_some();
-        Ok(StatusInteractionState {
-            favourited,
-            reblogged,
-            bookmarked,
-            pinned,
-            muted: false,
-        })
-    }
-
-    async fn poll_json(&self, viewer: Id, poll_id: Id) -> Result<Value, AppError> {
-        let poll = poll_repository::find_poll_by_id(&self.pool, poll_id)
-            .await?
-            .ok_or_else(poll_not_found)?;
-        let tally = poll_repository::tally(&self.pool, poll_id, Some(viewer)).await?;
-        let ctx = StatusSerializeContext {
-            viewer: Some(viewer),
-            now: self.runtime.clock.now(),
-        };
-        Ok(poll_to_json(&poll, &tally, &[], &ctx))
-    }
-
-    /// Builds a non-recursive [`StatusRenderInput`] (its own `reblog` field
-    /// always `None`) — used only for a reblog *target*, mirroring
-    /// `account_provider.rs::leaf_render_input`'s identical "at most one
-    /// level of nesting" precedent.
-    async fn leaf_render_input<'a>(
-        &self,
-        viewer: Id,
-        status: &'a Status,
-        origin: &ForwardedOrigin,
-    ) -> Result<StatusRenderInput<'a>, AppError> {
-        let account = self.account_json(status.actor_id, origin).await?;
-        let media_attachments = self.media_json(status.id, origin).await?;
-        let tags = self.tags_json(status.id, origin).await?;
-        let interactions = self.interaction_state(viewer, status.id).await?;
-        let poll = match status.poll_id {
-            Some(poll_id) => Some(self.poll_json(viewer, poll_id).await?),
-            None => None,
-        };
-        Ok(StatusRenderInput {
-            status,
-            account,
-            media_attachments,
-            mentions: Vec::new(),
-            tags,
-            emojis: Vec::new(),
-            poll,
-            interactions,
-            reblog: None,
-        })
-    }
-
-    /// Resolves an already-fetched `status` into its full Mastodon-
-    /// compatible JSON representation, from `viewer`'s own viewpoint — see
-    /// this module's doc comment ("Rendering `account`/`status`") for why
-    /// this duplicates `account_provider.rs::render` rather than reusing it,
-    /// and for the one narrowing (no nested-reblog visibility re-check) this
-    /// copy makes.
+    /// Resolves an embedded post into rendered JSON.
+    ///
+    /// Boost-target resolution stays here, and deliberately performs no
+    /// visibility re-check on the target — a notification is only ever
+    /// rendered for a recipient who was already entitled to be notified
+    /// about it. That narrowing predates this refactor and is preserved.
     async fn render_status(
         &self,
         viewer: Id,
@@ -370,32 +278,23 @@ impl NotificationService {
             Some(target_id) => status_repository::find_by_id(&self.pool, target_id).await?,
             None => None,
         };
-        let reblog_box = match &reblog_target {
-            Some(target) => Some(Box::new(
-                self.leaf_render_input(viewer, target, origin).await?,
-            )),
-            None => None,
+        let polls = RequiredPolls {
+            pool: self.pool.clone(),
         };
-        let account = self.account_json(status.actor_id, origin).await?;
-        let media_attachments = self.media_json(status.id, origin).await?;
-        let tags = self.tags_json(status.id, origin).await?;
-        let interactions = self.interaction_state(viewer, status.id).await?;
-        let poll = match status.poll_id {
-            Some(poll_id) => Some(self.poll_json(viewer, poll_id).await?),
-            None => None,
+        let ctx = RenderContext {
+            viewer: Some(viewer),
+            now: self.runtime.clock.now(),
+            origin,
+            muted: None,
+            polls: &polls,
+            emojis: EmojiResolution {
+                content: false,
+                poll_options: false,
+            },
         };
-        let input = StatusRenderInput {
-            status: &status,
-            account,
-            media_attachments,
-            mentions: Vec::new(),
-            tags,
-            emojis: Vec::new(),
-            poll,
-            interactions,
-            reblog: reblog_box,
-        };
-        Ok(status_to_json(&input))
+        self.assembler()
+            .assemble_one(&status, reblog_target.as_ref(), &ctx)
+            .await
     }
 
     /// Resolves `status_id` (a notification's optional related post) into
@@ -506,5 +405,33 @@ impl NotificationService {
     /// 4.1) — see this module's doc comment ("`clear`: always succeeds").
     pub async fn clear(&self, ctx: &RequestActorContext) -> Result<(), AppError> {
         repository::clear(&self.pool, ctx.actor_id).await
+    }
+}
+
+/// Reads polls straight from the repository and treats a dangling
+/// `poll_id` as this module's own not-found error, matching what this path
+/// has always done.
+struct RequiredPolls {
+    pool: PgPool,
+}
+
+impl PollResolver for RequiredPolls {
+    fn resolve_many<'a>(
+        &'a self,
+        poll_ids: &'a [Id],
+        viewer: Option<Id>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<(Id, Poll, PollTally)>, AppError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(poll_ids.len());
+            for &poll_id in poll_ids {
+                let poll = poll_repository::find_poll_by_id(&self.pool, poll_id)
+                    .await?
+                    .ok_or_else(poll_not_found)?;
+                let tally = poll_repository::tally(&self.pool, poll_id, viewer).await?;
+                out.push((poll_id, poll, tally));
+            }
+            Ok(out)
+        })
     }
 }
