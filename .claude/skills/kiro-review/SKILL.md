@@ -107,7 +107,9 @@ Run these checks and use the result as primary signal.
 - Use original section numbers only.
 
 ### 10. Design Alignment
-- Read the referenced sections in `design.md`.
+- **First check `ssot` in `spec.json`** (missing field counts as `"spec"`).
+- `"spec"` → `design.md` is authoritative. Proceed with the checks below.
+- `"implementation"` → the spec was handed off; `design.md` is a log of the original build, not a standard. Do **not** reject code for diverging from it — that divergence is expected, and rejecting on it would drag refactored code back toward a superseded design. Measure design alignment against the current codebase's own conventions (`.kiro/steering/structure.md`, the surrounding modules' established patterns) instead, and say in the review which basis you used.
 - Confirm the implementation uses the prescribed structures, interfaces, and dependency direction.
 - Reject silent substitutions for design-mandated choices.
 

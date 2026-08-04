@@ -132,6 +132,7 @@ After all findings return, synthesize in main context before proceeding.
    - Set `approvals.design.generated: true, approved: false`
    - Set `approvals.requirements.approved: true`
    - Update `updated_at` timestamp
+   - **If `ssot` was `"implementation"`** (this spec had been handed off): set `ssot: "spec"` and move the existing `handoff` object into a `handoff_history` array. Regenerating the design re-opens the spec — from here the spec outranks the working code again until the next `/kiro-validate-impl` GO. Say so explicitly in the output, because it changes which artifact wins when the two disagree.
 
 ## Critical Constraints
  - **Type Safety**:
