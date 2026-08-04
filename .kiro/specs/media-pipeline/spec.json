@@ -1,9 +1,9 @@
 {
   "feature_name": "media-pipeline",
   "created_at": "2026-06-27T13:57:42Z",
-  "updated_at": "2026-07-02T00:00:00Z",
+  "updated_at": "2026-08-04T00:00:00Z",
   "language": "ja",
-  "phase": "tasks-generated",
+  "phase": "implemented",
   "approvals": {
     "requirements": {
       "generated": true,
@@ -18,5 +18,12 @@
       "approved": true
     }
   },
-  "ready_for_implementation": true
+  "ready_for_implementation": true,
+  "ssot": "implementation",
+  "handoff": {
+    "at": "2026-08-04",
+    "method": "retroactive",
+    "validated_by": null,
+    "note": "Phase 1 完了時点では handoff 儀式が未定義だったため、SSoT 移譲を遡及的に宣言したもの。/kiro-validate-impl による GO は経ていない。以降のフィーチャーは GO 経由で遷移すること。"
+  }
 }
