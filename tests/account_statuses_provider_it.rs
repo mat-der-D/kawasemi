@@ -115,6 +115,42 @@ async fn issue_test_token(app: &TestApp, app_id: Id, actor_id: Id, scopes: &[&st
     issued.plaintext.expose_secret().to_string()
 }
 
+/// Issues a GET carrying the headers a real client sends through this
+/// instance's own TLS-terminating proxy.
+///
+/// Needed when comparing a request-scoped render against a request-free one:
+/// endpoints that have a request in hand build URLs from its
+/// `Host`/`X-Forwarded-Proto`, while renders with no request (an account's
+/// post list, notifications) fall back to the configured domain over
+/// `https`. Both are correct; they only agree when the request actually
+/// carries the headers a deployed instance would receive, which
+/// `Request::builder()` does not supply on its own.
+async fn get_json_as_client(router: &Router, path: &str, token: &str) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header(header::HOST, "test-harness.kawasemi.internal")
+        .header("X-Forwarded-Proto", "https")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .expect("build request");
+    let response = router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router must not fail to produce a response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read response body");
+    let value: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("response body must be valid JSON")
+    };
+    (status, value)
+}
+
 fn real_router(app: &TestApp) -> Router {
     server::build_router(app.state.clone())
 }
@@ -354,6 +390,101 @@ async fn account_statuses_endpoint_renders_a_poll_created_via_the_real_create_st
     for option in poll["options"].as_array().unwrap() {
         assert_eq!(option["votes_count"], 0);
     }
+
+    app.cleanup().await;
+}
+
+/// The same post, fetched from two different endpoints, must be the same
+/// JSON.
+///
+/// This is the guard on what the five-way duplication of the Status render
+/// glue actually cost. While each endpoint assembled its own, they drifted:
+/// this path left `emojis` empty where `GET /api/v1/statuses/:id` filled it,
+/// so one and the same post reached the client as a custom-emoji image from
+/// one endpoint and as literal `:shortcode:` text from the other. Nothing
+/// compared the two, so nothing noticed.
+///
+/// The post below deliberately carries a registered shortcode, a hashtag,
+/// and a viewer-scoped interaction, since those are the fields the copies
+/// disagreed about.
+#[tokio::test]
+async fn a_post_renders_identically_via_the_status_endpoint_and_the_account_list() {
+    let app = spawn_test_app().await;
+    let actor = insert_actor_fixture(&app, "crosspath").await;
+    let app_id = register_test_app(&app).await;
+    let token = issue_test_token(
+        &app,
+        app_id,
+        actor.id,
+        &["read", "write", "write:favourites"],
+    )
+    .await;
+    let router = real_router(&app);
+
+    let now = app.runtime.clock.now();
+    sqlx::query(
+        "INSERT INTO custom_emojis \
+             (shortcode, domain, url, static_url, visible_in_picker, category, updated_at) \
+         VALUES ($1, '', $2, $2, TRUE, NULL, $3)",
+    )
+    .bind("crosspath")
+    .bind("https://example.test/emoji/crosspath.png")
+    .bind(now)
+    .execute(&app.pool)
+    .await
+    .expect("seeding a custom_emojis row must succeed");
+
+    let (status, created) = post_json(
+        &router,
+        "/api/v1/statuses",
+        &token,
+        serde_json::json!({ "status": "hello :crosspath: #tagged" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "creating the post must succeed");
+    let status_id = created["id"].as_str().expect("id must be a string");
+
+    // A viewer-scoped flag, so the comparison covers interaction state too.
+    let (status, _) = post_json(
+        &router,
+        &format!("/api/v1/statuses/{status_id}/favourite"),
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "favouriting must succeed");
+
+    let (status, single) =
+        get_json_as_client(&router, &format!("/api/v1/statuses/{status_id}"), &token).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, list) = get_json_as_client(
+        &router,
+        &format!("/api/v1/accounts/{}/statuses", actor.id.as_i64()),
+        &token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let from_list = list
+        .as_array()
+        .expect("the account statuses list must be an array")
+        .iter()
+        .find(|entry| entry["id"] == single["id"])
+        .expect("the created post must appear in its author's own status list");
+
+    assert_eq!(
+        from_list, &single,
+        "the same post must render identically regardless of which endpoint served it"
+    );
+    assert!(
+        !single["emojis"]
+            .as_array()
+            .expect("emojis must be an array")
+            .is_empty(),
+        "the registered shortcode must resolve — an empty array here would make the \
+         comparison above pass vacuously"
+    );
 
     app.cleanup().await;
 }
