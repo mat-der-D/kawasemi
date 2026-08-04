@@ -1,7 +1,7 @@
 ---
 name: kiro-validate-impl
 description: Validate feature-level integration after all tasks are implemented. Checks cross-task consistency, full test suite, and overall spec coverage.
-allowed-tools: Read, Bash, Grep, Glob, Agent
+allowed-tools: Read, Bash, Grep, Glob, Agent, Edit
 argument-hint: <feature-name> [task-numbers]
 ---
 
@@ -180,9 +180,59 @@ Provide summary in the language specified in spec.json:
 
 If NO-GO, REMEDIATION is mandatory — identify the exact issue and what needs to change. Vague feedback is not acceptable.
 
+### Step 5: SSoT Handoff (GO only)
+
+**This gate owns the transfer of single-source-of-truth from spec to implementation.** Until GO, the spec is authoritative and code follows it. After GO, the implementation is authoritative and the spec becomes a log of how it was built. That transition is only meaningful if it is *recorded* — otherwise later agents cannot tell whether a spec still describes the current system. Perform all three steps below; a GO that skips them leaves the feature in the same ambiguous state this protocol exists to prevent.
+
+Run only on `GO`. On `NO-GO` or `MANUAL_VERIFY_REQUIRED`, change nothing — the spec remains the SSoT.
+
+**Write scope.** This skill holds `Edit` for exactly one purpose: recording its own verdict in `spec.json`. A gate that can modify the source, tests, or spec prose it is judging is not a gate — it can edit its way to `GO`. Step 5.1 is therefore performed here; 5.2 and 5.3 are **delegated**, because stripping comments is a source change that must be reviewed and committed on its own terms, and steering is owned by `/kiro-steering`.
+
+**1. Flip the SSoT marker in `.kiro/specs/<feature>/spec.json`** (performed by this skill):
+
+```json
+"phase": "implemented",
+"ssot": "implementation",
+"handoff": {
+  "at": "<ISO-8601 date>",
+  "method": "validated",
+  "validated_by": "kiro-validate-impl",
+  "note": "<one line: what the GO covered>"
+}
+```
+
+Leave `ready_for_implementation` and `approvals` untouched — they record the spec's historical approval state, not the current SSoT. Never set `ssot` to `"implementation"` outside a GO.
+
+**2. Strip spent traceability references from implementation code** (delegated — emit as a required follow-up, do not perform here).
+
+During implementation these references are scaffolding — Step 3's requirements-coverage matrix consumes them. Once GO is reached they have done their job, and what remains is an unmaintained claim embedded in the file that is now supposed to be authoritative. Remove from source files (not from `.kiro/`):
+
+- `task N.N` references and task-boundary narration (`"out of scope for this task"`, `"was X through task N.N"`) — history belongs to git
+- `design.md` references — deference to an external document contradicts implementation-as-SSoT
+- `Requirements N.N` references — behavior is specified by the contract/golden tests
+
+**Keep** design rationale that cannot be recovered by reading the code (why a trait is generic rather than boxed, why a lint is suppressed, why an ordering constraint exists). The test is: would a competent reader reconstruct this from the code alone? If no, keep it. If it only records *when* or *under which task* the code appeared, remove it.
+
+**3. Sync steering from the code** (delegated — emit as a required follow-up), via `/kiro-steering`.
+
+Derive it from the implementation as it now stands — not from the spec, the design, or the plan. Steering written from a plan is itself a prediction, and becomes another stale log the moment the code diverges.
+
+**Report the handoff explicitly.** Add to the validation report:
+
+```
+- HANDOFF:
+  - spec.json: ssot flipped to "implementation" | not flipped (<reason>)
+  - Traceability strip: REQUIRED — <N> files carry task/design.md/Requirements references
+  - Steering sync: REQUIRED — run /kiro-steering
+```
+
+State 5.2 and 5.3 as outstanding work, not as done. Reporting a handoff step as complete when it was only delegated is the failure this protocol exists to prevent.
+
 ## Important Constraints
 - **Strict Final Gate**: Return `GO` only when all integration checks passed; return `NO-GO` for concrete failures and `MANUAL_VERIFY_REQUIRED` when mandatory validation could not be completed
 - **Boundary integrity over convenience**: Do not return `GO` if the feature only works by smearing responsibilities across boundaries, even when tests pass
+- **GO implies handoff**: A `GO` decision is incomplete until Step 5 has run. Do not report `GO` and defer the SSoT marker flip to a later invocation
+- **Never edit what is being judged**: `Edit` is scoped to `spec.json` metadata only. Never edit source, tests, `requirements.md`, `design.md`, or `tasks.md` — if reaching `GO` appears to need any of those, the answer is `NO-GO` with remediation
 
 ## Safety & Fallback
 
@@ -195,6 +245,9 @@ If NO-GO, REMEDIATION is mandatory — identify the exact issue and what needs t
 
 **If GO Decision**:
 - Feature validated end-to-end and ready for deployment or next feature
+- Step 5.1 must have run: `spec.json` flipped to `"ssot": "implementation"`
+- Then complete the delegated handoff work: strip spent traceability references from source (commit separately), and run `/kiro-steering` to sync steering from the code
+- From this point the spec is a log. Later work on this feature reads the implementation, not `design.md`
 
 **If NO-GO Decision**:
 - Address issues listed in REMEDIATION

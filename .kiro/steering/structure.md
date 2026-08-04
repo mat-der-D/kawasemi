@@ -56,9 +56,11 @@ clock / id generator / RNG / 署名鍵は具体実装に直接依存させず、
 
 ### handoff で行うこと（`/kiro-validate-impl` GO 時の 3 点セット）
 
-1. `spec.json` の `ssot` を `"implementation"` に反転し、`handoff` を記録する
-2. 用済みになったトレーサビリティ参照を実装コードから除去する（下記）
-3. steering を**コードから**同期する（`/kiro-steering`）。spec や計画から書き下ろさない — そうすると steering 自体が予言＝ログになる
+1. `spec.json` の `ssot` を `"implementation"` に反転し、`handoff` を記録する — **`/kiro-validate-impl` 自身が実行**
+2. 用済みになったトレーサビリティ参照を実装コードから除去する（下記）— **委譲**。独立したコミットとしてレビューする
+3. steering を**コードから**同期する（`/kiro-steering`）— **委譲**。spec や計画から書き下ろさない。そうすると steering 自体が予言＝ログになる
+
+2 と 3 を gate 自身にやらせない理由は、**検証対象を書き換えられる gate は gate ではない**から。`/kiro-validate-impl` の書き込み権限は自身の判定を `spec.json` に記録することだけに限る。GO に到達するためにソースの変更が要ると感じたら、それは GO ではなく NO-GO である。
 
 ### コード内コメントの扱い
 
