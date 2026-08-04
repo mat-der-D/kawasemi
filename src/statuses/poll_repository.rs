@@ -116,13 +116,10 @@ use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::domain::Id;
-use crate::error::AppError;
+use crate::error::{AppError, ErrorTag};
 use crate::statuses::model::{Poll, PollOption};
-
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 fn rejected(message: &'static str) -> AppError {
     AppError::client(StatusCode::UNPROCESSABLE_ENTITY, message)
@@ -292,7 +289,19 @@ pub async fn record_vote(
 
     if already_voted {
         let _ = tx.rollback().await;
-        return Err(rejected("actor has already voted in this poll"));
+        // Tagged, unlike this function's three other rejections, because
+        // one caller has to tell it apart from them: an inbound vote
+        // Activity that loops back to a local poll's author reports
+        // "already voted" for a vote that was in fact just recorded
+        // successfully, and must be treated as idempotent rather than as a
+        // 422 for the voter (see `inbound_handlers.rs`'s `VoteHandler`).
+        // The message text is unchanged and still what the client sees —
+        // only the way that caller recognizes this case has moved off it.
+        return Err(AppError::client_tagged(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "actor has already voted in this poll",
+            ErrorTag::DuplicateVote,
+        ));
     }
 
     for choice in &deduped {

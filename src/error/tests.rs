@@ -139,3 +139,56 @@ fn server_constructor_always_carries_the_given_source() {
     );
     assert!(err.source.is_some());
 }
+
+#[test]
+fn plain_constructors_carry_no_tag() {
+    let client = AppError::client(StatusCode::BAD_REQUEST, "bad input");
+    assert_eq!(client.tag, None);
+
+    let server = AppError::server(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        std::io::Error::other("boom"),
+    );
+    assert_eq!(server.tag, None);
+}
+
+#[test]
+fn client_tagged_matches_client_except_for_the_tag() {
+    let plain = AppError::client(StatusCode::UNPROCESSABLE_ENTITY, "already voted");
+    let tagged = AppError::client_tagged(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "already voted",
+        ErrorTag::DuplicateVote,
+    );
+
+    assert_eq!(tagged.kind, plain.kind);
+    assert_eq!(tagged.status, plain.status);
+    assert_eq!(tagged.public_message, plain.public_message);
+    assert!(tagged.source.is_none());
+    assert_eq!(tagged.tag, Some(ErrorTag::DuplicateVote));
+}
+
+/// The tag is a caller-side discriminator only: it must never widen what
+/// reaches the wire, or it would change every tagged endpoint's response
+/// shape (Requirement 1.1).
+#[tokio::test]
+async fn tag_never_reaches_the_response_body() {
+    let plain = AppError::client(StatusCode::UNPROCESSABLE_ENTITY, "already voted");
+    let tagged = AppError::client_tagged(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "already voted",
+        ErrorTag::DuplicateVote,
+    );
+
+    let plain_response = plain.into_response();
+    let tagged_response = tagged.into_response();
+    assert_eq!(tagged_response.status(), plain_response.status());
+
+    let plain_text = body_text(plain_response).await;
+    let tagged_text = body_text(tagged_response).await;
+    assert_eq!(tagged_text, plain_text);
+    assert!(
+        !tagged_text.contains("DuplicateVote"),
+        "tag must not appear in the wire body, got: {tagged_text}"
+    );
+}

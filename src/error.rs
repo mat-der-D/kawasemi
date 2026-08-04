@@ -15,6 +15,18 @@
 //! wire format, such as a Mastodon-compatible error envelope, without
 //! redefining the conversion end-to-end (Requirement 6.5).
 //!
+//! ## Why there is a tag alongside the flat fields
+//! The three fields above carry no domain vocabulary — deliberately, since
+//! every module in the crate depends on this one. That flatness leaves a
+//! caller who must branch on *why* something failed with only one tool:
+//! comparing `public_message` against a literal, which the compiler cannot
+//! check and which detaches silently the moment anyone rewords the message.
+//! [`ErrorTag`] closes that hole for the narrow set of failures a caller
+//! genuinely has to distinguish, without turning this type into a registry
+//! of every domain's error taxonomy. It is caller-side only: no renderer
+//! and no log site reads it, so tagging an error cannot change what a
+//! client observes.
+//!
 //! ## Router-wide default is api-foundation's Mastodon-compatible renderer
 //! (task 7.1, api-foundation Requirement 7.4)
 //! [`AppError`]'s own [`IntoResponse`] impl renders through
@@ -68,6 +80,38 @@ pub enum ErrorKind {
 /// `source` could leak into it.
 pub const GENERIC_SERVER_MESSAGE: &str = "internal server error";
 
+/// Machine-checkable discriminator for "did this fail *for this specific
+/// reason*?", for the narrow set of failures a caller must branch on.
+///
+/// Exists because [`AppError`] is deliberately flat — `kind`/`status`/
+/// `public_message` carry no domain vocabulary — which previously left
+/// comparing `public_message` against a literal as the only way to ask that
+/// question. A literal comparison is invisible to the compiler: rewording
+/// the message (a typo fix, a wording pass) silently detaches the branch
+/// and the failure surfaces somewhere far away at runtime.
+///
+/// This is *not* a place to enumerate every domain failure. `AppError` is a
+/// cross-cutting type; accumulating per-domain vocabulary here would make
+/// every module depend on every other module's error taxonomy. A variant
+/// earns its place only when some caller genuinely has to distinguish that
+/// one failure from its siblings, and the tag never reaches the wire — it
+/// is invisible to both response renderers and to logging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorTag {
+    /// An actor voted in a poll it had already voted in.
+    ///
+    /// Distinguishing this from `record_vote`'s other rejections (deadline
+    /// passed, choice out of range, single-choice violation) matters
+    /// because it is the only one that is *not* necessarily a client
+    /// mistake: when a poll's author is local, the vote Activity for a vote
+    /// just recorded locally loops back in-process to the inbound handler,
+    /// where "already voted" means "already applied" and the correct
+    /// outcome is idempotent success, not a 422 for the voter who just
+    /// voted.
+    DuplicateVote,
+}
+
 /// Unified cross-cutting application error (Requirement 6.1).
 ///
 /// Prefer the [`AppError::client`] / [`AppError::server`] constructors over
@@ -92,6 +136,14 @@ pub struct AppError {
     /// [`AppError::server`]); logged via `tracing`, never placed in the
     /// response body.
     pub source: Option<BoxError>,
+    /// Lets a caller ask "did this fail for *this* reason?" without
+    /// comparing `public_message` against a literal — see [`ErrorTag`].
+    ///
+    /// Purely a caller-side discriminator: no response renderer and no log
+    /// site reads it, so setting one cannot change what a client observes.
+    /// Only [`AppError::client_tagged`] ever sets it; `Server` errors never
+    /// carry one.
+    pub tag: Option<ErrorTag>,
 }
 
 impl AppError {
@@ -104,6 +156,25 @@ impl AppError {
             status,
             public_message: public_message.into(),
             source: None,
+            tag: None,
+        }
+    }
+
+    /// Same as [`AppError::client`], plus an [`ErrorTag`] so a caller can
+    /// recognize this particular failure by type rather than by comparing
+    /// `public_message` against a literal.
+    ///
+    /// Everything a client observes — status, body, headers — is identical
+    /// to the untagged constructor's; the tag exists only for in-process
+    /// callers and never reaches the wire.
+    pub fn client_tagged(
+        status: StatusCode,
+        public_message: impl Into<String>,
+        tag: ErrorTag,
+    ) -> Self {
+        AppError {
+            tag: Some(tag),
+            ..AppError::client(status, public_message)
         }
     }
 
@@ -117,6 +188,7 @@ impl AppError {
             status,
             public_message: GENERIC_SERVER_MESSAGE.to_string(),
             source: Some(source.into()),
+            tag: None,
         }
     }
 

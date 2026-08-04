@@ -12,6 +12,7 @@
 use time::Duration;
 
 use crate::domain::{Id, Visibility};
+use crate::error::ErrorTag;
 use crate::statuses::model::{Poll, PollOption, Status};
 use crate::statuses::status_repository::insert_status;
 use crate::test_harness::{TestApp, spawn_test_app};
@@ -260,6 +261,11 @@ async fn record_vote_rejects_when_now_equals_expires_at() {
         .await
         .expect_err("vote exactly at the deadline must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        err.tag, None,
+        "a closed poll is a genuine client error, not the already-applied case \
+         the inbound handler treats as idempotent"
+    );
 
     app.cleanup().await;
 }
@@ -294,6 +300,11 @@ async fn record_vote_rejects_out_of_range_choice_index() {
         .await
         .expect_err("an out-of-range option index must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        err.tag, None,
+        "an out-of-range choice is a genuine client error, not the \
+         already-applied case the inbound handler treats as idempotent"
+    );
 
     let result = tally(&app.pool, poll.id, None)
         .await
@@ -332,6 +343,11 @@ async fn record_vote_rejects_multiple_choices_on_a_single_choice_poll() {
         .await
         .expect_err("multiple choices on a single-choice poll must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        err.tag, None,
+        "a single-vs-multiple violation is a genuine client error, not the \
+         already-applied case the inbound handler treats as idempotent"
+    );
 
     let result = tally(&app.pool, poll.id, None)
         .await
@@ -380,6 +396,15 @@ async fn record_vote_rejects_a_duplicate_vote_by_the_same_actor() {
         .await
         .expect_err("a resubmitted vote by the same actor must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        err.public_message, "actor has already voted in this poll",
+        "the wire-visible wording is part of the API contract and must not drift"
+    );
+    assert_eq!(
+        err.tag,
+        Some(ErrorTag::DuplicateVote),
+        "the duplicate-vote rejection must be recognizable by tag, not by message text"
+    );
 
     let result = tally(&app.pool, poll.id, None)
         .await
