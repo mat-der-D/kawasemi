@@ -48,13 +48,15 @@ Mastodon 互換 API は **Opus による自律 TDD**（契約固定 → 実装 �
 
 ## Key Technical Decisions
 
+> 本節は**採用予定の技術判断**を含み、実装済みを意味しない。未着手のものは各項に明記する。実装状況の一次情報はコードであり、進行段階は `roadmap.md` を見る。
+
 - **配布形態**：事前ビルド済み（x86_64 / aarch64 Linux）。可能なら musl static 単一バイナリを第一候補とするが、真の要件は「インストールが簡単」であり単一バイナリには固執しない。メディア処理でネイティブ依存（libvips・ffmpeg 等）が要る場合は Docker イメージ等に切り替えてよい。
-- **React 資産の埋め込み**：ビルド済みフロントをバイナリに埋め込み（`rust-embed` 等）、バックエンドが SPA を配信。Node も別 Web サーバーも不要。
+- **React 資産の埋め込み**（Phase 4 予定・未実装）：ビルド済みフロントをバイナリに埋め込み（`rust-embed` 等）、バックエンドが SPA を配信。Node も別 Web サーバーも不要。
 - **DB マイグレーション**：埋め込み + 起動時自動実行（`sqlx migrate`）。up とデータ保持、失敗時の安全停止をテストする。
-- **HTTPS**：デフォルトは内蔵 ACME（`rustls-acme` 等、Let's Encrypt 自動取得・更新・TLS 終端）。オプションでリバースプロキシ後段（`X-Forwarded-*` 尊重）。
+- **HTTPS**（Phase 4 予定・未実装）：デフォルトは内蔵 ACME（`rustls-acme` 等、Let's Encrypt 自動取得・更新・TLS 終端）。オプションでリバースプロキシ後段（`X-Forwarded-*` 尊重）。
 - **設定の二層化**：起動設定（ドメイン・DB 接続・シークレット）は TOML / 環境変数。運用設定（インスタンス情報・トグル等）は DB 保存 + 管理画面編集。
 - **検索の抽象化**：検索処理を抽象レイヤーの背後に置き、初期は標準 PostgreSQL の最小実装。`pg_bigm` 等の日本語拡張は任意オプションに留め、必須にしない。API 契約は Mastodon 検索 API の形に留める。
-- **横断サブシステム**：OAuth 2.0 サーバー・Streaming API（WebSocket）・Web Push（VAPID）・ページネーション規約（`Link` + `max_id`/`since_id`/`min_id`）・エラー/レート制限互換（`X-RateLimit-*`）・非同期メディアアップロード（`202` → ポーリング）が API の前提。
+- **横断サブシステム**：OAuth 2.0 サーバー・ページネーション規約（`Link` + `max_id`/`since_id`/`min_id`）・エラー/レート制限互換（`X-RateLimit-*`）・非同期メディアアップロード（`202` → ポーリング）は Phase 1 で実装済み。Streaming API（WebSocket）・Web Push（VAPID）は **Phase 2 予定・未実装**（`roadmap.md` 参照）。
 
 ## テスト実行基盤の既知の問題
 
