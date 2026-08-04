@@ -11,11 +11,15 @@
 //! fifth even carried a standing note that the time had come to extract a
 //! shared helper.
 //!
-//! The cost was never the line count. It was that the copies had begun to
-//! differ — `muted` is resolved from real mute state in timelines and hard-
-//! coded `false` in the other four — and nothing in the code says whether
-//! that is a decision or an oversight. With one implementation, a
-//! difference has to be passed in, which means it has to be named.
+//! The cost was never the line count. It was that the copies had drifted,
+//! and nothing in the code said which drifts were decisions and which were
+//! oversights. Two turned out to be oversights and were fixed on the way in
+//! (custom emoji went unresolved on three of the five paths, so the same
+//! post rendered as an image here and as raw `:shortcode:` text there); one
+//! is a real difference — only timelines has mute state in hand — and is
+//! now an explicit input rather than a hard-coded `false` in four places.
+//! With one implementation, a difference has to be passed in, which means
+//! it has to be named.
 //!
 //! ## What is deliberately *not* here
 //! **Resolving a boost's target, and deciding whether the viewer may see
@@ -94,36 +98,6 @@ pub(crate) trait PollResolver: Send + Sync {
     fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a>;
 }
 
-/// Which `:shortcode:` tokens a caller resolves into the `emojis` arrays.
-///
-/// **Both fields record a preserved inconsistency, not a design choice.**
-/// The five render paths disagreed, and disagreed on the two arrays
-/// *independently*:
-///
-/// | path | status content | poll options |
-/// |---|---|---|
-/// | status endpoints | resolved | resolved |
-/// | timelines | resolved | resolved |
-/// | search | resolved | **empty** |
-/// | account post list | **empty** | **empty** |
-/// | notifications | **empty** | **empty** |
-///
-/// An empty array means the client receives raw `:shortcode:` text where
-/// another endpoint would have sent it an image, for the same post.
-/// Resolving everywhere is almost certainly correct, but it changes what
-/// clients observe, which this refactor does not do on its own authority.
-///
-/// Carrying the divergence here is the actual improvement: it used to be
-/// recoverable only by diffing five copies of the assembly glue, and is now
-/// a named value at five call sites that a follow-up can delete outright.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct EmojiResolution {
-    /// Resolve shortcodes appearing in the status's own content.
-    pub content: bool,
-    /// Resolve shortcodes appearing in a poll's option titles.
-    pub poll_options: bool,
-}
-
 /// Everything about one assembly call that is not the statuses themselves.
 pub(crate) struct RenderContext<'a> {
     /// The actor whose interaction state (`favourited`/`bookmarked`/
@@ -145,8 +119,6 @@ pub(crate) struct RenderContext<'a> {
     /// reconstructable only by diffing five copies.
     pub muted: Option<&'a HashSet<Id>>,
     pub polls: &'a dyn PollResolver,
-    /// Which `:shortcode:` tokens this caller resolves into custom emoji.
-    pub emojis: EmojiResolution,
 }
 
 impl RenderContext<'_> {
@@ -250,11 +222,7 @@ impl StatusRenderAssembler {
             .await?;
         let media_attachments = self.media_json(status.id, ctx.origin).await?;
         let tags = self.tags_json(status.id, ctx.origin).await?;
-        let emojis = if ctx.emojis.content {
-            self.resolve_emojis(&status.content).await?
-        } else {
-            Vec::new()
-        };
+        let emojis = self.resolve_emojis(&status.content).await?;
         let interactions = self.interaction_state(status, ctx).await?;
         let poll = self.poll_json(status.poll_id, ctx).await?;
 
@@ -365,8 +333,7 @@ impl StatusRenderAssembler {
             return Ok(None);
         };
         Ok(Some(
-            self.render_poll_with(&poll, &tally, ctx.viewer, ctx.now, ctx.emojis.poll_options)
-                .await?,
+            self.render_poll(&poll, &tally, ctx.viewer, ctx.now).await?,
         ))
     }
 
@@ -384,31 +351,16 @@ impl StatusRenderAssembler {
         viewer: Option<Id>,
         now: OffsetDateTime,
     ) -> Result<Value, AppError> {
-        self.render_poll_with(poll, tally, viewer, now, true).await
-    }
-
-    async fn render_poll_with(
-        &self,
-        poll: &Poll,
-        tally: &PollTally,
-        viewer: Option<Id>,
-        now: OffsetDateTime,
-        resolve_emojis: bool,
-    ) -> Result<Value, AppError> {
         // Each option's title carries its own shortcodes, distinct from the
         // owning status's content. Joined with a space so a scan across the
         // boundary between two titles never merges them into one token.
-        let emojis = if resolve_emojis {
-            let combined_titles = tally
-                .options
-                .iter()
-                .map(|option| option.title.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            self.resolve_emojis(&combined_titles).await?
-        } else {
-            Vec::new()
-        };
+        let combined_titles = tally
+            .options
+            .iter()
+            .map(|option| option.title.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let emojis = self.resolve_emojis(&combined_titles).await?;
         let serialize_ctx = SerializeContext { viewer, now };
         Ok(poll_to_json(poll, tally, &emojis, &serialize_ctx))
     }

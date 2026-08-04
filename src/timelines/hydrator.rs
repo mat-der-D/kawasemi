@@ -189,7 +189,7 @@ use crate::media::local_fs::LocalFsStore;
 use crate::statuses::model::Status;
 use crate::statuses::poll_repository;
 use crate::statuses::render_assembler::{
-    EmojiResolution, PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
+    PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
 use crate::statuses::status_repository;
 use crate::statuses::visibility::{ViewerRelation, is_visible};
@@ -264,10 +264,6 @@ impl StatusHydrator {
             // passes `None` and renders `muted: false`.
             muted: Some(&ctx.muted),
             polls: &polls,
-            emojis: EmojiResolution {
-                content: true,
-                poll_options: true,
-            },
         };
         self.assembler()
             .assemble_many(statuses, &reblog_targets, &render_ctx)

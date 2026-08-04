@@ -170,10 +170,6 @@ async fn muted_is_false_when_the_caller_supplies_no_mute_context() {
         origin: &origin,
         muted: None,
         polls: &polls,
-        emojis: EmojiResolution {
-            content: true,
-            poll_options: true,
-        },
     };
 
     let json = assembler(&app)
@@ -204,10 +200,6 @@ async fn muted_reflects_the_supplied_mute_context() {
         origin: &origin,
         muted: Some(&muted),
         polls: &polls,
-        emojis: EmojiResolution {
-            content: true,
-            poll_options: true,
-        },
     };
 
     let json = assembler(&app)
@@ -243,10 +235,6 @@ async fn muted_is_judged_per_status_by_its_own_author() {
         origin: &origin,
         muted: Some(&muted),
         polls: &polls,
-        emojis: EmojiResolution {
-            content: true,
-            poll_options: true,
-        },
     };
 
     let json = assembler(&app)
@@ -287,10 +275,6 @@ async fn a_missing_poll_renders_as_none_under_the_tolerant_resolver() {
         origin: &origin,
         muted: None,
         polls: &polls,
-        emojis: EmojiResolution {
-            content: true,
-            poll_options: true,
-        },
     };
 
     let json = assembler(&app)
@@ -321,10 +305,6 @@ async fn a_missing_poll_is_an_error_under_the_strict_resolver() {
         origin: &origin,
         muted: None,
         polls: &polls,
-        emojis: EmojiResolution {
-            content: true,
-            poll_options: true,
-        },
     };
 
     let err = assembler(&app)
@@ -388,10 +368,6 @@ async fn a_present_poll_renders_its_options() {
         origin: &origin,
         muted: None,
         polls: &polls,
-        emojis: EmojiResolution {
-            content: true,
-            poll_options: true,
-        },
     };
 
     let json = assembler(&app)
@@ -430,10 +406,6 @@ async fn assemble_many_preserves_input_order() {
         origin: &origin,
         muted: None,
         polls: &polls,
-        emojis: EmojiResolution {
-            content: true,
-            poll_options: true,
-        },
     };
 
     let rendered = assembler(&app)
@@ -469,10 +441,6 @@ async fn assemble_one_matches_a_single_element_batch() {
         origin: &origin,
         muted: None,
         polls: &polls,
-        emojis: EmojiResolution {
-            content: true,
-            poll_options: true,
-        },
     };
     let asm = assembler(&app);
 
@@ -487,6 +455,129 @@ async fn assemble_one_matches_a_single_element_batch() {
 
     assert_eq!(batch.len(), 1);
     assert_eq!(single, batch[0]);
+
+    app.cleanup().await;
+}
+
+// -- custom emoji ------------------------------------------------------------
+
+/// Seeds a locally-registered custom emoji, mirroring
+/// `statuses::endpoints::tests`'s identical test-local helper.
+async fn seed_custom_emoji(app: &TestApp, shortcode: &str) {
+    let now = app.runtime.clock.now();
+    let url = format!("https://example.test/emoji/{shortcode}.png");
+    sqlx::query(
+        "INSERT INTO custom_emojis \
+             (shortcode, domain, url, static_url, visible_in_picker, category, updated_at) \
+         VALUES ($1, '', $2, $2, TRUE, NULL, $3)",
+    )
+    .bind(shortcode)
+    .bind(&url)
+    .bind(now)
+    .execute(&app.pool)
+    .await
+    .expect("seeding a custom_emojis row must succeed");
+}
+
+/// Every render path resolves the status's own shortcodes.
+///
+/// Three of the five used to and two did not, so the same post arrived at a
+/// client as an image from one endpoint and as literal `:shortcode:` text
+/// from another. There is now one path, so there is one answer.
+#[tokio::test]
+async fn resolves_registered_shortcodes_in_the_status_content() {
+    let app = spawn_test_app().await;
+    let author = create_test_actor(&app, "emojiauthor").await;
+    seed_custom_emoji(&app, "kawasemi").await;
+    let status = create_test_status(&app, author, "hello :kawasemi: world").await;
+
+    let polls = TolerantPolls(app.pool.clone());
+    let origin = origin();
+    let ctx = RenderContext {
+        viewer: None,
+        now: app.runtime.clock.now(),
+        origin: &origin,
+        muted: None,
+        polls: &polls,
+    };
+
+    let json = assembler(&app)
+        .assemble_one(&status, None, &ctx)
+        .await
+        .expect("assembling must succeed");
+
+    let emojis = json["emojis"].as_array().expect("emojis must be an array");
+    assert_eq!(emojis.len(), 1, "the registered shortcode must resolve");
+    assert_eq!(emojis[0]["shortcode"], serde_json::json!("kawasemi"));
+
+    app.cleanup().await;
+}
+
+/// The same applies to a poll's option titles, which carry their own
+/// shortcodes independently of the status content.
+#[tokio::test]
+async fn resolves_registered_shortcodes_in_poll_option_titles() {
+    let app = spawn_test_app().await;
+    let author = create_test_actor(&app, "pollemojiauthor").await;
+    seed_custom_emoji(&app, "yes").await;
+
+    let poll_id = app.runtime.ids.next_id();
+    let status_id = app.runtime.ids.next_id();
+    let status = sample_status(
+        status_id,
+        author,
+        "vote please",
+        Some(poll_id),
+        app.runtime.clock.now(),
+    );
+    insert_status(&app.pool, &status)
+        .await
+        .expect("insert_status must succeed");
+
+    let poll = Poll {
+        id: poll_id,
+        status_id,
+        expires_at: None,
+        multiple: false,
+    };
+    let options = vec![
+        PollOption {
+            poll_id,
+            idx: 0,
+            title: "definitely :yes:".to_string(),
+            votes_count: 0,
+        },
+        PollOption {
+            poll_id,
+            idx: 1,
+            title: "no".to_string(),
+            votes_count: 0,
+        },
+    ];
+    insert_poll(&app.pool, &poll, &options)
+        .await
+        .expect("insert_poll must succeed");
+
+    let polls = TolerantPolls(app.pool.clone());
+    let origin = origin();
+    let ctx = RenderContext {
+        viewer: None,
+        now: app.runtime.clock.now(),
+        origin: &origin,
+        muted: None,
+        polls: &polls,
+    };
+
+    let json = assembler(&app)
+        .assemble_one(&status, None, &ctx)
+        .await
+        .expect("assembling must succeed");
+
+    let emojis = json["poll"]["emojis"]
+        .as_array()
+        .expect("poll emojis must be an array");
+    assert_eq!(emojis.len(), 1, "the option title's shortcode must resolve");
+    assert_eq!(emojis[0]["shortcode"], serde_json::json!("yes"));
 
     app.cleanup().await;
 }

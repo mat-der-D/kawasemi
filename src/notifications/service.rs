@@ -181,7 +181,7 @@ use crate::runtime::RuntimeContext;
 use crate::statuses::model::Status;
 use crate::statuses::poll_repository;
 use crate::statuses::render_assembler::{
-    EmojiResolution, PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
+    PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
 use crate::statuses::status_repository;
 
@@ -283,10 +283,6 @@ impl NotificationService {
             origin,
             muted: None,
             polls: &polls,
-            emojis: EmojiResolution {
-                content: false,
-                poll_options: false,
-            },
         };
         self.assembler()
             .assemble_one(&status, reblog_target.as_ref(), &ctx)

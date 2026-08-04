@@ -231,7 +231,7 @@ use crate::statuses::interaction_service::InteractionService;
 use crate::statuses::model::{Status, StatusEdit};
 use crate::statuses::poll_service::PollService;
 use crate::statuses::render_assembler::{
-    EmojiResolution, PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
+    PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
 use crate::statuses::serializer::{SerializeContext, poll_to_json};
 
@@ -422,10 +422,6 @@ where
             // had, now stated rather than hard-coded downstream.
             muted: None,
             polls: &polls,
-            emojis: EmojiResolution {
-                content: true,
-                poll_options: true,
-            },
         };
         self.assembler()
             .assemble_one(&status, reblog_target.as_ref(), &ctx)
