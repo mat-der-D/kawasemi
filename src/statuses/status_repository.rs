@@ -172,6 +172,7 @@ use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::domain::{Id, Visibility};
 use crate::error::AppError;
 use crate::statuses::model::{Status, StatusEdit};
@@ -180,10 +181,6 @@ use crate::statuses::model::{Status, StatusEdit};
 /// (`migrations/0007_statuses.sql`'s `statuses.uri TEXT NOT NULL UNIQUE`,
 /// implicit default constraint name for a single-column `UNIQUE`).
 const URI_UNIQUE_CONSTRAINT: &str = "statuses_uri_key";
-
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// Maps a failed `INSERT INTO statuses` to an [`AppError`]: a unique
 /// violation on [`URI_UNIQUE_CONSTRAINT`] becomes a caller-facing

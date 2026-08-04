@@ -169,9 +169,9 @@ mod tests;
 use serde::Serialize;
 use serde_json::Value;
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use crate::accounts::model::CustomEmojiView;
+use crate::api::time::format_time;
 use crate::domain::{Id, Visibility};
 use crate::statuses::model::{Poll, Status};
 use crate::statuses::poll_repository::PollTally;
@@ -350,14 +350,6 @@ pub struct PollJson {
     pub emojis: Vec<StatusEmojiJson>,
     pub voted: bool,
     pub own_votes: Vec<i32>,
-}
-
-/// Renders `when` as an RFC 3339 timestamp string, matching
-/// `accounts/serializer.rs::format_time`'s identical convention (Mastodon's
-/// own ISO 8601 timestamp shape).
-fn format_time(when: OffsetDateTime) -> String {
-    when.format(&Rfc3339)
-        .expect("a valid OffsetDateTime always formats as RFC 3339")
 }
 
 /// Projects `input` into [`StatusJson`] — a pure, total mapping with no

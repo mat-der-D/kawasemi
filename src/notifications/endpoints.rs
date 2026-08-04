@@ -199,6 +199,7 @@ use sqlx::PgPool;
 use crate::accounts::remote_repository::find_remote_by_id;
 use crate::actor::directory::ActorDirectory;
 use crate::api::pagination::{Page, PageParams, RequestUriContext, build_link_header};
+use crate::api::query::parse_optional_limit;
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
 use crate::media::ResolvedOrigin;
@@ -353,24 +354,6 @@ fn parse_notification_types(raw: &[String]) -> Result<Option<Vec<NotificationTyp
         out.push(parse_notification_type(value)?);
     }
     Ok(Some(out))
-}
-
-/// Parses `limit`'s raw wire value (if present) into a `u32`, as a `422`
-/// [`AppError`] on failure rather than axum's own `QueryRejection` — mirrors
-/// `accounts::endpoints::parse_optional_limit`/`social_graph::endpoints::
-/// parse_optional_limit`/`timelines::endpoints::parse_optional_limit`
-/// exactly (small, documented, intentional duplication across sibling
-/// endpoint modules, this crate's own established convention).
-fn parse_optional_limit(raw: Option<&str>) -> Result<Option<u32>, AppError> {
-    match raw {
-        None => Ok(None),
-        Some(value) => value.parse::<u32>().map(Some).map_err(|_| {
-            AppError::client(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("limit must be a non-negative integer, got {value:?}"),
-            )
-        }),
-    }
 }
 
 // ---- Router-local state --------------------------------------------------

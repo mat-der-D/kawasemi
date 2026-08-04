@@ -128,6 +128,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::config::Secret;
 use crate::domain::Id;
 use crate::error::AppError;
@@ -206,17 +207,6 @@ fn parse_scopes(raw: &str) -> ScopeSet {
     ScopeSet::new(raw.split_whitespace())
 }
 
-/// Maps a failed `INSERT INTO oauth_access_tokens` to an [`AppError`]. A
-/// unique violation on `token_hash` should not occur in practice (the token
-/// plaintext is minted from a high-entropy random source, mirroring
-/// `app_repository.rs::map_insert_error`'s/`code_repository.rs
-/// ::map_insert_error`'s identical reasoning for `client_id`/`code_hash`), so
-/// any failure here is treated as an unexpected `Server` (5xx) error rather
-/// than a foreseeable user-facing conflict.
-fn map_insert_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
-
 /// Issues a fresh access token bound to a single actor and its approved
 /// scopes (Requirements 3.1, 3.5): mints the raw bearer token from the
 /// injected [`Rng`] boundary and an `id` from the injected [`IdGenerator`]
@@ -255,7 +245,7 @@ pub async fn issue_token(
     .bind(now)
     .execute(pool)
     .await
-    .map_err(map_insert_error)?;
+    .map_err(map_server_error)?;
 
     Ok(IssuedToken {
         plaintext: Secret::new(plaintext),

@@ -86,17 +86,13 @@
 #[cfg(test)]
 mod tests;
 
-use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::{Duration, OffsetDateTime};
 
 use crate::accounts::model::{ProfileField, RemoteAccount};
+use crate::api::db::map_server_error;
 use crate::domain::Id;
 use crate::error::AppError;
-
-fn map_query_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// Builds `remote_accounts.fields`' JSONB array representation from a
 /// [`ProfileField`] slice. See this module's doc comment ("`fields` (JSONB)
@@ -242,7 +238,7 @@ pub async fn find_remote_by_uri(
     .bind(actor_uri)
     .fetch_optional(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(row.map(row_to_remote_account))
 }
@@ -259,7 +255,7 @@ pub async fn find_remote_by_id(pool: &PgPool, id: Id) -> Result<Option<RemoteAcc
     .bind(id.as_i64())
     .fetch_optional(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(row.map(row_to_remote_account))
 }
@@ -318,7 +314,7 @@ pub async fn upsert_remote(
     .bind(account.fetched_at)
     .fetch_one(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(row_to_remote_account(row))
 }

@@ -131,15 +131,12 @@
 //! query value in this crate — a `422` [`AppError`] via
 //! [`parse_optional_account_id`] — rather than silently ignored.
 //!
-//! ## Boolean parsing: reusing the established "`true`/`1`" / "`false`/`0`"
-//! discipline (small, documented, intentional duplication across sibling
-//! endpoint modules — this crate's own established convention, per
-//! `accounts::endpoints`'s own doc comment)
-//! [`parse_optional_bool_query`]/[`parse_loose_bool`] are a direct copy of
-//! `crate::accounts::endpoints`'s/`crate::timelines::endpoints`'s identically
-//! named, identically behaving functions — accepting `"true"`/`"1"` as
-//! `true`, `"false"`/`"0"` as `false`, defaulting to `false` when the query
-//! parameter is absent, and rejecting anything else as `422`.
+//! ## Boolean parsing
+//! [`crate::api::query::parse_optional_bool_query`] accepts `"true"`/`"1"`
+//! as `true`, `"false"`/`"0"` as `false`, defaults to `false` when the
+//! parameter is absent, and rejects anything else as `422` — the same
+//! interpretation every endpoint in this API applies, because it is the
+//! same function.
 //!
 //! ## `type`: `422` on an unrecognized value (mirrors `notifications::
 //! endpoints::parse_notification_type`'s identical precedent)
@@ -218,6 +215,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::api::pagination::{DEFAULT_LIMIT, MAX_LIMIT};
+use crate::api::query::parse_optional_bool_query;
 use crate::domain::Id;
 use crate::error::AppError;
 use crate::federation::signatures::FederationHttpClient;
@@ -279,31 +277,6 @@ fn parse_search_type(raw: &str) -> Result<SearchType, AppError> {
                  \"hashtags\""
             ),
         )),
-    }
-}
-
-/// Accepted spellings for a loosely-typed boolean query field — identical
-/// to `accounts::endpoints::parse_loose_bool`/`timelines::endpoints::
-/// parse_loose_bool` (see this module's doc comment, "Boolean parsing").
-fn parse_loose_bool(field_name: &str, raw: &str) -> Result<bool, AppError> {
-    match raw {
-        "true" | "1" => Ok(true),
-        "false" | "0" => Ok(false),
-        other => Err(AppError::client(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("{field_name} must be \"true\"/\"1\" or \"false\"/\"0\", got {other:?}"),
-        )),
-    }
-}
-
-/// Parses an optional loosely-typed boolean query field, defaulting to
-/// `false` when absent — identical to `accounts::endpoints::
-/// parse_optional_bool_query`/`timelines::endpoints::
-/// parse_optional_bool_query`.
-fn parse_optional_bool_query(field_name: &str, raw: Option<&str>) -> Result<bool, AppError> {
-    match raw {
-        None => Ok(false),
-        Some(value) => parse_loose_bool(field_name, value),
     }
 }
 

@@ -73,16 +73,12 @@
 #[cfg(test)]
 mod tests;
 
-use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 
 use crate::accounts::model::InstanceSettings;
+use crate::api::db::map_server_error;
 use crate::domain::Id;
 use crate::error::AppError;
-
-fn map_query_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// Parses a `JSONB` array-of-strings column value (shared shape between
 /// `instance_settings.rules` and `instance_settings.languages`) into a
@@ -206,7 +202,7 @@ pub async fn load_instance_settings(pool: &PgPool) -> Result<InstanceSettings, A
     ))
     .fetch_optional(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(row
         .map(row_to_settings)

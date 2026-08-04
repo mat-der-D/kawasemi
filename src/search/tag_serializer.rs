@@ -42,7 +42,7 @@
 //! request") — this serializer cannot honor `X-Forwarded-Proto`/
 //! `X-Forwarded-Host` on a per-request basis. It instead resolves a fixed
 //! `https://{domain}` origin from its own constructor-supplied `domain`
-//! (`ForwardedOrigin::resolve("https", &self.domain, None, None)`, the same
+//! (`self_origin(&self.domain)`, the same
 //! call `NotificationService::origin` makes), consistent with this crate's
 //! established precedent for serializers that sit downstream of a live
 //! request context.
@@ -60,6 +60,7 @@ mod tests;
 
 use serde_json::{Value, json};
 
+use crate::api::origin::self_origin;
 use crate::api::pagination::ForwardedOrigin;
 use crate::search::model::TagView;
 
@@ -85,7 +86,7 @@ impl TagSerializer {
     /// See this module's doc comment ("No per-request `ForwardedOrigin`
     /// available").
     fn origin(&self) -> ForwardedOrigin {
-        ForwardedOrigin::resolve("https", &self.domain, None, None)
+        self_origin(&self.domain)
     }
 
     /// Builds the Tag JSON contract for `tag` (Requirement 1.3): `name`

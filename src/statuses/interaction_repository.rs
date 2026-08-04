@@ -145,14 +145,11 @@ use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::api::pagination::{Cursor, Page, PageParams};
 use crate::domain::{Id, Visibility};
 use crate::error::AppError;
 use crate::statuses::model::Status;
-
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// Reconstructs a [`Visibility`] from an already-persisted
 /// `statuses.visibility` column value. Mirrors

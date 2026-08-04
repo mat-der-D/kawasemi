@@ -87,6 +87,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::config::Secret;
 use crate::domain::Id;
 use crate::error::AppError;
@@ -185,16 +186,6 @@ fn parse_scopes(raw: &str) -> ScopeSet {
     ScopeSet::new(raw.split_whitespace())
 }
 
-/// Maps a failed `INSERT INTO oauth_applications` to an [`AppError`].
-/// A unique violation on `client_id` should not occur in practice (24
-/// random bytes give an astronomically low collision probability), so —
-/// unlike `ActorRepository::map_insert_error`'s handle-uniqueness case,
-/// which maps a *foreseeable* user-driven conflict to a 409 — any failure
-/// here is treated as an unexpected `Server` (5xx) error.
-fn map_insert_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
-
 /// Registers a new OAuth client application (Requirement 1.1): mints
 /// `client_id`/`client_secret` from the injected [`IdGenerator`]/[`Rng`]
 /// boundaries, hashes `client_secret` via [`keyed_hash`] before persisting
@@ -235,7 +226,7 @@ pub async fn register_app(
     .bind(now)
     .execute(pool)
     .await
-    .map_err(map_insert_error)?;
+    .map_err(map_server_error)?;
 
     Ok(OauthApp {
         id,

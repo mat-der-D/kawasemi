@@ -208,14 +208,11 @@ use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::api::pagination::{Cursor, Page, PageParams};
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
 use crate::social_graph::model::{Block, Follow, FollowRequest, FollowRequestDirection, Mute};
-
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 // -- AccountRef <-> (kind, id) mapping --------------------------------------
 //

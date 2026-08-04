@@ -157,28 +157,14 @@
 #[cfg(test)]
 mod tests;
 
-use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use sqlx::{Postgres, QueryBuilder};
 
+use crate::api::db::map_server_error;
 use crate::api::pagination::{Page, PageParams, StatusIdCursor};
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
 use crate::notifications::model::{Notification, NotificationType};
-
-/// Maps a raw `sqlx::Error` to a 5xx [`AppError`] — mirrors every other
-/// repository in this crate (`status_repository.rs::map_server_error`,
-/// `interaction_repository.rs::map_server_error`,
-/// `social_graph/repository.rs::map_server_error`,
-/// `candidate_repository.rs::map_server_error`) exactly: every failure from
-/// this module is `AppError`, never a new error type (steering: エラーは
-/// `AppError` に集約). This module's writes use `ON CONFLICT ... DO NOTHING`
-/// throughout (see this module's doc comment, "Duplicate handling"), so no
-/// unique-violation `sqlx::Error` is ever expected on this path either —
-/// every error this maps is a genuine, unexpected DB-layer failure.
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 // -- `AccountRef` <-> `(kind, id)` mapping (mirrors
 // `social_graph/repository.rs`'s identical private helpers; see this

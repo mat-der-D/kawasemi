@@ -20,8 +20,9 @@
 //! Scope: this module owns exactly the three axum handlers above, plus
 //! [`TimelineEndpointsState`] (the router-local state bundle these handlers
 //! close over) and the small wire-shape helpers they need (scope-literal
-//! constructor, loosely-typed boolean/limit query parsing, the tag
-//! timeline's `any[]`/`all[]`/`none[]` repeated-query-parameter extraction).
+//! constructor, the tag timeline's `any[]`/`all[]`/`none[]` repeated-query-
+//! parameter extraction). Loosely-typed boolean and `limit` parsing comes
+//! from [`crate::api::query`], shared with every other endpoint module.
 //! It reuses, never reimplements: [`crate::timelines::service::TimelineService::timeline`]
 //! (task 4.2, already reviewed) for the entire candidate -> filter -> fill
 //! -> hydrate -> `Page` pipeline, `crate::oauth::middleware`'s
@@ -163,6 +164,7 @@ use axum::{Json, extract::Path};
 use serde::Deserialize;
 
 use crate::api::pagination::{PageParams, RequestUriContext, build_link_header};
+use crate::api::query::{parse_optional_bool_query, parse_optional_limit};
 use crate::error::AppError;
 use crate::media::ResolvedOrigin;
 use crate::oauth::middleware::{AuthState, OptionalActor, RequiredActor, require_scope};
@@ -182,43 +184,6 @@ pub const TAG_TIMELINE_PATH: &str = "/api/v1/timelines/tag/{hashtag}";
 
 fn read_statuses_scope() -> ScopeSet {
     ScopeSet::parse("read:statuses").expect("\"read:statuses\" is a valid scope literal")
-}
-
-// ---- Loosely-typed query parsing (mirrors
-// `accounts::endpoints::parse_optional_bool_query`/`parse_optional_limit`
-// and `statuses::endpoints::parse_optional_limit`'s identical, already-
-// reviewed precedent: every wire field stays `Option<String>` so a
-// malformed value renders a `422` `AppError` rather than axum's own
-// `QueryRejection`) -----------------------------------------------------
-
-fn parse_loose_bool(field_name: &str, raw: &str) -> Result<bool, AppError> {
-    match raw {
-        "true" | "1" => Ok(true),
-        "false" | "0" => Ok(false),
-        other => Err(AppError::client(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("{field_name} must be \"true\"/\"1\" or \"false\"/\"0\", got {other:?}"),
-        )),
-    }
-}
-
-fn parse_optional_bool_query(field_name: &str, raw: Option<&str>) -> Result<bool, AppError> {
-    match raw {
-        None => Ok(false),
-        Some(value) => parse_loose_bool(field_name, value),
-    }
-}
-
-fn parse_optional_limit(raw: Option<&str>) -> Result<Option<u32>, AppError> {
-    match raw {
-        None => Ok(None),
-        Some(value) => value.parse::<u32>().map(Some).map_err(|_| {
-            AppError::client(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("limit must be a non-negative integer, got {value:?}"),
-            )
-        }),
-    }
 }
 
 // ---- Router-local state --------------------------------------------------

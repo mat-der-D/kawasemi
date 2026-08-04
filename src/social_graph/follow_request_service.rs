@@ -115,6 +115,7 @@ use sqlx::PgPool;
 use crate::accounts::account_service::AccountService;
 use crate::accounts::relationship_serializer::RelationshipSerializer;
 use crate::accounts::remote_repository;
+use crate::api::origin::self_origin;
 use crate::api::pagination::{ForwardedOrigin, Page, PageParams};
 use crate::domain::{AccountRef, Id};
 use crate::error::{AppError, ErrorKind};
@@ -218,7 +219,7 @@ where
     /// per-request `ForwardedOrigin` is available this deep, and why this is
     /// the same fallback `AccountStatusesProviderImpl::origin` already uses.
     fn origin(&self) -> ForwardedOrigin {
-        ForwardedOrigin::resolve("https", &self.domain, None, None)
+        self_origin(&self.domain)
     }
 
     /// Resolves `requester_id` (an already-parsed internal numeric account

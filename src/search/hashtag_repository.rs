@@ -110,17 +110,13 @@
 #[cfg(test)]
 mod tests;
 
-use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::domain::Id;
 use crate::error::AppError;
 use crate::search::model::TagView;
-
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// Builds the domain-relative `/tags/{name}` path this module uses as
 /// [`TagView::url`] — see this module's doc comment ("`TagView::url`: a

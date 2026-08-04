@@ -105,6 +105,7 @@ use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::config::Secret;
 use crate::domain::Id;
 use crate::error::AppError;
@@ -138,17 +139,6 @@ fn join_scopes(scopes: &ScopeSet) -> String {
 /// Reverses [`join_scopes`]. Mirrors `app_repository.rs::parse_scopes`.
 fn parse_scopes(raw: &str) -> ScopeSet {
     ScopeSet::new(raw.split_whitespace())
-}
-
-/// Maps a failed `INSERT INTO oauth_authorization_codes` to an [`AppError`].
-/// A primary-key collision on `code_hash` should not occur in practice (the
-/// code plaintext is expected to be minted from a high-entropy random source
-/// by a later issuing task, mirroring `app_repository.rs::map_insert_error`'s
-/// identical reasoning for `client_id`), so any failure here is treated as
-/// an unexpected `Server` (5xx) error rather than a foreseeable user-facing
-/// conflict.
-fn map_insert_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
 }
 
 /// Inserts a freshly issued, short-lived authorization code
@@ -192,7 +182,7 @@ pub async fn insert_code(
     .bind(code.consumed)
     .execute(pool)
     .await
-    .map_err(map_insert_error)?;
+    .map_err(map_server_error)?;
 
     Ok(())
 }

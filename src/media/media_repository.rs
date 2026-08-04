@@ -110,10 +110,10 @@
 #[cfg(test)]
 mod tests;
 
-use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::domain::Id;
 use crate::error::AppError;
 use crate::media::model::{Dimensions, Focus, Media, MediaMeta, MediaState, MediaType};
@@ -275,19 +275,6 @@ fn row_to_media(row: MediaRow) -> Media {
     }
 }
 
-/// Maps a failed `INSERT INTO media` to an [`AppError`]. A primary-key
-/// collision on `id` should not occur in practice (`IdGenerator`'s
-/// uniqueness contract), so any failure here is treated as an unexpected
-/// `Server` (5xx) error, mirroring `oauth/code_repository.rs::map_insert_error`'s
-/// identical reasoning.
-fn map_insert_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
-
-fn map_query_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
-
 /// Persists `media` as a new `media` row (Requirement 1.1, 1.2): `actor_id`
 /// is required by [`Media`]'s own type (task 2.1 makes an ownerless `Media`
 /// unconstructable), so no separate runtime check is needed for "所有
@@ -344,7 +331,7 @@ pub async fn insert_media(
     .bind(media.created_at)
     .execute(pool)
     .await
-    .map_err(map_insert_error)?;
+    .map_err(map_server_error)?;
 
     Ok(())
 }
@@ -369,7 +356,7 @@ pub async fn find_owned(
     .bind(actor_id.as_i64())
     .fetch_optional(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(row.map(row_to_media))
 }
@@ -401,7 +388,7 @@ pub async fn find_by_id(pool: &PgPool, media_id: Id) -> Result<Option<Media>, Ap
     .bind(media_id.as_i64())
     .fetch_optional(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(row.map(row_to_media))
 }
@@ -446,7 +433,7 @@ pub async fn update_metadata(
     .bind(actor_id.as_i64())
     .fetch_optional(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(row.map(row_to_media))
 }
@@ -490,7 +477,7 @@ pub async fn set_ready(
     .bind(media_id.as_i64())
     .execute(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(())
 }
@@ -508,7 +495,7 @@ pub async fn set_failed(pool: &PgPool, media_id: Id, now: OffsetDateTime) -> Res
         .bind(media_id.as_i64())
         .execute(pool)
         .await
-        .map_err(map_query_error)?;
+        .map_err(map_server_error)?;
 
     Ok(())
 }

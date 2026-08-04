@@ -201,6 +201,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::api::pagination::{PageParams, RequestUriContext, build_link_header};
+use crate::api::query::parse_optional_limit;
 use crate::error::AppError;
 use crate::federation::DeliverySink;
 use crate::federation::LocalActorLookup as DeliveryLocalActorLookup;
@@ -358,24 +359,6 @@ pub struct FollowRequestsQueryParams {
     pub min_id: Option<String>,
     #[serde(default)]
     pub limit: Option<String>,
-}
-
-/// Parses `limit`'s raw wire value (if present) into a `u32`, as a `422`
-/// [`AppError`] on failure rather than axum's own `QueryRejection` — mirrors
-/// `accounts::endpoints::parse_optional_limit` exactly (small, documented,
-/// intentional duplication across sibling endpoint modules, the same
-/// convention `oauth::middleware`'s own doc comment already establishes for
-/// this crate).
-fn parse_optional_limit(raw: Option<&str>) -> Result<Option<u32>, AppError> {
-    match raw {
-        None => Ok(None),
-        Some(value) => value.parse::<u32>().map(Some).map_err(|_| {
-            AppError::client(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("limit must be a non-negative integer, got {value:?}"),
-            )
-        }),
-    }
 }
 
 // ---- Router-local state -------------------------------------------------

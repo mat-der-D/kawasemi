@@ -185,6 +185,7 @@ use crate::accounts::account_service::{
 use crate::accounts::emoji_service::CustomEmojiService;
 use crate::accounts::instance_service::InstanceService;
 use crate::api::pagination::{PageParams, RequestUriContext, build_link_header};
+use crate::api::query::{parse_loose_bool, parse_optional_bool_query, parse_optional_limit};
 use crate::domain::Visibility;
 use crate::error::AppError;
 use crate::federation::signatures::ReqwestFederationHttpClient;
@@ -273,19 +274,6 @@ pub async fn relationships(
     let ids = extract_relationship_ids(pairs);
     let body = state.service.relationships(&ctx, &ids).await?;
     Ok((StatusCode::OK, Json(body)).into_response())
-}
-
-/// Accepted spellings for a loosely-typed boolean multipart/query field
-/// value — see this module's doc comment ("Boolean field wire encoding").
-fn parse_loose_bool(field_name: &str, raw: &str) -> Result<bool, AppError> {
-    match raw {
-        "true" | "1" => Ok(true),
-        "false" | "0" => Ok(false),
-        other => Err(AppError::client(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("{field_name} must be \"true\"/\"1\" or \"false\"/\"0\", got {other:?}"),
-        )),
-    }
 }
 
 /// Parses `source[privacy]`'s literal wire value into a [`Visibility`]
@@ -560,32 +548,6 @@ pub struct StatusesQueryParams {
     pub exclude_replies: Option<String>,
     #[serde(default)]
     pub exclude_reblogs: Option<String>,
-}
-
-/// Parses `limit`'s raw wire value (if present) into a `u32`, as a `422`
-/// [`AppError`] on failure rather than axum's own `QueryRejection` — see
-/// this module's doc comment.
-fn parse_optional_limit(raw: Option<&str>) -> Result<Option<u32>, AppError> {
-    match raw {
-        None => Ok(None),
-        Some(value) => value.parse::<u32>().map(Some).map_err(|_| {
-            AppError::client(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("limit must be a non-negative integer, got {value:?}"),
-            )
-        }),
-    }
-}
-
-/// Parses an optional loosely-typed boolean query field, defaulting to
-/// `false` when absent (Mastodon's own convention for `pinned`/`only_media`/
-/// `exclude_replies`/`exclude_reblogs`: omitting the filter means "do not
-/// filter", not an error).
-fn parse_optional_bool_query(field_name: &str, raw: Option<&str>) -> Result<bool, AppError> {
-    match raw {
-        None => Ok(false),
-        Some(value) => parse_loose_bool(field_name, value),
-    }
 }
 
 /// `GET /api/v1/accounts/:id/statuses` (design.md's API Contract table):
