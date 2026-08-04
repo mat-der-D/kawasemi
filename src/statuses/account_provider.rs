@@ -57,30 +57,42 @@
 //! the proxy's externally-visible origin. Flagged in this task's own status
 //! report `CONCERNS` for reviewer confirmation — not a silent gap.
 //!
-//! ## Rendering glue: reuses repositories/serializer, does not reuse
-//! `crate::statuses::endpoints`'s own private assembly methods
-//! `crate::statuses::endpoints::StatusesEndpointsState`'s own
-//! `render_status_json`/`resolve_common`/`leaf_render_input` (task 7.1)
-//! already assemble a bare [`Status`] into `serializer::status_to_json`'s
-//! input shape — but they are private methods on a router-local, still-
-//! generic (`<A, D, L, H, R, M>`) state bundle this module has no reason to
-//! parameterize over (this provider needs no `StatusActivityBuilder`/
-//! delivery port at all — it only ever *reads*). This module therefore
-//! writes its own small, self-contained equivalent
-//! ([`AccountStatusesProviderImpl::render`]/`leaf_render_input`), reusing
-//! the exact same underlying repositories/serializer functions
-//! `endpoints.rs` itself reuses (`interaction_repository`/`tag_repository`/
-//! `media_repository`/`poll_repository`/`serializer::status_to_json`/
-//! `poll_to_json`/`AccountService::show_account`) — the same "small helper
-//! duplication across sibling modules is this crate's own documented
-//! convention" this spec's own Implementation Notes already invoke for
-//! `UndoKind` (task 4.1) and `format_time` (task 7.1), applied here to a
-//! larger assembly function for the same reason: no `pub(crate)` surface
-//! exists yet to share it instead, and widening `endpoints.rs`'s private
-//! methods to `pub(crate)` (adding six more generic parameters' worth of
-//! surface this module would have to satisfy) is a larger, out-of-scope
-//! refactor this task's own boundary (`AccountStatusesProviderImpl,
-//! AccountCountsContribution`) does not ask for.
+//! ## Status JSON assembly is shared, and batched per page
+//! [`AccountStatusesProviderImpl::render_page`] resolves each boost target
+//! and its visibility itself, then hands the whole page to
+//! [`crate::statuses::render_assembler::StatusRenderAssembler`], which every
+//! module that renders statuses now goes through. This module used to carry
+//! its own copy of that assembly glue — one of four in the crate — written
+//! because `crate::statuses::endpoints`'s equivalent was private to a
+//! router-local, six-parameter generic state bundle this provider (which
+//! only ever *reads*) had no reason to parameterize over. The extraction has
+//! happened; what remains here is only the part that is genuinely this
+//! module's own: which target is visible, and to whom.
+//!
+//! That handoff is a single [`crate::statuses::render_assembler::StatusRenderAssembler::assemble_many`]
+//! call per page rather than one per status, so the media/tag/emoji/
+//! interaction/poll lookups a page needs are issued a number of times that
+//! does not depend on how many statuses it holds, and an author appearing
+//! twice on one page is resolved once (Requirements 5.1, 5.2, 5.3, 5.6).
+//! Boost targets ride in the same batch. What stays outside it — and stays
+//! per status — is exactly the two judgments above this rendering:
+//! [`AccountStatusesProviderImpl::visible_to`] and
+//! [`AccountStatusesProviderImpl::passes_filters`]. Those decide *which*
+//! statuses reach the page, which design.md leaves with this module rather
+//! than the assembler.
+//!
+//! One of them still costs a query per candidate, and that is a real
+//! remaining gap rather than a property of the design:
+//! [`AccountStatusesProviderImpl::passes_filters`] issues
+//! [`status_repository::media_ids_for_status`] when `only_media` is set and
+//! [`interaction_repository::exists_pin`] when `pinned` is set — media and
+//! interaction state, both of which Requirement 5.1 does enumerate. Batching
+//! them would not change which statuses reach the page:
+//! [`status_repository::media_ids_for_statuses`] and
+//! [`interaction_repository::pinned_status_ids`] already exist and answer the
+//! same question for a whole candidate set. Doing so means restructuring the
+//! filter chain, which the task that batched this rendering deliberately left
+//! untouched, so it is still outstanding.
 //!
 //! ## Filtering: fetch-then-filter-then-paginate, not sixteen SQL variants
 //! [`status_repository::list_by_actor`] fetches every status `query.target`
@@ -272,31 +284,57 @@ impl AccountStatusesProviderImpl {
         )
     }
 
-    /// Resolves `status` (owned) into its full Mastodon-compatible JSON
-    /// representation.
+    /// Fetches a boost's target and re-checks its visibility against the
+    /// *target's own* author.
     ///
-    /// Boost-target resolution stays here: this provider re-checks the
+    /// Boost-target resolution stays here rather than moving into the
+    /// assembler — design.md's `Status 一覧の組み立て` flow, "ブースト先の
+    /// 解決と可視性判定は**呼び出し元に残る**": this provider re-checks the
     /// target against its own [`RelationshipQueryRegistry`]-backed
     /// visibility judgment, keyed to the *target's* author rather than the
     /// booster's, and a target that fails is dropped entirely rather than
     /// partially rendered.
-    async fn render(
+    async fn resolve_reblog_target(
+        &self,
+        status: &Status,
+        viewer: Option<Id>,
+    ) -> Result<Option<Status>, AppError> {
+        let Some(target_id) = status.reblog_of_id else {
+            return Ok(None);
+        };
+        let Some(target) = status_repository::find_by_id(&self.pool, target_id).await? else {
+            return Ok(None);
+        };
+        Ok(self.visible_to(&target, viewer).await?.then_some(target))
+    }
+
+    /// Renders one already-filtered, already-paginated page into Status
+    /// JSON, in the order given.
+    ///
+    /// Every boost target is resolved first, so that the whole page —
+    /// targets included (Requirement 5.6) — reaches
+    /// [`StatusRenderAssembler::assemble_many`] as one batch and its
+    /// per-status materials are fetched a number of times that does not
+    /// depend on the page's length (Requirement 5.1).
+    async fn render_page(
         &self,
         viewer: Option<Id>,
-        status: Status,
+        statuses: &[Status],
         origin: &ForwardedOrigin,
-    ) -> Result<Value, AppError> {
-        let reblog_target = match status.reblog_of_id {
-            Some(target_id) => match status_repository::find_by_id(&self.pool, target_id).await? {
-                Some(target) if self.visible_to(&target, viewer).await? => Some(target),
-                _ => None,
-            },
-            None => None,
-        };
+    ) -> Result<Vec<Value>, AppError> {
+        let mut reblog_targets = Vec::with_capacity(statuses.len());
+        for status in statuses {
+            reblog_targets.push(self.resolve_reblog_target(status, viewer).await?);
+        }
+
         let polls = RequiredPolls {
             pool: self.pool.clone(),
         };
         let ctx = RenderContext {
+            // One `now` for the page rather than one per status. The values
+            // it feeds — a poll's `expired` flag — are now answered
+            // consistently across a single response, which rendering each
+            // status against its own clock reading did not guarantee.
             viewer,
             now: self.runtime.clock.now(),
             origin,
@@ -304,7 +342,7 @@ impl AccountStatusesProviderImpl {
             polls: &polls,
         };
         self.assembler()
-            .assemble_one(&status, reblog_target.as_ref(), &ctx)
+            .assemble_many(statuses, &reblog_targets, &ctx)
             .await
     }
 }
@@ -382,10 +420,9 @@ impl AccountStatusesProvider for AccountStatusesProviderImpl {
             );
 
             let origin = self.origin();
-            let mut items = Vec::with_capacity(paged.items.len());
-            for status in paged.items {
-                items.push(self.render(query.viewer, status, &origin).await?);
-            }
+            let items = self
+                .render_page(query.viewer, &paged.items, &origin)
+                .await?;
 
             Ok(Page {
                 items,

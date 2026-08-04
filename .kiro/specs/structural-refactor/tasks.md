@@ -324,6 +324,12 @@
   `#### PollResolver` Implementation Notes が「この経路は単一 Status の取得が主用途なので
   順に `poll_service.poll()` に渡す実装で構わない（Requirement 5.1 が対象とするのは一覧経路）」と
   明文で許容しており、一括化には `PollService` に可視性チェック付きの複数版が要るため。
+- **`account_provider` のフィルタ鎖に Requirement 5.1 の未達分が残っている**（4.5-C1 のレビューで判明）。
+  `passes_filters` は `only_media` 指定時に `media_ids_for_status`、`pinned` 指定時に
+  `exists_pin` を**候補ごとに**発行する。どちらも 5.1 が列挙するメディア／インタラクション状態。
+  `media_ids_for_statuses` と `pinned_status_ids` で一括化でき、**どの status がページに届くかは
+  変わらない**（フィルタ結果は同一）。4.5-C1 は「フィルタ鎖を変更しない」を境界にしたため未着手。
+  task 4.6 の検証テストがこれを拾えるようにすること。
 - **一覧形状のループは 3 経路ではなく 5 経路あった**（4.5-B のレビューで確定）。既知の
   `account_provider.rs:361` / `search/hydrator.rs:316` / `notifications/service.rs:351` に加えて、
   **`statuses/endpoints.rs:810` / `:814`（context の ancestors・descendants）と `:1103`

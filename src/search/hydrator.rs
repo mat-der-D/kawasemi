@@ -56,26 +56,28 @@
 //! weaker or divergent visibility check — it is the identical policy,
 //! reached without paying for six unused generic parameters.
 //!
-//! ## Status JSON assembly is shared
-//! [`SearchHydrator::render_status`] resolves the boost target and its
-//! visibility itself, then hands the status to
+//! ## Status JSON assembly is shared, and batched per result set
+//! [`SearchHydrator::render_statuses`] resolves each boost target and its
+//! visibility itself, then hands the whole set to
 //! [`crate::statuses::render_assembler::StatusRenderAssembler`], which every
 //! module that renders statuses now goes through. This module previously
 //! carried its own copy of that assembly glue — the fourth in the crate —
 //! with a standing note that the time had come to extract a shared helper.
 //! That extraction has happened; what remains here is only the part that is
-//! genuinely this module's own.
+//! genuinely this module's own: which target is visible, and to whom.
 //!
-//! One deliberate divergence from `AccountStatusesProviderImpl::render`:
-//! this module resolves `emojis` via `crate::statuses::status_service::
-//! extract_content_tokens` + `crate::accounts::emoji_repository::
-//! resolve_emojis` (mirrors `NotificationService`'s/`StatusHydrator`'s own
-//! choice) rather than leaving `emojis: Vec::new()`
-//! (`AccountStatusesProviderImpl`'s own narrower choice) — a search result
-//! embedding a post's custom-emoji shortcodes unresolved would render
-//! `:shortcode:` literally in every Mastodon client, which no requirement
-//! asks for but is straightforward to avoid by reusing the exact same two
-//! calls two sibling modules already make for the identical reason.
+//! That handoff is a single
+//! [`crate::statuses::render_assembler::StatusRenderAssembler::assemble_many`]
+//! call per result set rather than one per status, so the media/tag/emoji/
+//! interaction/poll lookups it needs are issued a number of times that does
+//! not depend on how many statuses came back, and an author appearing twice
+//! is resolved once (structural-refactor's Requirements 5.1, 5.2, 5.3, 5.6).
+//! Boost targets ride in the same batch. What stays outside it — and stays
+//! per candidate — is the candidate walk itself
+//! ([`SearchHydrator::status_visible`] and the `find_by_id` feeding it),
+//! because `limit` counts results rather than ids and so decides how far
+//! into `ids` the walk goes; see "`hydrate_statuses`: best-effort
+//! truncation" below.
 //!
 //! ## `hydrate_accounts`: dedup first, `following` filter last (Requirements
 //! 3.5, 3.3)
@@ -311,10 +313,20 @@ impl SearchHydrator {
         limit: u32,
     ) -> Result<Vec<Value>, AppError> {
         let limit = limit as usize;
-        let origin = self.origin();
-        let mut out = Vec::new();
+
+        // The candidate walk itself is deliberately unchanged. `limit`
+        // counts *results*, not ids, so how far into `ids` this gets is a
+        // function of how many were skipped — and stopping the moment
+        // enough have accumulated is what keeps this method from fetching
+        // candidates it would never render (Requirement 4.6). Collecting the
+        // rows instead of the rendered JSON does not move that boundary:
+        // every status that survives both `continue`s below is rendered, and
+        // a render that fails aborts the whole call either way, so this
+        // counter advances exactly where the rendered-result counter it
+        // replaces did.
+        let mut selected = Vec::new();
         for &id in ids {
-            if out.len() >= limit {
+            if selected.len() >= limit {
                 break;
             }
             let Some(status) = status_repository::find_by_id(&self.pool, id).await? else {
@@ -323,9 +335,11 @@ impl SearchHydrator {
             if !self.status_visible(&status, Some(viewer)).await? {
                 continue;
             }
-            out.push(self.render_status(status, Some(viewer), &origin).await?);
+            selected.push(status);
         }
-        Ok(out)
+
+        let origin = self.origin();
+        self.render_statuses(&selected, Some(viewer), &origin).await
     }
 
     /// The single visibility judgment (`crate::statuses::visibility::
@@ -340,30 +354,59 @@ impl SearchHydrator {
         Ok(is_visible(status, viewer, &rel))
     }
 
-    /// Resolves `status` (already known visible to `viewer`) into its full
-    /// Status JSON, nesting a visible reblog target under `reblog` at most
-    /// one level deep.
-    async fn render_status(
+    /// Fetches a boost's target and re-checks its visibility against the
+    /// *target's own* author.
+    ///
+    /// Boost-target resolution stays here rather than moving into the
+    /// assembler — design.md's `Status 一覧の組み立て` flow, "ブースト先の
+    /// 解決と可視性判定は**呼び出し元に残る**": this module re-checks the
+    /// target through its own [`RelationshipQueryRegistry`]-backed
+    /// judgment, keyed to the target's own author, and a target that fails
+    /// is dropped entirely rather than partially rendered.
+    async fn resolve_reblog_target(
         &self,
-        status: Status,
+        status: &Status,
+        viewer: Option<Id>,
+    ) -> Result<Option<Status>, AppError> {
+        let Some(target_id) = status.reblog_of_id else {
+            return Ok(None);
+        };
+        let Some(target) = status_repository::find_by_id(&self.pool, target_id).await? else {
+            return Ok(None);
+        };
+        Ok(self
+            .status_visible(&target, viewer)
+            .await?
+            .then_some(target))
+    }
+
+    /// Resolves `statuses` (each already known visible to `viewer`) into
+    /// their full Status JSON, in the order given, nesting a visible reblog
+    /// target under `reblog` at most one level deep.
+    ///
+    /// Every boost target is resolved first, so that the whole result set —
+    /// targets included (Requirement 5.6 of structural-refactor) — reaches
+    /// [`StatusRenderAssembler::assemble_many`] as one batch and its
+    /// per-status materials are fetched a number of times that does not
+    /// depend on how many statuses it holds (that spec's Requirement 5.1).
+    async fn render_statuses(
+        &self,
+        statuses: &[Status],
         viewer: Option<Id>,
         origin: &ForwardedOrigin,
-    ) -> Result<Value, AppError> {
-        // Boost-target resolution stays here: this module re-checks the
-        // target through its own `RelationshipQueryRegistry`-backed
-        // visibility judgment, keyed to the target's own author.
-        let reblog_target = match status.reblog_of_id {
-            Some(target_id) => match status_repository::find_by_id(&self.pool, target_id).await? {
-                Some(target) if self.status_visible(&target, viewer).await? => Some(target),
-                _ => None,
-            },
-            None => None,
-        };
+    ) -> Result<Vec<Value>, AppError> {
+        let mut reblog_targets = Vec::with_capacity(statuses.len());
+        for status in statuses {
+            reblog_targets.push(self.resolve_reblog_target(status, viewer).await?);
+        }
 
         let polls = TolerantPolls {
             pool: self.pool.clone(),
         };
         let ctx = RenderContext {
+            // One `now` for the whole result set rather than one per
+            // status, so the values it feeds — a poll's `expired` flag —
+            // are answered consistently across a single response.
             viewer,
             now: self.runtime.clock.now(),
             origin,
@@ -371,7 +414,7 @@ impl SearchHydrator {
             polls: &polls,
         };
         self.assembler()
-            .assemble_one(&status, reblog_target.as_ref(), &ctx)
+            .assemble_many(statuses, &reblog_targets, &ctx)
             .await
     }
 
