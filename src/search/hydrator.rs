@@ -412,13 +412,39 @@ struct TolerantPolls {
 }
 
 impl PollResolver for TolerantPolls {
+    /// Two queries for the whole batch — one
+    /// [`poll_repository::find_polls_by_ids`], one
+    /// [`poll_repository::tally_many`] — regardless of how many ids it is
+    /// given, and none at all for an empty one (Requirement 5.1: a result
+    /// page's poll lookups must not scale with its length).
     fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
-            let mut out = Vec::with_capacity(poll_ids.len());
-            for &poll_id in poll_ids {
-                if let Some(poll) = poll_repository::find_poll_by_id(&self.pool, poll_id).await? {
-                    let tally = poll_repository::tally(&self.pool, poll_id, viewer).await?;
-                    out.push((poll_id, poll, tally));
+            let polls = poll_repository::find_polls_by_ids(&self.pool, poll_ids).await?;
+
+            // Tallied for the ids that actually resolved, not the whole
+            // requested set: the per-id loop this replaces only reached
+            // `tally` from inside `if let Some(poll)`, and a dangling id
+            // would contribute nothing to `tally_many`'s result either (it
+            // keys off the `polls` rows themselves), so including it would
+            // only widen the query's id list.
+            let found: Vec<Id> = poll_ids
+                .iter()
+                .copied()
+                .filter(|poll_id| polls.contains_key(poll_id))
+                .collect();
+            let tallies = poll_repository::tally_many(&self.pool, &found, viewer).await?;
+
+            // Built by filtering `poll_ids`, so `found` — and therefore the
+            // result — keeps the order the caller asked in rather than
+            // either map's iteration order.
+            let mut out = Vec::with_capacity(found.len());
+            for poll_id in found {
+                // A poll deleted between the two queries above is dropped
+                // here, which is this resolver's whole contract: a missing
+                // poll costs its status its `poll` field, never the result
+                // set.
+                if let (Some(poll), Some(tally)) = (polls.get(&poll_id), tallies.get(&poll_id)) {
+                    out.push((poll_id, poll.clone(), tally.clone()));
                 }
             }
             Ok(out)

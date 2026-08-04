@@ -37,6 +37,8 @@ use crate::api::pagination::PageParams;
 use crate::domain::Visibility;
 use crate::notifications::model::{Notification, NotificationType};
 use crate::notifications::repository::insert_dedup;
+use crate::statuses::model::{Poll, PollOption};
+use crate::statuses::poll_repository::PollTally;
 use crate::statuses::status_repository::insert_status;
 use crate::test_harness::{TestApp, spawn_test_app};
 
@@ -617,4 +619,140 @@ async fn clear_succeeds_when_the_recipient_has_no_notifications() {
         .clear(&ctx_for(recipient))
         .await
         .expect("clear must succeed even with no notifications");
+}
+
+// -- `RequiredPolls` (Requirement 5.1; task 4.5) ---------------------------
+
+/// Inserts a `polls` row carrying `titles` as options `idx 0..N`, attached
+/// to a fresh `statuses` row — `polls.status_id` is a real FK, so a genuine
+/// target row is required.
+async fn insert_test_poll(app: &TestApp, titles: &[&str]) -> Poll {
+    let actor_id = app.runtime.ids.next_id();
+    let status_id = create_test_status(app, actor_id).await;
+    let poll = Poll {
+        id: app.runtime.ids.next_id(),
+        status_id,
+        expires_at: None,
+        multiple: false,
+    };
+    let options: Vec<PollOption> = titles
+        .iter()
+        .enumerate()
+        .map(|(idx, title)| PollOption {
+            poll_id: poll.id,
+            idx: idx as i32,
+            title: (*title).to_string(),
+            votes_count: 0,
+        })
+        .collect();
+    poll_repository::insert_poll(&app.pool, &poll, &options)
+        .await
+        .expect("insert_poll must succeed for a fresh poll");
+    poll
+}
+
+fn resolved_ids(resolved: &[(Id, Poll, PollTally)]) -> Vec<Id> {
+    resolved.iter().map(|(id, _, _)| *id).collect()
+}
+
+fn option_titles(tally: &PollTally) -> Vec<&str> {
+    tally
+        .options
+        .iter()
+        .map(|option| option.title.as_str())
+        .collect()
+}
+
+/// This module supplies the **strict** [`PollResolver`]: a `poll_id`
+/// matching no `polls` row is this module's own [`poll_not_found`], not a
+/// silently poll-less status. Asserted on the exact status and message
+/// because `statuses::account_provider`'s equally strict resolver raises a
+/// *differently worded* 404 for the same condition, and the two are
+/// deliberately not unified.
+///
+/// Checked with the dangling id in both positions: the resolver must raise
+/// whether or not a resolvable poll precedes it.
+#[tokio::test]
+async fn resolve_many_raises_this_modules_not_found_for_a_dangling_poll_id() {
+    let app = spawn_test_app().await;
+    let polls = RequiredPolls {
+        pool: app.pool.clone(),
+    };
+
+    let existing = insert_test_poll(&app, &["Yes", "No"]).await;
+    let dangling = Id::from_i64(i64::MAX - 41);
+
+    for requested in [[existing.id, dangling], [dangling, existing.id]] {
+        let err = polls
+            .resolve_many(&requested, None)
+            .await
+            .expect_err("a dangling poll id must fail the strict resolver");
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(err.public_message, "poll not found");
+    }
+
+    app.cleanup().await;
+}
+
+/// The strict resolver is not trivially failing: every id that does resolve
+/// comes back, in `poll_ids` order rather than whatever order the rows
+/// arrive in. Requested in an order that is neither ascending nor descending
+/// by id, so a lookup that let a `HashMap`'s iteration order through could
+/// not pass by luck.
+#[tokio::test]
+async fn resolve_many_returns_every_existing_poll_in_the_requested_order() {
+    let app = spawn_test_app().await;
+    let polls = RequiredPolls {
+        pool: app.pool.clone(),
+    };
+
+    let first = insert_test_poll(&app, &["a"]).await;
+    let second = insert_test_poll(&app, &["b"]).await;
+    let third = insert_test_poll(&app, &["c"]).await;
+
+    let requested = [third.id, first.id, second.id];
+    let resolved = polls
+        .resolve_many(&requested, None)
+        .await
+        .expect("resolve_many must succeed for three existing polls");
+
+    assert_eq!(resolved_ids(&resolved), requested.to_vec());
+    assert_eq!(option_titles(&resolved[0].2), vec!["c"]);
+    assert_eq!(option_titles(&resolved[1].2), vec!["a"]);
+    assert_eq!(option_titles(&resolved[2].2), vec!["b"]);
+
+    app.cleanup().await;
+}
+
+/// `viewer` reaches the tally: their own selections come back in
+/// `own_votes`, and an unauthenticated read gets an empty one while still
+/// seeing the same public `voters_count`.
+#[tokio::test]
+async fn resolve_many_reports_the_viewers_own_votes() {
+    let app = spawn_test_app().await;
+    let polls = RequiredPolls {
+        pool: app.pool.clone(),
+    };
+
+    let poll = insert_test_poll(&app, &["Yes", "No"]).await;
+    let viewer = app.runtime.ids.next_id();
+    poll_repository::record_vote(&app.pool, poll.id, viewer, &[1], app.runtime.clock.now())
+        .await
+        .expect("record_vote must succeed");
+
+    let seen = polls
+        .resolve_many(&[poll.id], Some(viewer))
+        .await
+        .expect("resolve_many must succeed");
+    assert_eq!(seen[0].2.own_votes, vec![1]);
+    assert_eq!(seen[0].2.voters_count, 1);
+
+    let anonymous = polls
+        .resolve_many(&[poll.id], None)
+        .await
+        .expect("resolve_many must succeed without a viewer");
+    assert!(anonymous[0].2.own_votes.is_empty());
+    assert_eq!(anonymous[0].2.voters_count, 1);
+
+    app.cleanup().await;
 }

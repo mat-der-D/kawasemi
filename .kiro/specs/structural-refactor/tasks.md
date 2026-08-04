@@ -319,14 +319,27 @@
 - **`PollResolver` の 5 実装は投票 id をループして単数版を呼んでいる**（4.5-A のレビューで判明）。
   そのため task 4.4 で追加した `find_polls_by_ids` / `tally_many` には本番の呼び出し元が
   1 つも無く、**投票だけが件数比例のまま残っている**。Requirement 5.1 は投票を明示的に
-  列挙しているので、配線するまで 5.1 は未達。5 実装の位置は `timelines/hydrator.rs:318`、
-  `search/hydrator.rs:414`、`statuses/account_provider.rs:316`、`notifications/service.rs:410`、
-  `statuses/endpoints.rs:442`。**うち 2 つ（timelines と endpoints）は一覧経路の変換対象
-  3 ファイルに含まれない**ので、別立てで拾うこと。
-- **`assemble_many` の実クエリ数は viewer 有りで `9 + K`・無しで `5 + K`**（K は著者の異なり数）。
-  内訳は media_ids 1 + find_by_ids 1 + tags 1 + interaction 4 + resolve_many 1 + resolve_emojis 1。
-  件数 M には依存しない。`render_input` を同期関数にしてあるため、描画ループにリポジトリ
-  呼び出しを入れることが構造的に不可能になっている（この性質を壊さないこと）。
+  列挙しているので、配線するまで 5.1 は未達。→ **4.5-B で 4 実装を配線して解消。**
+  `statuses/endpoints.rs:442` の `PollServiceResolver` だけは据え置いた。design.md の
+  `#### PollResolver` Implementation Notes が「この経路は単一 Status の取得が主用途なので
+  順に `poll_service.poll()` に渡す実装で構わない（Requirement 5.1 が対象とするのは一覧経路）」と
+  明文で許容しており、一括化には `PollService` に可視性チェック付きの複数版が要るため。
+- **一覧形状のループは 3 経路ではなく 5 経路あった**（4.5-B のレビューで確定）。既知の
+  `account_provider.rs:361` / `search/hydrator.rs:316` / `notifications/service.rs:351` に加えて、
+  **`statuses/endpoints.rs:810` / `:814`（context の ancestors・descendants）と `:1103`
+  （ブックマーク一覧）**も 1 件ずつ `render_status_json` を呼んでいる。PART C の対象。
+- **`find_polls_by_ids` → `tally_many` の間で poll が消えるレース窓の縮退が変わった**（4.5-B）。
+  旧実装は `tally` 側の 404 が伝播したが、新実装は「poll は在ったが tally が無い」を
+  「最初から無かった」と同一視する。`account_provider` だけ文言が `"poll not found"` →
+  `"status not found"` になる。並行 DELETE 下では旧実装も削除タイミング次第で両方の応答を
+  返し得たので、**変更前に不可能だった応答を新たに導入してはいない**（Requirement 1.1 は
+  決定的な写像を前提にしている）。ステータスコードと `ErrorKind` は全ケースで同一。
+- **`assemble_many` のクエリ数は件数 M に依存しない**（K は著者の異なり数）。内訳は
+  media_ids 1 + find_by_ids 1 + tags 1 + interaction 4（viewer 無しなら 0）+ resolve_emojis 1
+  + `resolve_many`（4.5-B 以降は内部で `find_polls_by_ids` 1 + `tally_many` 4、viewer 無しなら 3）
+  + `show_account` K 回。**正確な実数を散文で追うのはやめること**（4.5-B で 2 回ずれた）。
+  task 4.6 の検証テストが一次情報になる。`render_input` を同期関数にしてあるため、描画ループに
+  リポジトリ呼び出しを入れることが構造的に不可能になっている（この性質を壊さないこと）。
 - **`tests/notification_contract_it.rs` は HEAD 時点で 9 件失敗する（本 spec のスコープ外）。**
   テストは `tests/golden/notifications/notification_contract_it_*.json` を参照するが、
   実ファイルは `notification_*.json`。notifications spec の着地時点（`d212228`）からの

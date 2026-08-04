@@ -408,15 +408,38 @@ struct RequiredPolls {
 }
 
 impl PollResolver for RequiredPolls {
+    /// Two queries for the whole batch — one
+    /// [`poll_repository::find_polls_by_ids`], one
+    /// [`poll_repository::tally_many`] — regardless of how many ids it is
+    /// given, and none at all for an empty one (Requirement 5.1: a
+    /// notification page must not have its poll lookups scale with its
+    /// length).
     fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
-            let mut out = Vec::with_capacity(poll_ids.len());
+            let polls = poll_repository::find_polls_by_ids(&self.pool, poll_ids).await?;
+
+            // Walked in `poll_ids` order, so a dangling id raises where the
+            // per-id loop this replaces raised: on the *first* one, not on
+            // whichever the map happened to iterate to. Both this ordering
+            // and the result's own are fixed by this one pass.
+            let mut resolved = Vec::with_capacity(poll_ids.len());
             for &poll_id in poll_ids {
-                let poll = poll_repository::find_poll_by_id(&self.pool, poll_id)
-                    .await?
-                    .ok_or_else(poll_not_found)?;
-                let tally = poll_repository::tally(&self.pool, poll_id, viewer).await?;
-                out.push((poll_id, poll, tally));
+                let poll = polls.get(&poll_id).ok_or_else(poll_not_found)?;
+                resolved.push((poll_id, poll.clone()));
+            }
+
+            // Only reached once every id resolved, so `tally_many` is never
+            // asked about a poll that does not exist — the same condition
+            // under which the per-id loop reached `tally`.
+            let tallies = poll_repository::tally_many(&self.pool, poll_ids, viewer).await?;
+
+            let mut out = Vec::with_capacity(resolved.len());
+            for (poll_id, poll) in resolved {
+                // Absent only for a poll deleted between the two queries
+                // above, which this resolver reports exactly as it reports
+                // one that was never there.
+                let tally = tallies.get(&poll_id).ok_or_else(poll_not_found)?;
+                out.push((poll_id, poll, tally.clone()));
             }
             Ok(out)
         })
