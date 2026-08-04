@@ -110,6 +110,8 @@
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
+
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
@@ -391,6 +393,47 @@ pub async fn find_by_id(pool: &PgPool, media_id: Id) -> Result<Option<Media>, Ap
     .map_err(map_server_error)?;
 
     Ok(row.map(row_to_media))
+}
+
+/// The batched form of [`find_by_id`] (structural-refactor task 4.1,
+/// Requirements 5.1/5.4): resolves every id in `ids` in one query instead of
+/// one query per media, so a list endpoint's attachment hydration stops
+/// scaling with the number of attachments it renders.
+///
+/// Equivalent to calling [`find_by_id`] once per id, by construction: same
+/// columns, same row mapping, and the same total absence of owner scoping
+/// [`find_by_id`] documents (deliberately *not* [`find_owned`]'s
+/// `actor_id`-scoped contract). No `ORDER BY`: the result is a keyed map, so
+/// row order carries no meaning here, unlike
+/// `status_repository::media_ids_for_statuses`, whose per-status `Vec`
+/// preserves attachment order.
+///
+/// An id with no matching row simply has **no entry** in the returned map
+/// (the keys are the subset of `ids` that exist) — the map-shaped form of
+/// [`find_by_id`]'s `Ok(None)`, never an error. An empty `ids` returns an
+/// empty map without issuing a query at all: `= ANY` on an empty array would
+/// match nothing anyway, so the round trip would be pure cost.
+pub async fn find_by_ids(pool: &PgPool, ids: &[Id]) -> Result<HashMap<Id, Media>, AppError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let raw_ids: Vec<i64> = ids.iter().map(|id| id.as_i64()).collect();
+    let rows: Vec<MediaRow> = sqlx::query_as(concat!(
+        "SELECT ",
+        media_row_columns!(),
+        " FROM media WHERE id = ANY($1::bigint[])"
+    ))
+    .bind(&raw_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    Ok(rows
+        .into_iter()
+        .map(row_to_media)
+        .map(|media| (media.id, media))
+        .collect())
 }
 
 /// Updates the description and/or focal point of the [`Media`] persisted

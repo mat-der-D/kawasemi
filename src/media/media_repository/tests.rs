@@ -11,7 +11,11 @@
 //! actor rows keeps these tests representative of the real call shape a
 //! future `MediaService`, task 4.1, will drive).
 
-use super::{find_by_id, find_owned, insert_media, set_failed, set_ready, update_metadata};
+use std::collections::HashMap;
+
+use super::{
+    find_by_id, find_by_ids, find_owned, insert_media, set_failed, set_ready, update_metadata,
+};
 use crate::actor::model::{ActorState, ActorType, Handle, LocalActor};
 use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
@@ -442,6 +446,94 @@ async fn find_by_id_returns_none_for_a_nonexistent_media_id() {
         .await
         .expect("find_by_id must succeed even for a nonexistent id");
     assert!(found.is_none());
+
+    app.cleanup().await;
+}
+
+// -- find_by_ids (task 4.1) --------------------------------------------
+
+/// Requirements 5.1/5.4, task 4.1's own completion condition ("単数版を N 回
+/// 呼んだ結果と複数版を 1 回呼んだ結果が一致する"): `find_by_ids` returns,
+/// for every id, exactly the [`Media`] `find_by_id` returns for that same id
+/// on its own — including `find_by_id`'s deliberate lack of any owner
+/// scoping, and its "no row" case (an absent map entry, never an error).
+#[tokio::test]
+async fn find_by_ids_matches_calling_find_by_id_per_media() {
+    let app = spawn_test_app().await;
+    let owning_actor = create_test_actor(&app, "leo").await;
+    let unrelated_actor = create_test_actor(&app, "mia").await;
+
+    let now = app.runtime.clock.now();
+    let first_id = app.runtime.ids.next_id();
+    let second_id = app.runtime.ids.next_id();
+    let third_id = app.runtime.ids.next_id();
+
+    // Distinct descriptions, so a batched implementation that returned the
+    // right *number* of rows but mapped them to the wrong keys would fail.
+    let mut first = sample_media(first_id, owning_actor, now);
+    first.description = Some("the first attachment".to_string());
+    let mut second = sample_media(second_id, owning_actor, now);
+    second.description = Some("the second attachment".to_string());
+    // Owned by a different actor: `find_by_id` applies no owner scoping at
+    // all, so `find_by_ids` must not quietly introduce any either.
+    let mut third = sample_media(third_id, unrelated_actor, now);
+    third.description = Some("someone else's attachment".to_string());
+
+    for (media, object_key) in [
+        (&first, "20/original"),
+        (&second, "21/original"),
+        (&third, "22/original"),
+    ] {
+        insert_media(&app.pool, media, object_key, "image/png")
+            .await
+            .expect("insert_media must succeed");
+    }
+
+    let missing = Id::from_i64(i64::MAX - 13);
+    let ids = [first_id, second_id, third_id, missing];
+
+    let mut per_call = HashMap::new();
+    for &media_id in &ids {
+        let singular = find_by_id(&app.pool, media_id)
+            .await
+            .expect("find_by_id must succeed");
+        if let Some(media) = singular {
+            per_call.insert(media_id, media);
+        }
+    }
+
+    let batched = find_by_ids(&app.pool, &ids)
+        .await
+        .expect("find_by_ids must succeed");
+    assert_eq!(
+        batched, per_call,
+        "one batched call must agree with N singular calls"
+    );
+
+    // Spelled out too, so the comparison above cannot pass vacuously if
+    // both sides were to degrade the same way.
+    assert_eq!(batched.get(&first_id), Some(&first));
+    assert_eq!(batched.get(&second_id), Some(&second));
+    assert_eq!(batched.get(&third_id), Some(&third));
+    assert_eq!(batched.get(&missing), None);
+
+    app.cleanup().await;
+}
+
+/// Task 4.1's precondition: an empty `ids` returns an empty map *without
+/// issuing a query*. Closing the pool first is what makes that second half
+/// observable — every statement against a closed `PgPool` fails with
+/// `sqlx::Error::PoolClosed`, so an `Ok` here can only mean the function
+/// short-circuited before touching the database.
+#[tokio::test]
+async fn find_by_ids_returns_empty_for_an_empty_slice_without_querying() {
+    let app = spawn_test_app().await;
+    app.pool.close().await;
+
+    let batched = find_by_ids(&app.pool, &[])
+        .await
+        .expect("an empty slice must succeed even against a closed pool");
+    assert!(batched.is_empty());
 
     app.cleanup().await;
 }
