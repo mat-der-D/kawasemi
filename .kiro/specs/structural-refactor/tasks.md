@@ -324,6 +324,13 @@
   `#### PollResolver` Implementation Notes が「この経路は単一 Status の取得が主用途なので
   順に `poll_service.poll()` に渡す実装で構わない（Requirement 5.1 が対象とするのは一覧経路）」と
   明文で許容しており、一括化には `PollService` に可視性チェック付きの複数版が要るため。
+- **通知経路には件数比例が残る（受入基準は充足、Objective は未達）**（4.5-C2 のレビューで確定）。
+  エンベロープの `account_json`（= `show_account`）が通知ごとに N 回、関連投稿と
+  ブースト先の `find_by_id` が最大 2N 回。Requirement 5.1 が列挙するのはメディア・タグ・
+  絵文字・インタラクション状態・投票で、5.2/5.3 の「著者」は design.md のトレーサビリティ上
+  `StatusRenderAssembler` の著者メモ化に割り当てられている。**通知の origin は Status の
+  著者ではない**ので受入基準からは外れるが、Requirement 5 の Objective からは未達。
+  一括化には `AccountService` の複数 id 版が要る（現状は入口が無い）。
 - **`account_provider` のフィルタ鎖に Requirement 5.1 の未達分が残っている**（4.5-C1 のレビューで判明）。
   `passes_filters` は `only_media` 指定時に `media_ids_for_status`、`pinned` 指定時に
   `exists_pin` を**候補ごとに**発行する。どちらも 5.1 が列挙するメディア／インタラクション状態。

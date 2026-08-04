@@ -58,8 +58,8 @@
 //! job, task 4.1, per design.md's own `NotificationEndpoints` Responsibilities
 //! entry: "スコープ: ... Bearer + Scope は api-foundation 再利用").
 //!
-//! ## Rendering `account`/`status`: a self-contained `Status` render glue,
-//! duplicated from `account_provider.rs`'s own precedent (CONCERN)
+//! ## Rendering `account`/`status`: the envelope's own, and the shared
+//! assembler's
 //! [`crate::notifications::serializer::NotificationRenderInput`] needs the
 //! origin `account` and, for post-related kinds, the related `status`
 //! **already rendered** as JSON (that module's own doc comment,
@@ -70,59 +70,72 @@
 //! dispatch brief flags this as the intended embedding path; `crate::
 //! accounts::account_service::AccountService::show_account`'s own doc
 //! comment: "Resolves `id` — local, known-remote..."), so
-//! [`NotificationService::account_json`] is a thin wrapper over it.
+//! [`NotificationService::account_json`] is a thin wrapper over it. That one
+//! stays per notification: it is the *envelope's* account (the notification's
+//! `origin`), not a status author, and nothing batches it.
 //!
-//! The `status` half has no equivalent one-call entry point:
-//! `crate::statuses::status_service::StatusService::show` returns a bare
-//! [`crate::statuses::model::Status`], not rendered JSON — turning that into
-//! full Status JSON (`account`/`media_attachments`/`tags`/`poll`/
-//! `interactions`, one nested level for a `reblog`) is exactly the assembly
-//! glue `crate::statuses::account_provider::AccountStatusesProviderImpl::
-//! render`/`leaf_render_input` (statuses-core task 9.1, this crate's closest
-//! structural precedent — resolving a `Status` into JSON several layers away
-//! from a live HTTP request, no per-request `ForwardedOrigin` available
-//! either) already had to solve, and that module's own doc comment
-//! documents *why* it could not reuse `crate::statuses::endpoints`'s own
-//! private `render_status_json`/`resolve_common`/`leaf_render_input`
-//! methods (private to a router-local, still-generic state bundle this
-//! module has no more reason to parameterize over than `account_provider.rs`
-//! did) and instead wrote its own small, self-contained equivalent, reusing
-//! the exact same underlying repository/serializer functions. This module
-//! follows that identical, already-reviewed judgment call rather than
-//! inventing a third shape: [`NotificationService::render_status`]/
-//! [`NotificationService::leaf_render_input`] duplicate `account_provider.rs`'s
-//! own assembly glue almost verbatim (same repository calls, same
-//! `StatusRenderInput` construction) — the same "small helper duplication
-//! across sibling modules is this crate's own documented convention" this
-//! spec's own Implementation Notes already invoke elsewhere (`UndoKind`,
-//! `format_time`, `account_provider.rs` itself for
-//! `account_kind`/`account_id`/`account_ref_from`). Flagged here as a CONCERN
-//! for reviewer confirmation, not a silent gap: a fourth call site
-//! duplicating this exact assembly a future task adds might be the signal to
-//! finally extract a shared, `pub(crate)` helper.
+//! The `status` half goes through
+//! [`crate::statuses::render_assembler::StatusRenderAssembler`], which every
+//! module that renders statuses now goes through. This module used to carry
+//! its own copy of that assembly glue — one of five in the crate, written
+//! because `crate::statuses::endpoints`'s equivalent was private to a
+//! router-local, six-parameter generic state bundle this service had no
+//! reason to parameterize over. The extraction has happened; what remains
+//! here is only the part that is genuinely this module's own: which post a
+//! notification refers to, and whether it is still there.
 //!
-//! One narrowing versus `account_provider.rs`'s own `render`: this module's
-//! [`NotificationService::render_status`] does **not** re-check
+//! That handoff is a single [`crate::statuses::render_assembler::StatusRenderAssembler::assemble_many`]
+//! call per page rather than one per notification, so the media/tag/emoji/
+//! interaction/poll lookups a page needs are issued a number of times that
+//! does not depend on how many notifications it holds, and an author whose
+//! posts appear twice on one page is resolved once (Requirements 5.1, 5.2,
+//! 5.3, 5.6). Boost targets ride in the same batch. Notifications with no
+//! live post contribute nothing to it and simply take no slot in the result
+//! — see "Dangling references are not errors" below.
+//!
+//! What stays outside that batch, and stays per notification, is the walk
+//! that decides *which* posts reach it: the envelope's own
+//! [`NotificationService::account_json`], and the
+//! [`status_repository::find_by_id`] pair that resolves a notification's
+//! related post and that post's boost target. The design leaves boost
+//! resolution with the caller, and neither the envelope account nor the
+//! status row itself is one of the per-Status materials Requirement 5.1
+//! enumerates. The envelope account is nonetheless a real remaining
+//! per-notification `show_account`: a page of N notifications from N
+//! distinct origins issues N of them, and two notifications from the *same*
+//! origin resolve that origin twice, which the assembler's own author
+//! memoization would have collapsed had the origin been a status author.
+//! Batching it means resolving accounts for a set rather than one at a
+//! time, which `AccountService` has no entry point for — noted here rather
+//! than attempted, since the task that batched this rendering deliberately
+//! left the envelope alone.
+//!
+//! One narrowing versus `account_provider.rs`'s own equivalent: this module's
+//! [`NotificationService::resolve_reblog_target`] does **not** re-check
 //! `visibility::is_visible` on a nested reblog target (`account_provider.rs`'s
 //! own `self.visible_to(&target, viewer)` guard). A notification's
 //! `status_id` was only ever attached at generation time to a recipient
-//! legitimately entitled to see it (Requirement 1.2's "受信者視点" is
-//! about *whose* interaction state is embedded, not a fresh visibility
-//! re-check — no requirement in this spec's Requirement 1/2/3/4 asks this
-//! service to re-derive statuses-core's own visibility policy, and doing so
-//! would pull in `RelationshipQueryRegistry` purely for one nested field this
-//! task's own Requirements do not exercise). Flagged as a CONCERN alongside
-//! the duplication above, not silently dropped.
+//! legitimately entitled to see it (the notifications spec's Requirement
+//! 1.2's "受信者視点" is about *whose* interaction state is embedded, not a
+//! fresh visibility re-check — no requirement in that spec's Requirement
+//! 1/2/3/4 asks this service to re-derive statuses-core's own visibility
+//! policy, and doing so would pull in `RelationshipQueryRegistry` purely for
+//! one nested field those Requirements do not exercise). That narrowing
+//! predates the batching refactor and is preserved by it, pinned by
+//! `tests::list_renders_a_mixed_page_of_every_status_shape_in_order`'s
+//! `private` boost target — flagged as a CONCERN, not silently dropped.
 //!
 //! ## Dangling references are not errors
 //! A notification's `origin`/`status_id` are logical references
 //! (`repository.rs`'s own doc comment on the physical model: "受信者・通知
 //! 元・対象投稿は論理参照"). If the referenced status has since been deleted,
-//! [`NotificationService::status_json`] returns `Ok(None)` rather than
+//! [`NotificationService::render_page`] renders `status: null` rather than
 //! propagating `crate::statuses::status_repository::find_by_id`'s `None` as
-//! an error — mirrors `account_provider.rs::render`'s own "missing
-//! referenced row is not a hydration failure" precedent for exactly the
-//! same situation (a dangling reblog target). The origin *account* is not
+//! an error, and does so through the *same* path that renders a notification
+//! which never had a related post at all — the two are deliberately
+//! indistinguishable in the output. Mirrors `account_provider.rs`'s own
+//! "missing referenced row is not a hydration failure" precedent for exactly
+//! the same situation (a dangling reblog target). The origin *account* is not
 //! given the same treatment: every notification's `origin` is written by
 //! `NotificationGenerator` from an `event.origin` that was itself already a
 //! real `AccountRef` at generation time, and unlike a post, an account row
@@ -258,79 +271,111 @@ impl NotificationService {
         )
     }
 
-    /// Resolves an embedded post into rendered JSON.
+    /// Fetches a boost's target, or `None` when `status` is not a boost or
+    /// its target has since been deleted.
     ///
-    /// Boost-target resolution stays here, and deliberately performs no
-    /// visibility re-check on the target — a notification is only ever
-    /// rendered for a recipient who was already entitled to be notified
-    /// about it. That narrowing predates this refactor and is preserved.
-    async fn render_status(
+    /// Boost-target resolution stays here rather than moving into the
+    /// assembler — design.md's `Status 一覧の組み立て` flow, "ブースト先の
+    /// 解決と可視性判定は**呼び出し元に残る**" — and deliberately performs
+    /// **no** visibility re-check on the target, unlike every sibling caller.
+    /// See this module's doc comment ("Rendering `account`/`status`") for why
+    /// that narrowing exists and why batching does not change it.
+    async fn resolve_reblog_target(&self, status: &Status) -> Result<Option<Status>, AppError> {
+        let Some(target_id) = status.reblog_of_id else {
+            return Ok(None);
+        };
+        status_repository::find_by_id(&self.pool, target_id).await
+    }
+
+    /// Renders one already-fetched page of [`Notification`]s into their full
+    /// Notification JSON, in the order given (account + status embeds
+    /// resolved, then delegated to [`notification_to_json`] for the outer
+    /// shell + null discipline — task 2.1's own boundary, not reimplemented
+    /// here).
+    ///
+    /// The page's related posts and their boost targets are gathered first
+    /// and handed to [`StatusRenderAssembler::assemble_many`] as **one**
+    /// batch, so the materials they need are fetched a number of times that
+    /// does not depend on the page's length (Requirement 5.1 of
+    /// structural-refactor) and targets ride in the same batch (5.6).
+    ///
+    /// The gathering pass issues its lookups in exactly the order the
+    /// per-notification loop this replaces did — for each notification in
+    /// turn, its origin account, then its related post, then that post's
+    /// boost target — so a failure in any of them still aborts the whole
+    /// page on the notification it aborted on before (Requirement 1.1).
+    /// Notably, a post is resolved even for a `Follow`/`FollowRequest`
+    /// notification, whose rendered `status` [`notification_to_json`] then
+    /// discards: skipping it would turn an erroring page into a rendering
+    /// one, which is a change even though the discarded value is not.
+    async fn render_page(
         &self,
         viewer: Id,
-        status: Status,
+        notifications: &[Notification],
         origin: &ForwardedOrigin,
-    ) -> Result<Value, AppError> {
-        let reblog_target = match status.reblog_of_id {
-            Some(target_id) => status_repository::find_by_id(&self.pool, target_id).await?,
-            None => None,
-        };
+    ) -> Result<Vec<Value>, AppError> {
+        let mut accounts = Vec::with_capacity(notifications.len());
+        // `slots[i]` is where notification `i`'s post landed in the batch, or
+        // `None` when it has none to render. Both degradations this module
+        // documents — no related post at all, and a related post that has
+        // since been deleted — arrive here as the same `None` and stay
+        // indistinguishable from each other downstream.
+        let mut slots: Vec<Option<usize>> = Vec::with_capacity(notifications.len());
+        let mut statuses = Vec::new();
+        let mut reblog_targets = Vec::new();
+
+        for notification in notifications {
+            let origin_id = match notification.origin {
+                AccountRef::Local(id) | AccountRef::Remote(id) => id,
+            };
+            accounts.push(self.account_json(origin_id, origin).await?);
+
+            let status = match notification.status_id {
+                Some(status_id) => status_repository::find_by_id(&self.pool, status_id).await?,
+                None => None,
+            };
+            match status {
+                None => slots.push(None),
+                Some(status) => {
+                    reblog_targets.push(self.resolve_reblog_target(&status).await?);
+                    slots.push(Some(statuses.len()));
+                    statuses.push(status);
+                }
+            }
+        }
+
         let polls = RequiredPolls {
             pool: self.pool.clone(),
         };
         let ctx = RenderContext {
+            // One `now` for the page rather than one per notification. The
+            // values it feeds — a poll's `expired` flag — are now answered
+            // consistently across a single response, which rendering each
+            // embedded post against its own clock reading did not guarantee.
             viewer: Some(viewer),
             now: self.runtime.clock.now(),
             origin,
             muted: None,
             polls: &polls,
         };
-        self.assembler()
-            .assemble_one(&status, reblog_target.as_ref(), &ctx)
-            .await
-    }
-
-    /// Resolves `status_id` (a notification's optional related post) into
-    /// rendered JSON, or `Ok(None)` both when there is no related post and
-    /// when the referenced post has since been deleted — see this module's
-    /// doc comment ("Dangling references are not errors").
-    async fn status_json(
-        &self,
-        viewer: Id,
-        status_id: Option<Id>,
-        origin: &ForwardedOrigin,
-    ) -> Result<Option<Value>, AppError> {
-        let Some(status_id) = status_id else {
-            return Ok(None);
-        };
-        let Some(status) = status_repository::find_by_id(&self.pool, status_id).await? else {
-            return Ok(None);
-        };
-        Ok(Some(self.render_status(viewer, status, origin).await?))
-    }
-
-    /// Renders one already-fetched [`Notification`] into its full
-    /// Notification JSON (account + status embeds resolved, then delegated
-    /// to [`notification_to_json`] for the outer shell + null discipline —
-    /// task 2.1's own boundary, not reimplemented here).
-    async fn render_notification(
-        &self,
-        viewer: Id,
-        notification: &Notification,
-        origin: &ForwardedOrigin,
-    ) -> Result<Value, AppError> {
-        let origin_id = match notification.origin {
-            AccountRef::Local(id) | AccountRef::Remote(id) => id,
-        };
-        let account = self.account_json(origin_id, origin).await?;
-        let status = self
-            .status_json(viewer, notification.status_id, origin)
+        let rendered = self
+            .assembler()
+            .assemble_many(&statuses, &reblog_targets, &ctx)
             .await?;
-        let input = NotificationRenderInput {
-            notification,
-            account,
-            status,
-        };
-        Ok(notification_to_json(&input))
+
+        Ok(notifications
+            .iter()
+            .zip(accounts)
+            .zip(slots)
+            .map(|((notification, account), slot)| {
+                let input = NotificationRenderInput {
+                    notification,
+                    account,
+                    status: slot.map(|index| rendered[index].clone()),
+                };
+                notification_to_json(&input)
+            })
+            .collect())
     }
 
     /// Returns `ctx.actor_id`'s notifications, newest-first, dismissed
@@ -347,13 +392,9 @@ impl NotificationService {
         let page_result = repository::list(&self.pool, recipient, &page, &filter).await?;
 
         let origin = self.origin();
-        let mut items = Vec::with_capacity(page_result.items.len());
-        for notification in &page_result.items {
-            items.push(
-                self.render_notification(recipient, notification, &origin)
-                    .await?,
-            );
-        }
+        let items = self
+            .render_page(recipient, &page_result.items, &origin)
+            .await?;
 
         Ok(Page {
             items,
@@ -366,6 +407,11 @@ impl NotificationService {
     /// (Requirement 3.1); 404s when it belongs to another recipient or does
     /// not exist (Requirement 3.2) — see this module's doc comment ("404 for
     /// other-recipient/nonexistent").
+    ///
+    /// Renders through [`Self::render_page`] with a one-element page, the
+    /// same way [`StatusRenderAssembler::assemble_one`] delegates to
+    /// `assemble_many`: one notification and a page of them cannot then
+    /// drift apart.
     pub async fn show(&self, ctx: &RequestActorContext, id: Id) -> Result<Value, AppError> {
         let recipient = ctx.actor_id;
         let notification = repository::find_for_recipient(&self.pool, id, recipient)
@@ -373,8 +419,13 @@ impl NotificationService {
             .ok_or_else(|| notification_not_found(id))?;
 
         let origin = self.origin();
-        self.render_notification(recipient, &notification, &origin)
-            .await
+        let rendered = self
+            .render_page(recipient, std::slice::from_ref(&notification), &origin)
+            .await?;
+        Ok(rendered
+            .into_iter()
+            .next()
+            .expect("a one-element page renders exactly one notification"))
     }
 
     /// Dismisses notification `id` scoped to `ctx.actor_id` (Requirement
