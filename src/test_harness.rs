@@ -74,6 +74,14 @@
 #[cfg(test)]
 mod tests;
 
+/// SQL-statement counting for this crate's own unit tests
+/// (`structural-refactor` Requirements 5.1-5.3). `#[cfg(test)]` because it
+/// exists only to measure the lib's tests and must not reach the shipped
+/// library, unlike the rest of this module — which `tests/*.rs` integration
+/// binaries link against and so cannot be gated.
+#[cfg(test)]
+pub(crate) mod query_log;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

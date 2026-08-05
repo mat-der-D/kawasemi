@@ -238,9 +238,9 @@
 #[cfg(test)]
 mod tests;
 
-use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 
+use crate::api::db::map_server_error;
 use crate::domain::AccountRef;
 use crate::error::AppError;
 use crate::runtime::RuntimeContext;
@@ -251,10 +251,6 @@ use crate::social_graph::repository;
 use crate::statuses::notification_sink::{
     NotificationEvent, NotificationSinkRegistry, NotificationType,
 };
-
-fn map_tx_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// Derives the [`FollowRequestDirection`] a pending request between
 /// `requester` and some target must have been recorded under, from
@@ -573,7 +569,7 @@ impl Transitions {
             created_at: now,
         };
 
-        let mut tx = self.pool.begin().await.map_err(map_tx_error)?;
+        let mut tx = self.pool.begin().await.map_err(map_server_error)?;
 
         repository::delete_follow(&mut *tx, blocker, blocked).await?;
         repository::delete_follow(&mut *tx, blocked, blocker).await?;
@@ -587,7 +583,7 @@ impl Transitions {
             .await?;
         repository::upsert_block(&mut *tx, id, &block).await?;
 
-        tx.commit().await.map_err(map_tx_error)?;
+        tx.commit().await.map_err(map_server_error)?;
 
         Ok(())
     }

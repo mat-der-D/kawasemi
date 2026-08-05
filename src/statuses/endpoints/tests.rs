@@ -47,6 +47,7 @@ use crate::oauth::token_repository::{self, NewAccessToken};
 use crate::runtime::{IdGenerator, SeqIdGenerator};
 use crate::statuses::activity_builder::StatusActivityBuilder;
 use crate::statuses::visibility::ViewerRelation;
+use crate::test_harness::query_log::{QueryKind, record_queries};
 use crate::test_harness::{TestApp, spawn_test_app};
 
 mod wire_shape_tests {
@@ -1597,6 +1598,846 @@ async fn poll_json_resolves_a_registered_shortcode_from_an_option_title() {
         .expect("emojis must be an array");
     assert_eq!(emojis.len(), 1, "{emojis:?}");
     assert_eq!(emojis[0]["shortcode"], "partyparrot");
+
+    app.cleanup().await;
+}
+
+// ==== Page-shaped rendering: `GET /api/v1/statuses/:id/context` and
+//      `GET /api/v1/bookmarks` (structural-refactor Requirements 1.1, 5.1,
+//      5.2, 5.6, 5.7) ====
+
+/// The one `statuses` row shape this module's own HTTP surface cannot
+/// create — a row that replies *and* boosts, or carries a poll. Mirrors
+/// [`poll_vote_updates_the_tally_and_get_reflects_it`]'s own already-used
+/// "insert the fixture directly through the repositories" precedent.
+struct SeedStatus<'a> {
+    actor_id: Id,
+    visibility: Visibility,
+    content: &'a str,
+    in_reply_to_id: Option<Id>,
+    reblog_of_id: Option<Id>,
+    poll_id: Option<Id>,
+}
+
+async fn seed_status(app: &TestApp, seed: SeedStatus<'_>) -> Id {
+    let id = app.runtime.ids.next_id();
+    let uri = format!("https://kawasemi.example/statuses/{}", id.as_i64());
+    let status = crate::statuses::model::Status {
+        id,
+        actor_id: seed.actor_id,
+        uri: uri.clone(),
+        url: Some(uri),
+        content: seed.content.to_string(),
+        visibility: seed.visibility,
+        sensitive: false,
+        spoiler_text: String::new(),
+        in_reply_to_id: seed.in_reply_to_id,
+        in_reply_to_account_id: None,
+        reblog_of_id: seed.reblog_of_id,
+        poll_id: seed.poll_id,
+        language: None,
+        reblogs_count: 0,
+        favourites_count: 0,
+        replies_count: 0,
+        local: true,
+        created_at: app.runtime.clock.now(),
+        edited_at: None,
+    };
+    crate::statuses::status_repository::insert_status(&app.pool, &status)
+        .await
+        .expect("insert_status must succeed");
+    id
+}
+
+/// Attaches a two-option poll to `status_id`, the first option's title
+/// carrying a `:shortcode:` of its own (a poll option's title is
+/// shortcode-bearing text in its own right, resolved separately from the
+/// owning status's `content`).
+async fn seed_poll(app: &TestApp, status_id: Id, poll_id: Id) {
+    crate::statuses::poll_repository::insert_poll(
+        &app.pool,
+        &crate::statuses::model::Poll {
+            id: poll_id,
+            status_id,
+            expires_at: None,
+            multiple: false,
+        },
+        &[
+            crate::statuses::model::PollOption {
+                poll_id,
+                idx: 0,
+                title: "Cats :partyparrot:".to_string(),
+                votes_count: 0,
+            },
+            crate::statuses::model::PollOption {
+                poll_id,
+                idx: 1,
+                title: "Dogs".to_string(),
+                votes_count: 0,
+            },
+        ],
+    )
+    .await
+    .expect("insert_poll must succeed");
+}
+
+/// Registers `name` as a tag and associates it with `status_id`.
+async fn attach_tag(app: &TestApp, status_id: Id, name: &str) {
+    let tag = crate::statuses::model::Tag {
+        id: app.runtime.ids.next_id(),
+        name: name.to_string(),
+        created_at: app.runtime.clock.now(),
+    };
+    let tag = crate::statuses::tag_repository::upsert_tag(&app.pool, &tag)
+        .await
+        .expect("upsert_tag must succeed");
+    crate::statuses::tag_repository::associate_tag(&app.pool, status_id, tag.id)
+        .await
+        .expect("associate_tag must succeed");
+}
+
+/// Pulls one field out of every element of a JSON array, tolerating a
+/// non-array (a `null` `poll` indexes to `null`, not a panic).
+fn field_list(items: &Value, field: &str) -> Vec<Value> {
+    items
+        .as_array()
+        .map(|items| items.iter().map(|item| item[field].clone()).collect())
+        .unwrap_or_default()
+}
+
+/// Projects exactly what this surface's assembly resolves per status — the
+/// author's Account, the tags, the emoji (from `content` and from the poll's
+/// own option titles), the poll, the viewer's interaction state, and `muted`
+/// — recursing into `reblog`, whose presence or absence is this surface's
+/// own `StatusService::show` judgment rather than the assembler's.
+fn material_fingerprint(json: &Value) -> Value {
+    json!({
+        "id": json["id"],
+        "account": json["account"]["id"],
+        "tags": field_list(&json["tags"], "name"),
+        "emojis": field_list(&json["emojis"], "shortcode"),
+        "poll_options": field_list(&json["poll"]["options"], "title"),
+        "poll_emojis": field_list(&json["poll"]["emojis"], "shortcode"),
+        "favourited": json["favourited"],
+        "reblogged": json["reblogged"],
+        "bookmarked": json["bookmarked"],
+        "pinned": json["pinned"],
+        "muted": json["muted"],
+        "reblog": match json["reblog"] {
+            Value::Null => Value::Null,
+            ref reblog => material_fingerprint(reblog),
+        },
+    })
+}
+
+fn fingerprints(items: &Value) -> Vec<Value> {
+    items
+        .as_array()
+        .expect("a rendered list must be a JSON array")
+        .iter()
+        .map(material_fingerprint)
+        .collect()
+}
+
+fn id_string(id: Id) -> Value {
+    Value::String(id.as_i64().to_string())
+}
+
+/// The characterization one whole `GET /api/v1/statuses/:id/context`
+/// response is measured against, captured from the implementation that
+/// resolved and rendered each ancestor and descendant one at a time.
+///
+/// The thread deliberately carries every shape whose resolution this surface
+/// either batches or must deliberately keep out of the batch:
+///
+/// - two ancestors by the **same author**, so resolving that author once per
+///   response cannot be told apart from resolving it twice (Requirement 5.2);
+/// - a descendant boosting a target the viewer **can** see, nesting a fully
+///   rendered `reblog` — the target is a row in its own right and belongs in
+///   the same batch (Requirement 5.6);
+/// - a descendant boosting a target the viewer **cannot** see, rendering
+///   `reblog: null` — dropped whole rather than partially, decided by
+///   `StatusService::show` (this surface's own visibility rule), not by the
+///   assembler;
+/// - a descendant carrying a **poll** whose option title has a shortcode of
+///   its own, distinct from any in the status's `content`;
+/// - a descendant **invisible** to the viewer, which `StatusService::context`
+///   filters out before this handler sees it;
+/// - tags, custom emoji, and a favourite, so no material the assembler
+///   resolves is at its default everywhere in the page.
+///
+/// `muted` is `false` throughout: this surface has no mute context to offer
+/// (Requirement 4.4).
+#[tokio::test]
+async fn status_context_renders_every_ancestor_and_descendant_material_in_thread_order() {
+    let app = spawn_test_app().await;
+    let viewer = create_owner_with_actor(&app, "ctxviewer").await;
+    let other = create_owner_with_actor(&app, "ctxauthor").await;
+    let (state, _local, _http) = build_state(
+        &app,
+        &[(viewer, "ctxviewer"), (other, "ctxauthor")],
+        // Not a follower, so `other`'s `private` posts stay invisible.
+        false,
+    );
+
+    seed_custom_emoji(&app, "blobcat").await;
+    seed_custom_emoji(&app, "partyparrot").await;
+
+    // Ancestors: two posts by the same author, the first tagged and
+    // carrying a registered shortcode alongside an unregistered one.
+    let root = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: other,
+            visibility: Visibility::Public,
+            content: "root :blobcat: and :not_registered:",
+            in_reply_to_id: None,
+            reblog_of_id: None,
+            poll_id: None,
+        },
+    )
+    .await;
+    attach_tag(&app, root, "kawasemi").await;
+    let middle = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: other,
+            visibility: Visibility::Public,
+            content: "second by the same author",
+            in_reply_to_id: Some(root),
+            reblog_of_id: None,
+            poll_id: None,
+        },
+    )
+    .await;
+
+    // The status whose context is requested.
+    let focus = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: viewer,
+            visibility: Visibility::Public,
+            content: "the focus of this context request",
+            in_reply_to_id: Some(middle),
+            reblog_of_id: None,
+            poll_id: None,
+        },
+    )
+    .await;
+
+    // Boost targets, outside the thread: one visible (and favourited by the
+    // viewer, so the nested reblog's own interaction state is non-default),
+    // one this viewer may not see.
+    let visible_target = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: other,
+            visibility: Visibility::Public,
+            content: "boosted publicly",
+            in_reply_to_id: None,
+            reblog_of_id: None,
+            poll_id: None,
+        },
+    )
+    .await;
+    crate::statuses::interaction_repository::add_favourite(
+        &app.pool,
+        viewer,
+        visible_target,
+        app.runtime.clock.now(),
+    )
+    .await
+    .expect("add_favourite must succeed");
+    let hidden_target = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: other,
+            visibility: Visibility::Private,
+            content: "boosted privately",
+            in_reply_to_id: None,
+            reblog_of_id: None,
+            poll_id: None,
+        },
+    )
+    .await;
+
+    // Descendants, in `created_at`-then-`id` order.
+    let poll_id = app.runtime.ids.next_id();
+    let polled = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: other,
+            visibility: Visibility::Public,
+            content: "pick one",
+            in_reply_to_id: Some(focus),
+            reblog_of_id: None,
+            poll_id: Some(poll_id),
+        },
+    )
+    .await;
+    seed_poll(&app, polled, poll_id).await;
+    let boost_of_visible = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: viewer,
+            visibility: Visibility::Public,
+            content: "",
+            in_reply_to_id: Some(focus),
+            reblog_of_id: Some(visible_target),
+            poll_id: None,
+        },
+    )
+    .await;
+    let boost_of_hidden = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: viewer,
+            visibility: Visibility::Public,
+            content: "",
+            in_reply_to_id: Some(focus),
+            reblog_of_id: Some(hidden_target),
+            poll_id: None,
+        },
+    )
+    .await;
+    // Filtered out by `StatusService::context` before this handler sees it.
+    seed_status(
+        &app,
+        SeedStatus {
+            actor_id: other,
+            visibility: Visibility::Private,
+            content: "an invisible reply",
+            in_reply_to_id: Some(focus),
+            reblog_of_id: None,
+            poll_id: None,
+        },
+    )
+    .await;
+
+    let router = test_router(state);
+    let app_id = register_test_app(&app.pool, &app.runtime).await;
+    let token = issue_test_token(&app.pool, &app.runtime, app_id, viewer, &["read"]).await;
+
+    let response = router
+        .oneshot(get_request(
+            &format!("/api/v1/statuses/{}/context", focus.as_i64()),
+            Some(&token),
+        ))
+        .await
+        .expect("context dispatch must succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    let json = body_json(response).await;
+
+    assert_eq!(
+        fingerprints(&json["ancestors"]),
+        vec![
+            json!({
+                "id": id_string(root),
+                "account": id_string(other),
+                "tags": ["kawasemi"],
+                "emojis": ["blobcat"],
+                "poll_options": [],
+                "poll_emojis": [],
+                "favourited": false,
+                "reblogged": false,
+                "bookmarked": false,
+                "pinned": false,
+                "muted": false,
+                "reblog": Value::Null,
+            }),
+            json!({
+                "id": id_string(middle),
+                "account": id_string(other),
+                "tags": [],
+                "emojis": [],
+                "poll_options": [],
+                "poll_emojis": [],
+                "favourited": false,
+                "reblogged": false,
+                "bookmarked": false,
+                "pinned": false,
+                "muted": false,
+                "reblog": Value::Null,
+            }),
+        ],
+        "ancestors must stay root-first with every material resolved"
+    );
+
+    assert_eq!(
+        fingerprints(&json["descendants"]),
+        vec![
+            json!({
+                "id": id_string(polled),
+                "account": id_string(other),
+                "tags": [],
+                "emojis": [],
+                "poll_options": ["Cats :partyparrot:", "Dogs"],
+                "poll_emojis": ["partyparrot"],
+                "favourited": false,
+                "reblogged": false,
+                "bookmarked": false,
+                "pinned": false,
+                "muted": false,
+                "reblog": Value::Null,
+            }),
+            json!({
+                "id": id_string(boost_of_visible),
+                "account": id_string(viewer),
+                "tags": [],
+                "emojis": [],
+                "poll_options": [],
+                "poll_emojis": [],
+                "favourited": false,
+                "reblogged": false,
+                "bookmarked": false,
+                "pinned": false,
+                "muted": false,
+                "reblog": {
+                    "id": id_string(visible_target),
+                    "account": id_string(other),
+                    "tags": [],
+                    "emojis": [],
+                    "poll_options": [],
+                    "poll_emojis": [],
+                    "favourited": true,
+                    "reblogged": true,
+                    "bookmarked": false,
+                    "pinned": false,
+                    "muted": false,
+                    "reblog": Value::Null,
+                },
+            }),
+            json!({
+                "id": id_string(boost_of_hidden),
+                "account": id_string(viewer),
+                "tags": [],
+                "emojis": [],
+                "poll_options": [],
+                "poll_emojis": [],
+                "favourited": false,
+                "reblogged": false,
+                "bookmarked": false,
+                "pinned": false,
+                "muted": false,
+                "reblog": Value::Null,
+            }),
+        ],
+        "descendants must stay in creation order, exclude the invisible \
+         reply, and drop an invisible boost target whole"
+    );
+
+    app.cleanup().await;
+}
+
+/// The characterization one whole `GET /api/v1/bookmarks` page is measured
+/// against, captured from the implementation that rendered its items one at
+/// a time.
+///
+/// Same material mix as the context characterization above, plus the two
+/// things only this endpoint has: `bookmarked: true` on every item, and a
+/// `Link` header built from the page's own cursors *after* the items are
+/// rendered. Order is `bookmarks.id` descending, i.e. the reverse of the
+/// order the bookmarks were taken in.
+#[tokio::test]
+async fn bookmark_list_renders_every_material_newest_bookmark_first() {
+    let app = spawn_test_app().await;
+    let viewer = create_owner_with_actor(&app, "bmviewer").await;
+    let other = create_owner_with_actor(&app, "bmauthor").await;
+    let (state, _local, _http) =
+        build_state(&app, &[(viewer, "bmviewer"), (other, "bmauthor")], false);
+
+    seed_custom_emoji(&app, "blobcat").await;
+    seed_custom_emoji(&app, "partyparrot").await;
+
+    // Two by the same author, the first tagged and shortcode-bearing.
+    let first = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: other,
+            visibility: Visibility::Public,
+            content: "shared author one :blobcat:",
+            in_reply_to_id: None,
+            reblog_of_id: None,
+            poll_id: None,
+        },
+    )
+    .await;
+    attach_tag(&app, first, "kawasemi").await;
+    let second = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: other,
+            visibility: Visibility::Public,
+            content: "shared author two",
+            in_reply_to_id: None,
+            reblog_of_id: None,
+            poll_id: None,
+        },
+    )
+    .await;
+
+    let poll_id = app.runtime.ids.next_id();
+    let polled = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: other,
+            visibility: Visibility::Public,
+            content: "pick one",
+            in_reply_to_id: None,
+            reblog_of_id: None,
+            poll_id: Some(poll_id),
+        },
+    )
+    .await;
+    seed_poll(&app, polled, poll_id).await;
+
+    let visible_target = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: other,
+            visibility: Visibility::Public,
+            content: "boosted publicly",
+            in_reply_to_id: None,
+            reblog_of_id: None,
+            poll_id: None,
+        },
+    )
+    .await;
+    crate::statuses::interaction_repository::add_favourite(
+        &app.pool,
+        viewer,
+        visible_target,
+        app.runtime.clock.now(),
+    )
+    .await
+    .expect("add_favourite must succeed");
+    let hidden_target = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: other,
+            visibility: Visibility::Private,
+            content: "boosted privately",
+            in_reply_to_id: None,
+            reblog_of_id: None,
+            poll_id: None,
+        },
+    )
+    .await;
+    let boost_of_visible = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: viewer,
+            visibility: Visibility::Public,
+            content: "",
+            in_reply_to_id: None,
+            reblog_of_id: Some(visible_target),
+            poll_id: None,
+        },
+    )
+    .await;
+    let boost_of_hidden = seed_status(
+        &app,
+        SeedStatus {
+            actor_id: viewer,
+            visibility: Visibility::Public,
+            content: "",
+            in_reply_to_id: None,
+            reblog_of_id: Some(hidden_target),
+            poll_id: None,
+        },
+    )
+    .await;
+
+    // Bookmarked oldest-first, so the page must come back reversed.
+    for status_id in [first, second, polled, boost_of_visible, boost_of_hidden] {
+        crate::statuses::interaction_repository::add_bookmark(
+            &app.pool,
+            app.runtime.ids.next_id(),
+            viewer,
+            status_id,
+            app.runtime.clock.now(),
+        )
+        .await
+        .expect("add_bookmark must succeed");
+    }
+
+    let router = test_router(state);
+    let app_id = register_test_app(&app.pool, &app.runtime).await;
+    let token =
+        issue_test_token(&app.pool, &app.runtime, app_id, viewer, &["read:bookmarks"]).await;
+
+    let response = router
+        .clone()
+        .oneshot(get_request(BOOKMARKS_PATH, Some(&token)))
+        .await
+        .expect("bookmark list dispatch must succeed");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers().get(header::LINK).is_some(),
+        "a full page still carries the cursor-built Link header"
+    );
+    let json = body_json(response).await;
+
+    assert_eq!(
+        fingerprints(&json),
+        vec![
+            json!({
+                "id": id_string(boost_of_hidden),
+                "account": id_string(viewer),
+                "tags": [],
+                "emojis": [],
+                "poll_options": [],
+                "poll_emojis": [],
+                "favourited": false,
+                "reblogged": false,
+                "bookmarked": true,
+                "pinned": false,
+                "muted": false,
+                "reblog": Value::Null,
+            }),
+            json!({
+                "id": id_string(boost_of_visible),
+                "account": id_string(viewer),
+                "tags": [],
+                "emojis": [],
+                "poll_options": [],
+                "poll_emojis": [],
+                "favourited": false,
+                "reblogged": false,
+                "bookmarked": true,
+                "pinned": false,
+                "muted": false,
+                "reblog": {
+                    "id": id_string(visible_target),
+                    "account": id_string(other),
+                    "tags": [],
+                    "emojis": [],
+                    "poll_options": [],
+                    "poll_emojis": [],
+                    "favourited": true,
+                    "reblogged": true,
+                    "bookmarked": false,
+                    "pinned": false,
+                    "muted": false,
+                    "reblog": Value::Null,
+                },
+            }),
+            json!({
+                "id": id_string(polled),
+                "account": id_string(other),
+                "tags": [],
+                "emojis": [],
+                "poll_options": ["Cats :partyparrot:", "Dogs"],
+                "poll_emojis": ["partyparrot"],
+                "favourited": false,
+                "reblogged": false,
+                "bookmarked": true,
+                "pinned": false,
+                "muted": false,
+                "reblog": Value::Null,
+            }),
+            json!({
+                "id": id_string(second),
+                "account": id_string(other),
+                "tags": [],
+                "emojis": [],
+                "poll_options": [],
+                "poll_emojis": [],
+                "favourited": false,
+                "reblogged": false,
+                "bookmarked": true,
+                "pinned": false,
+                "muted": false,
+                "reblog": Value::Null,
+            }),
+            json!({
+                "id": id_string(first),
+                "account": id_string(other),
+                "tags": ["kawasemi"],
+                "emojis": ["blobcat"],
+                "poll_options": [],
+                "poll_emojis": [],
+                "favourited": false,
+                "reblogged": false,
+                "bookmarked": true,
+                "pinned": false,
+                "muted": false,
+                "reblog": Value::Null,
+            }),
+        ],
+        "the bookmark page must stay newest-bookmark-first with every \
+         material resolved"
+    );
+
+    // The `Link` header is still built from the page's own cursors, and
+    // `limit` still caps the page.
+    let limited = router
+        .oneshot(get_request(
+            &format!("{BOOKMARKS_PATH}?limit=2"),
+            Some(&token),
+        ))
+        .await
+        .expect("limited bookmark list dispatch must succeed");
+    assert_eq!(limited.status(), StatusCode::OK);
+    assert!(
+        limited.headers().get(header::LINK).is_some(),
+        "a truncated bookmark page must carry a Link header"
+    );
+    let limited_json = body_json(limited).await;
+    assert_eq!(
+        field_list(&limited_json, "id"),
+        vec![id_string(boost_of_hidden), id_string(boost_of_visible)],
+        "limit=2 must cap the page at the two newest bookmarks"
+    );
+
+    app.cleanup().await;
+}
+
+// ==== Query counts for `GET /api/v1/bookmarks` (Requirement 5.1; task 4.6)
+//      ====
+
+/// Seeds one bookmarked status carrying every material Requirement 5.1
+/// enumerates except the viewer's pin, and hands back its id.
+async fn seed_bookmarked_status(app: &TestApp, author: Id, viewer: Id) -> Id {
+    let poll_id = app.runtime.ids.next_id();
+    let status_id = seed_status(
+        app,
+        SeedStatus {
+            actor_id: author,
+            visibility: Visibility::Public,
+            content: "bookmark me :blobcat:",
+            in_reply_to_id: None,
+            reblog_of_id: None,
+            poll_id: Some(poll_id),
+        },
+    )
+    .await;
+    seed_poll(app, status_id, poll_id).await;
+    attach_tag(app, status_id, "kawasemi").await;
+    crate::statuses::interaction_repository::add_bookmark(
+        &app.pool,
+        app.runtime.ids.next_id(),
+        viewer,
+        status_id,
+        app.runtime.clock.now(),
+    )
+    .await
+    .expect("add_bookmark must succeed");
+    status_id
+}
+
+/// Requirement 5.1 through the real HTTP surface, and the one place this
+/// spec's record of it is qualified: on `GET /api/v1/bookmarks` the media,
+/// tag, emoji and interaction-state lookups are page-sized — but the **poll
+/// lookups are still per poll**, and that is a known, accepted residual
+/// rather than an oversight.
+///
+/// `tasks.md`'s Implementation Notes carry the decision: this endpoint's
+/// `PollServiceResolver` goes through `PollService::poll`, which applies its
+/// own per-poll `visible_poll_and_status` check, and batching it needs a
+/// visibility-checking multi-poll entry point `PollService` does not have.
+/// The residual is asserted here as an exact multiple of the page's poll
+/// count rather than excluded from the measurement, so that (a) nobody
+/// reading this suite concludes the whole endpoint is batched, and (b)
+/// closing the gap later fails this test and forces the note to be struck.
+///
+/// Measured through `router.oneshot` rather than against the handler
+/// directly: the loop task 4.5 replaced was in the handler, and a page
+/// assembled through the real request path is the thing the requirement is
+/// about.
+#[tokio::test]
+async fn the_bookmark_page_batches_every_material_except_its_polls() {
+    let app = spawn_test_app().await;
+    let viewer = create_owner_with_actor(&app, "bmqcviewer").await;
+    let author = create_owner_with_actor(&app, "bmqcauthor").await;
+    let (state, _local, _http) = build_state(
+        &app,
+        &[(viewer, "bmqcviewer"), (author, "bmqcauthor")],
+        false,
+    );
+    seed_custom_emoji(&app, "blobcat").await;
+    seed_custom_emoji(&app, "partyparrot").await;
+
+    let router = test_router(state);
+    let app_id = register_test_app(&app.pool, &app.runtime).await;
+    let token =
+        issue_test_token(&app.pool, &app.runtime, app_id, viewer, &["read:bookmarks"]).await;
+
+    let fetch_page = |page_size: usize| {
+        let router = router.clone();
+        let token = token.clone();
+        async move {
+            let response = router
+                .oneshot(get_request(BOOKMARKS_PATH, Some(&token)))
+                .await
+                .expect("bookmark list dispatch must succeed");
+            assert_eq!(response.status(), StatusCode::OK);
+            let json = body_json(response).await;
+            assert_eq!(
+                json.as_array().map(Vec::len),
+                Some(page_size),
+                "the fixture must render {page_size} bookmarks"
+            );
+        }
+    };
+
+    seed_bookmarked_status(&app, author, viewer).await;
+    let ((), one_log) = record_queries(&app.pool, fetch_page(1)).await;
+
+    // Nineteen more, filling exactly one default-limit page.
+    for _ in 0..19 {
+        seed_bookmarked_status(&app, author, viewer).await;
+    }
+    let ((), twenty_log) = record_queries(&app.pool, fetch_page(20)).await;
+
+    one_log.require_kinds(&[
+        QueryKind::Media,
+        QueryKind::Tags,
+        QueryKind::Emoji,
+        QueryKind::Interaction,
+    ]);
+    for kind in [
+        QueryKind::Media,
+        QueryKind::Tags,
+        QueryKind::Emoji,
+        QueryKind::Interaction,
+    ] {
+        assert_eq!(
+            one_log.count(kind),
+            twenty_log.count(kind),
+            "{kind:?} queries must not depend on the page's length, but a \
+             1-item page issued {} and a 20-item page issued {}.\n\
+             1-item page: {:#?}\n20-item page: {:#?}",
+            one_log.count(kind),
+            twenty_log.count(kind),
+            one_log.per_statement(),
+            twenty_log.per_statement(),
+        );
+    }
+
+    // The residual. Every status on this page carries a poll, so the
+    // per-poll cost is the one-item page's own count and the twenty-item
+    // page pays it twenty times over.
+    let per_poll = one_log.count(QueryKind::PollPerPoll);
+    assert!(
+        per_poll > 0,
+        "the fixture must actually carry polls for this residual to be \
+         measurable.\nobserved: {:#?}",
+        one_log.per_statement(),
+    );
+    assert_eq!(
+        twenty_log.count(QueryKind::PollPerPoll),
+        20 * per_poll,
+        "`PollServiceResolver` still resolves one poll at a time — an \
+         accepted residual (tasks.md, Implementation Notes: \
+         \"endpoints.rs の 3 経路では投票だけが件数比例のまま残る\"). \
+         Batching it must strike that note and this assertion together."
+    );
+    assert_eq!(
+        twenty_log.count(QueryKind::Poll),
+        0,
+        "and it reaches none of the batched poll lookups"
+    );
 
     app.cleanup().await;
 }

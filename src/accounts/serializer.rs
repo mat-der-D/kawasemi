@@ -186,7 +186,6 @@ use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use crate::accounts::model::{
     AccountCounts, AccountProfile, AccountView, AccountViewFields, CustomEmojiView, ProfileField,
@@ -194,6 +193,7 @@ use crate::accounts::model::{
 };
 use crate::actor::model::ResolvedActor;
 use crate::api::pagination::ForwardedOrigin;
+use crate::api::time::format_time;
 use crate::domain::{Id, Visibility};
 use crate::federation::urls::ActorUrls;
 use crate::media::store::{MediaStore, ObjectKey};
@@ -285,13 +285,6 @@ pub struct CredentialAccountJson {
     pub account: AccountJson,
     pub source: CredentialSourceJson,
     pub role: RoleJson,
-}
-
-/// Renders `when` as an RFC 3339 timestamp string (Requirement 1.1's
-/// `created_at`/`last_status_at`, Mastodon's own ISO 8601 convention).
-fn format_time(when: OffsetDateTime) -> String {
-    when.format(&Rfc3339)
-        .expect("a valid OffsetDateTime always formats as RFC 3339")
 }
 
 fn field_to_json(field: &ProfileField) -> AccountFieldJson {

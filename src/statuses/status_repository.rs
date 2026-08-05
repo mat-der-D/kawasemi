@@ -166,12 +166,13 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::domain::{Id, Visibility};
 use crate::error::AppError;
 use crate::statuses::model::{Status, StatusEdit};
@@ -180,10 +181,6 @@ use crate::statuses::model::{Status, StatusEdit};
 /// (`migrations/0007_statuses.sql`'s `statuses.uri TEXT NOT NULL UNIQUE`,
 /// implicit default constraint name for a single-column `UNIQUE`).
 const URI_UNIQUE_CONSTRAINT: &str = "statuses_uri_key";
-
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// Maps a failed `INSERT INTO statuses` to an [`AppError`]: a unique
 /// violation on [`URI_UNIQUE_CONSTRAINT`] becomes a caller-facing
@@ -847,6 +844,55 @@ pub async fn media_ids_for_status(pool: &PgPool, status_id: Id) -> Result<Vec<Id
             .map_err(map_server_error)?;
 
     Ok(rows.into_iter().map(|(id,)| Id::from_i64(id)).collect())
+}
+
+/// The batched form of [`media_ids_for_status`] (structural-refactor task
+/// 4.1, Requirements 5.1/5.4): resolves every id in `status_ids` in one
+/// query instead of one query per status, so a list endpoint's media
+/// lookups stop scaling with the number of statuses it returns.
+///
+/// Equivalent to calling [`media_ids_for_status`] once per id, by
+/// construction: same table, same `WHERE` scoping (`status_id` only — this
+/// association carries no viewer/visibility dimension for either function to
+/// disagree about), and the same `ORDER BY position` within each status. The
+/// leading `status_id` in the `ORDER BY` only groups each status's rows
+/// together; it cannot reorder rows *within* one status, which is the
+/// ordering [`media_ids_for_status`] actually promises.
+///
+/// A status with no attached media has **no entry** in the returned map
+/// rather than an empty `Vec` (the returned keys are the subset of
+/// `status_ids` that have at least one attachment) — callers should read a
+/// miss as the empty attachment list [`media_ids_for_status`] returns for
+/// that same id. An empty `status_ids` returns an empty map without issuing
+/// a query at all: `= ANY` on an empty array would match nothing anyway, so
+/// the round trip would be pure cost.
+pub async fn media_ids_for_statuses(
+    pool: &PgPool,
+    status_ids: &[Id],
+) -> Result<HashMap<Id, Vec<Id>>, AppError> {
+    if status_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let raw_ids: Vec<i64> = status_ids.iter().map(|id| id.as_i64()).collect();
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT status_id, media_id FROM status_media \
+         WHERE status_id = ANY($1::bigint[]) ORDER BY status_id, position",
+    )
+    .bind(&raw_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(map_server_error)?;
+
+    let mut by_status: HashMap<Id, Vec<Id>> = HashMap::new();
+    for (status_id, media_id) in rows {
+        by_status
+            .entry(Id::from_i64(status_id))
+            .or_default()
+            .push(Id::from_i64(media_id));
+    }
+
+    Ok(by_status)
 }
 
 // -- status_mentions / status_remote_attachments (added by task 10.3,

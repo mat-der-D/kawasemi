@@ -195,6 +195,7 @@ pub mod model;
 pub mod notification_sink;
 pub mod poll_repository;
 pub mod poll_service;
+pub mod render_assembler;
 pub mod serializer;
 pub mod status_repository;
 pub mod status_service;

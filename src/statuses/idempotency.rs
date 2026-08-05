@@ -71,16 +71,12 @@
 #[cfg(test)]
 mod tests;
 
-use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::domain::Id;
 use crate::error::AppError;
-
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// The result of consulting the ledger for `(actor_id, key)` *before*
 /// creating a new post — see this module's doc comment ("Two functions, not

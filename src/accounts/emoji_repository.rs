@@ -88,15 +88,11 @@
 #[cfg(test)]
 mod tests;
 
-use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 
 use crate::accounts::model::CustomEmojiView;
+use crate::api::db::map_server_error;
 use crate::error::AppError;
-
-fn map_query_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// A `custom_emojis` row's columns, as read directly off the wire (shared
 /// shape between [`list_visible_emojis`]'s and [`resolve_emojis`]'s
@@ -144,7 +140,7 @@ pub async fn list_visible_emojis(pool: &PgPool) -> Result<Vec<CustomEmojiView>, 
     ))
     .fetch_all(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(rows.into_iter().map(row_to_emoji).collect())
 }
@@ -173,7 +169,7 @@ pub async fn resolve_emojis(
     .bind(shortcodes)
     .fetch_all(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(rows.into_iter().map(row_to_emoji).collect())
 }

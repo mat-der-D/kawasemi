@@ -116,10 +116,10 @@
 #[cfg(test)]
 mod tests;
 
-use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::{Duration, OffsetDateTime};
 
+use crate::api::db::map_server_error;
 use crate::domain::Id;
 use crate::error::AppError;
 use crate::media::model::{JobState, ProcessingJob};
@@ -236,14 +236,6 @@ fn row_to_job(row: JobRow) -> ProcessingJob {
     }
 }
 
-fn map_insert_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
-
-fn map_query_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
-
 /// Persists a new processing job for `media_id` in state `'queued'` with
 /// `attempts = 0` and `run_at = now` — immediately claimable (Requirement
 /// 1.6, 4.1: no external broker required, an accepted upload's derivative
@@ -270,7 +262,7 @@ pub async fn enqueue(
     .bind(now)
     .execute(pool)
     .await
-    .map_err(map_insert_error)?;
+    .map_err(map_server_error)?;
 
     Ok(())
 }
@@ -321,7 +313,7 @@ pub async fn claim_due(
     .bind(lease_threshold)
     .fetch_optional(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(row.map(row_to_job))
 }
@@ -339,7 +331,7 @@ pub async fn complete(pool: &PgPool, job_id: Id) -> Result<(), AppError> {
         .bind(job_id.as_i64())
         .execute(pool)
         .await
-        .map_err(map_query_error)?;
+        .map_err(map_server_error)?;
 
     Ok(())
 }
@@ -394,7 +386,7 @@ pub async fn fail_or_retry(
         .bind(job.id.as_i64())
         .execute(pool)
         .await
-        .map_err(map_query_error)?;
+        .map_err(map_server_error)?;
 
         Ok(JobOutcome::Failed)
     } else {
@@ -412,7 +404,7 @@ pub async fn fail_or_retry(
         .bind(job.id.as_i64())
         .execute(pool)
         .await
-        .map_err(map_query_error)?;
+        .map_err(map_server_error)?;
 
         Ok(JobOutcome::Retried)
     }

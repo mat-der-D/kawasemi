@@ -56,33 +56,28 @@
 //! weaker or divergent visibility check — it is the identical policy,
 //! reached without paying for six unused generic parameters.
 //!
-//! ## Status JSON assembly: duplicated glue, not a new shared helper
-//! (documented, already-reviewed convention — see
-//! `crate::statuses::account_provider`'s own doc comment, "Rendering glue",
-//! and `crate::notifications::service::NotificationService`'s own doc
-//! comment, "Rendering `account`/`status`") [`SearchHydrator::render_status`]/
-//! [`SearchHydrator::leaf_render_input`]/[`SearchHydrator::resolve_common`]
-//! duplicate `AccountStatusesProviderImpl::render`'s exact assembly glue
-//! (same repository calls, same [`StatusRenderInput`] construction, same
-//! one-level-only reblog nesting with an independent visibility re-check on
-//! the boosted target) — this is now the *fourth* module in this crate doing
-//! so (after `endpoints.rs`, `account_provider.rs`, `notifications/
-//! service.rs`, `timelines/hydrator.rs`), which several of those modules'
-//! own doc comments already flag as the point at which a shared,
-//! `pub(crate)` helper might finally be worth extracting. Flagged again here
-//! as a CONCERN for reviewer confirmation rather than silently starting that
-//! refactor inside this task's own boundary (`SearchHydrator` only).
+//! ## Status JSON assembly is shared, and batched per result set
+//! [`SearchHydrator::render_statuses`] resolves each boost target and its
+//! visibility itself, then hands the whole set to
+//! [`crate::statuses::render_assembler::StatusRenderAssembler`], which every
+//! module that renders statuses now goes through. This module previously
+//! carried its own copy of that assembly glue — the fourth in the crate —
+//! with a standing note that the time had come to extract a shared helper.
+//! That extraction has happened; what remains here is only the part that is
+//! genuinely this module's own: which target is visible, and to whom.
 //!
-//! One deliberate divergence from `AccountStatusesProviderImpl::render`:
-//! this module resolves `emojis` via `crate::statuses::status_service::
-//! extract_content_tokens` + `crate::accounts::emoji_repository::
-//! resolve_emojis` (mirrors `NotificationService`'s/`StatusHydrator`'s own
-//! choice) rather than leaving `emojis: Vec::new()`
-//! (`AccountStatusesProviderImpl`'s own narrower choice) — a search result
-//! embedding a post's custom-emoji shortcodes unresolved would render
-//! `:shortcode:` literally in every Mastodon client, which no requirement
-//! asks for but is straightforward to avoid by reusing the exact same two
-//! calls two sibling modules already make for the identical reason.
+//! That handoff is a single
+//! [`crate::statuses::render_assembler::StatusRenderAssembler::assemble_many`]
+//! call per result set rather than one per status, so the media/tag/emoji/
+//! interaction/poll lookups it needs are issued a number of times that does
+//! not depend on how many statuses came back, and an author appearing twice
+//! is resolved once (structural-refactor's Requirements 5.1, 5.2, 5.3, 5.6).
+//! Boost targets ride in the same batch. What stays outside it — and stays
+//! per candidate — is the candidate walk itself
+//! ([`SearchHydrator::status_visible`] and the `find_by_id` feeding it),
+//! because `limit` counts results rather than ids and so decides how far
+//! into `ids` the walk goes; see "`hydrate_statuses`: best-effort
+//! truncation" below.
 //!
 //! ## `hydrate_accounts`: dedup first, `following` filter last (Requirements
 //! 3.5, 3.3)
@@ -161,30 +156,23 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::accounts::account_service::AccountService;
-use crate::accounts::emoji_repository;
-use crate::accounts::model::CustomEmojiView;
 use crate::accounts::ports::AccountPortsRegistry;
+use crate::api::origin::self_origin;
 use crate::api::pagination::ForwardedOrigin;
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::media::LocalFsStore;
-use crate::media::media_repository;
-use crate::media::serializer::to_media_attachment;
 use crate::runtime::RuntimeContext;
 use crate::search::hashtag_repository::match_hashtags;
 use crate::search::model::TagMatch;
 use crate::search::tag_serializer::TagSerializer;
-use crate::statuses::interaction_repository;
 use crate::statuses::model::Status;
 use crate::statuses::poll_repository;
-use crate::statuses::serializer::{
-    SerializeContext, StatusInteractionState, StatusRenderInput, TagJson, poll_to_json,
-    status_to_json,
+use crate::statuses::render_assembler::{
+    PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
 use crate::statuses::status_repository;
-use crate::statuses::status_service::extract_content_tokens;
-use crate::statuses::tag_repository;
 use crate::statuses::visibility::{RelationshipQuery, RelationshipQueryRegistry, is_visible};
 
 /// Recovers the bare [`Id`] an [`AccountRef`] carries, regardless of
@@ -200,19 +188,6 @@ fn account_ref_id(account_ref: &AccountRef) -> Id {
         AccountRef::Remote(id) => id,
     }
 }
-
-/// Every pre-resolved field [`status_to_json`] needs beyond the bare
-/// [`Status`] row, minus `reblog` (assembled separately, since it recurses)
-/// — mirrors `AccountStatusesProviderImpl`'s/`StatusHydrator`'s identical
-/// tuple shape (see this module's own doc comment).
-type ResolvedCommon = (
-    Value,
-    Vec<Value>,
-    Vec<TagJson>,
-    Vec<CustomEmojiView>,
-    StatusInteractionState,
-    Option<Value>,
-);
 
 /// Concretizes [`SearchBackend`](crate::search::ports::SearchBackend) match
 /// identifiers into Account/Status/Tag JSON (Requirements 1.2, 3.2, 3.3,
@@ -275,7 +250,7 @@ impl SearchHydrator {
     /// See this module's doc comment ("Status JSON assembly") and
     /// `NotificationService::origin`'s identical rationale.
     fn origin(&self) -> ForwardedOrigin {
-        ForwardedOrigin::resolve("https", &self.domain, None, None)
+        self_origin(&self.domain)
     }
 
     // ---- hydrate_accounts (Requirements 1.2, 3.2, 3.3, 3.5) ----------------
@@ -338,10 +313,20 @@ impl SearchHydrator {
         limit: u32,
     ) -> Result<Vec<Value>, AppError> {
         let limit = limit as usize;
-        let origin = self.origin();
-        let mut out = Vec::new();
+
+        // The candidate walk itself is deliberately unchanged. `limit`
+        // counts *results*, not ids, so how far into `ids` this gets is a
+        // function of how many were skipped — and stopping the moment
+        // enough have accumulated is what keeps this method from fetching
+        // candidates it would never render (Requirement 4.6). Collecting the
+        // rows instead of the rendered JSON does not move that boundary:
+        // every status that survives both `continue`s below is rendered, and
+        // a render that fails aborts the whole call either way, so this
+        // counter advances exactly where the rendered-result counter it
+        // replaces did.
+        let mut selected = Vec::new();
         for &id in ids {
-            if out.len() >= limit {
+            if selected.len() >= limit {
                 break;
             }
             let Some(status) = status_repository::find_by_id(&self.pool, id).await? else {
@@ -350,9 +335,11 @@ impl SearchHydrator {
             if !self.status_visible(&status, Some(viewer)).await? {
                 continue;
             }
-            out.push(self.render_status(status, Some(viewer), &origin).await?);
+            selected.push(status);
         }
-        Ok(out)
+
+        let origin = self.origin();
+        self.render_statuses(&selected, Some(viewer), &origin).await
     }
 
     /// The single visibility judgment (`crate::statuses::visibility::
@@ -367,207 +354,76 @@ impl SearchHydrator {
         Ok(is_visible(status, viewer, &rel))
     }
 
-    /// Resolves `status` (already known visible to `viewer`) into its full
-    /// Status JSON, nesting a visible reblog target under `reblog` (at most
-    /// one level, never recursive) — see this module's doc comment ("Status
-    /// JSON assembly").
-    async fn render_status(
-        &self,
-        status: Status,
-        viewer: Option<Id>,
-        origin: &ForwardedOrigin,
-    ) -> Result<Value, AppError> {
-        let reblog_target = match status.reblog_of_id {
-            Some(target_id) => match status_repository::find_by_id(&self.pool, target_id).await? {
-                Some(target) if self.status_visible(&target, viewer).await? => Some(target),
-                _ => None,
-            },
-            None => None,
-        };
-        let reblog_box = match &reblog_target {
-            Some(target) => Some(Box::new(
-                self.leaf_render_input(target, viewer, origin).await?,
-            )),
-            None => None,
-        };
-
-        let (account, media_attachments, tags, emojis, interactions, poll) =
-            self.resolve_common(&status, viewer, origin).await?;
-
-        let input = StatusRenderInput {
-            status: &status,
-            account,
-            media_attachments,
-            mentions: Vec::new(),
-            tags,
-            emojis,
-            poll,
-            interactions,
-            reblog: reblog_box,
-        };
-        Ok(status_to_json(&input))
-    }
-
-    /// Builds a non-recursive [`StatusRenderInput`] (its own `reblog`
-    /// always `None`) for a boost's own boosted-status target — mirrors
-    /// `AccountStatusesProviderImpl::leaf_render_input`'s identical
-    /// one-level-only nesting discipline.
-    async fn leaf_render_input<'a>(
-        &self,
-        status: &'a Status,
-        viewer: Option<Id>,
-        origin: &ForwardedOrigin,
-    ) -> Result<StatusRenderInput<'a>, AppError> {
-        let (account, media_attachments, tags, emojis, interactions, poll) =
-            self.resolve_common(status, viewer, origin).await?;
-        Ok(StatusRenderInput {
-            status,
-            account,
-            media_attachments,
-            mentions: Vec::new(),
-            tags,
-            emojis,
-            poll,
-            interactions,
-            reblog: None,
-        })
-    }
-
-    /// The pieces every rendered [`Status`] needs beyond the bare row
-    /// itself, shared by both a top-level render and a nested reblog
-    /// target's own (non-recursive) render — mirrors
-    /// `AccountStatusesProviderImpl::resolve_common`'s (via its own inlined
-    /// `render`) identical structure.
-    async fn resolve_common(
+    /// Fetches a boost's target and re-checks its visibility against the
+    /// *target's own* author.
+    ///
+    /// Boost-target resolution stays here rather than moving into the
+    /// assembler — design.md's `Status 一覧の組み立て` flow, "ブースト先の
+    /// 解決と可視性判定は**呼び出し元に残る**": this module re-checks the
+    /// target through its own [`RelationshipQueryRegistry`]-backed
+    /// judgment, keyed to the target's own author, and a target that fails
+    /// is dropped entirely rather than partially rendered.
+    async fn resolve_reblog_target(
         &self,
         status: &Status,
         viewer: Option<Id>,
-        origin: &ForwardedOrigin,
-    ) -> Result<ResolvedCommon, AppError> {
-        let account = self
-            .accounts
-            .show_account(&status.actor_id.as_i64().to_string(), None, origin)
-            .await?;
-        let media_attachments = self.media_json(status.id, origin).await?;
-        let tags = self.tags_json(status.id, origin).await?;
-        let emojis = self.resolve_emojis(&status.content).await?;
-        let interactions = self.interaction_state(status.id, viewer).await?;
-        let poll = match status.poll_id {
-            Some(poll_id) => self.poll_json(poll_id, viewer).await?,
-            None => None,
-        };
-        Ok((account, media_attachments, tags, emojis, interactions, poll))
-    }
-
-    /// Delegates MediaAttachment JSON to media-pipeline wholesale. A media
-    /// id with no resolvable row is simply omitted, mirroring
-    /// `AccountStatusesProviderImpl::media_json`'s identical convention.
-    async fn media_json(
-        &self,
-        status_id: Id,
-        origin: &ForwardedOrigin,
-    ) -> Result<Vec<Value>, AppError> {
-        let media_ids = status_repository::media_ids_for_status(&self.pool, status_id).await?;
-        let mut out = Vec::with_capacity(media_ids.len());
-        for media_id in media_ids {
-            if let Some(media) = media_repository::find_by_id(&self.pool, media_id).await? {
-                out.push(
-                    serde_json::to_value(to_media_attachment(&media, &self.media_store, origin))
-                        .expect("MediaAttachmentJson always serializes to JSON"),
-                );
-            }
-        }
-        Ok(out)
-    }
-
-    /// Resolves `status_id`'s tags into `TagJson`, mirroring
-    /// `AccountStatusesProviderImpl::tags_json`'s identical URL
-    /// construction. Distinct from this spec's own hashtag *search* index
-    /// (`crate::search::hashtag_repository`) — this reads statuses-core's
-    /// own `tags`/`status_tags` tables (`crate::statuses::tag_repository`),
-    /// the per-status embedded-tags list every Status JSON carries,
-    /// unrelated to this hydrator's own [`Self::hydrate_hashtags`].
-    async fn tags_json(
-        &self,
-        status_id: Id,
-        origin: &ForwardedOrigin,
-    ) -> Result<Vec<TagJson>, AppError> {
-        let tags = tag_repository::tags_for_status(&self.pool, status_id).await?;
-        Ok(tags
-            .into_iter()
-            .map(|tag| TagJson {
-                url: format!("{}://{}/tags/{}", origin.scheme, origin.host, tag.name),
-                name: tag.name,
-            })
-            .collect())
-    }
-
-    /// Resolves `content`'s `:shortcode:` tokens against accounts-and-
-    /// instance's custom-emoji directory — mirrors `NotificationService::
-    /// resolve_emojis`'s/`StatusHydrator::resolve_emojis`'s identical reuse
-    /// of `status_service::extract_content_tokens` +
-    /// `emoji_repository::resolve_emojis`. An unregistered shortcode is
-    /// simply absent from the result, never an error.
-    async fn resolve_emojis(&self, content: &str) -> Result<Vec<CustomEmojiView>, AppError> {
-        let shortcodes = extract_content_tokens(content).emoji_shortcodes;
-        if shortcodes.is_empty() {
-            return Ok(Vec::new());
-        }
-        emoji_repository::resolve_emojis(&self.pool, &shortcodes).await
-    }
-
-    /// Resolves `status_id`'s viewer-scoped operation state. `muted` is
-    /// always `false` — this hydrator has no mute-signal source of its own
-    /// (unlike `crate::timelines::hydrator::StatusHydrator`, which reads one
-    /// from `FilterContext`), mirroring `AccountStatusesProviderImpl::
-    /// interaction_state`'s identical `muted: false` default.
-    async fn interaction_state(
-        &self,
-        status_id: Id,
-        viewer: Option<Id>,
-    ) -> Result<StatusInteractionState, AppError> {
-        let Some(actor_id) = viewer else {
-            return Ok(StatusInteractionState::default());
-        };
-        let favourited =
-            interaction_repository::exists_favourite(&self.pool, actor_id, status_id).await?;
-        let bookmarked =
-            interaction_repository::exists_bookmark(&self.pool, actor_id, status_id).await?;
-        let pinned = interaction_repository::exists_pin(&self.pool, actor_id, status_id).await?;
-        let reblogged = interaction_repository::find_reblog(&self.pool, actor_id, status_id)
-            .await?
-            .is_some();
-        Ok(StatusInteractionState {
-            favourited,
-            reblogged,
-            bookmarked,
-            pinned,
-            muted: false,
-        })
-    }
-
-    /// Resolves `poll_id`'s Poll JSON, mirroring
-    /// `AccountStatusesProviderImpl::poll_json`'s identical
-    /// `poll_repository`/`poll_to_json` reuse (empty emoji candidate slice —
-    /// this method matches that module's own narrower choice for poll
-    /// rendering specifically, unlike this module's own Status-level
-    /// `resolve_emojis`, since a poll option's own title text is a separate,
-    /// smaller surface no requirement in this task's boundary asks to
-    /// resolve emoji in). Degrades to `None` — never an error — for a
-    /// `poll_id` that no longer resolves to a row (a dangling reference, not
-    /// a hydration failure; see this module's doc comment, "`hydrate_hashtags`:
-    /// re-resolves `TagView`" and `NotificationService`'s identical
-    /// precedent, "Dangling references are not errors").
-    async fn poll_json(&self, poll_id: Id, viewer: Option<Id>) -> Result<Option<Value>, AppError> {
-        let Some(poll) = poll_repository::find_poll_by_id(&self.pool, poll_id).await? else {
+    ) -> Result<Option<Status>, AppError> {
+        let Some(target_id) = status.reblog_of_id else {
             return Ok(None);
         };
-        let tally = poll_repository::tally(&self.pool, poll_id, viewer).await?;
-        let ctx = SerializeContext {
+        let Some(target) = status_repository::find_by_id(&self.pool, target_id).await? else {
+            return Ok(None);
+        };
+        Ok(self
+            .status_visible(&target, viewer)
+            .await?
+            .then_some(target))
+    }
+
+    /// Resolves `statuses` (each already known visible to `viewer`) into
+    /// their full Status JSON, in the order given, nesting a visible reblog
+    /// target under `reblog` at most one level deep.
+    ///
+    /// Every boost target is resolved first, so that the whole result set —
+    /// targets included (Requirement 5.6 of structural-refactor) — reaches
+    /// [`StatusRenderAssembler::assemble_many`] as one batch and its
+    /// per-status materials are fetched a number of times that does not
+    /// depend on how many statuses it holds (that spec's Requirement 5.1).
+    async fn render_statuses(
+        &self,
+        statuses: &[Status],
+        viewer: Option<Id>,
+        origin: &ForwardedOrigin,
+    ) -> Result<Vec<Value>, AppError> {
+        let mut reblog_targets = Vec::with_capacity(statuses.len());
+        for status in statuses {
+            reblog_targets.push(self.resolve_reblog_target(status, viewer).await?);
+        }
+
+        let polls = TolerantPolls {
+            pool: self.pool.clone(),
+        };
+        let ctx = RenderContext {
+            // One `now` for the whole result set rather than one per
+            // status, so the values it feeds — a poll's `expired` flag —
+            // are answered consistently across a single response.
             viewer,
             now: self.runtime.clock.now(),
+            origin,
+            muted: None,
+            polls: &polls,
         };
-        Ok(Some(poll_to_json(&poll, &tally, &[], &ctx)))
+        self.assembler()
+            .assemble_many(statuses, &reblog_targets, &ctx)
+            .await
+    }
+
+    fn assembler(&self) -> StatusRenderAssembler {
+        StatusRenderAssembler::new(
+            self.pool.clone(),
+            Arc::clone(&self.accounts),
+            self.media_store.clone(),
+        )
     }
 
     // ---- hydrate_hashtags (Requirement 5.2) --------------------------------
@@ -589,5 +445,52 @@ impl SearchHydrator {
             }
         }
         Ok(out)
+    }
+}
+
+/// Reads polls straight from the repository and degrades to a poll-less
+/// status when the row is gone, rather than failing the whole result set.
+struct TolerantPolls {
+    pool: PgPool,
+}
+
+impl PollResolver for TolerantPolls {
+    /// Two queries for the whole batch — one
+    /// [`poll_repository::find_polls_by_ids`], one
+    /// [`poll_repository::tally_many`] — regardless of how many ids it is
+    /// given, and none at all for an empty one (Requirement 5.1: a result
+    /// page's poll lookups must not scale with its length).
+    fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
+        Box::pin(async move {
+            let polls = poll_repository::find_polls_by_ids(&self.pool, poll_ids).await?;
+
+            // Tallied for the ids that actually resolved, not the whole
+            // requested set: the per-id loop this replaces only reached
+            // `tally` from inside `if let Some(poll)`, and a dangling id
+            // would contribute nothing to `tally_many`'s result either (it
+            // keys off the `polls` rows themselves), so including it would
+            // only widen the query's id list.
+            let found: Vec<Id> = poll_ids
+                .iter()
+                .copied()
+                .filter(|poll_id| polls.contains_key(poll_id))
+                .collect();
+            let tallies = poll_repository::tally_many(&self.pool, &found, viewer).await?;
+
+            // Built by filtering `poll_ids`, so `found` — and therefore the
+            // result — keeps the order the caller asked in rather than
+            // either map's iteration order.
+            let mut out = Vec::with_capacity(found.len());
+            for poll_id in found {
+                // A poll deleted between the two queries above is dropped
+                // here, which is this resolver's whole contract: a missing
+                // poll costs its status its `poll` field, never the result
+                // set.
+                if let (Some(poll), Some(tally)) = (polls.get(&poll_id), tallies.get(&poll_id)) {
+                    out.push((poll_id, poll.clone(), tally.clone()));
+                }
+            }
+            Ok(out)
+        })
     }
 }

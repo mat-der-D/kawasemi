@@ -420,7 +420,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::actor::Handle;
 use crate::domain::{AccountRef, Id, Visibility};
-use crate::error::AppError;
+use crate::error::{AppError, ErrorTag};
 use crate::federation::inbound::dispatcher::{
     HandleOutcome, InboundActivityDispatcher, InboundActivityHandler, InboundContext,
 };
@@ -1041,7 +1041,7 @@ impl<R: RemoteActorResolver, M: LocalMentionResolver> CreateNoteHandler<R, M> {
             // See this module's doc comment ("Idempotent re-delivery... /
             // Self-notification loopback of a locally-already-recorded
             // vote") — `record_vote`'s specific duplicate-vote rejection
-            // (`poll_repository.rs`'s own literal message) reaching this
+            // (which it marks with `ErrorTag::DuplicateVote`) reaching this
             // *inbound* branch does not mean a client made a genuinely new,
             // rejected request: when the poll's author is local,
             // `StatusActivityBuilder::deliver_vote`'s own notification
@@ -1062,12 +1062,15 @@ impl<R: RemoteActorResolver, M: LocalMentionResolver> CreateNoteHandler<R, M> {
             // just made it. Every *other* `record_vote` rejection (deadline
             // passed, out-of-range choice, single/multiple violation) is a
             // distinct wire condition, not the "I already knew that" case
-            // this arm narrowly targets, and continues to propagate
-            // unchanged.
-            Err(err)
-                if err.status == StatusCode::UNPROCESSABLE_ENTITY
-                    && err.public_message == "actor has already voted in this poll" =>
-            {
+            // this arm narrowly targets, carries no tag, and continues to
+            // propagate unchanged.
+            //
+            // Matching on the tag rather than on `public_message` is what
+            // keeps that distinction from being one wording change away
+            // from silently inverting: rewording the rejection used to
+            // detach this arm with nothing to catch it, turning the
+            // loopback case back into a spurious 422 for the voter.
+            Err(err) if err.tag == Some(ErrorTag::DuplicateVote) => {
                 Ok(Some(HandleOutcome::Handled))
             }
             Err(err) => Err(err),

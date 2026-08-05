@@ -132,15 +132,12 @@ mod tests;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::domain::Id;
 use crate::error::AppError;
 use crate::runtime::RuntimeContext;
 use crate::search::hashtag_repository::{load_watermark, save_watermark, upsert_tag_usage};
 use crate::statuses::tag_repository::tags_for_status;
-
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(axum::http::StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// The maximum number of `statuses` rows [`catch_up_from_watermark`] reads
 /// and derives per batch before advancing the watermark and (if more rows

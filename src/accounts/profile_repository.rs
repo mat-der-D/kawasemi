@@ -86,17 +86,13 @@
 #[cfg(test)]
 mod tests;
 
-use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
 use crate::accounts::model::{AccountProfile, CredentialSource, ProfileField, ProfilePatch};
+use crate::api::db::map_server_error;
 use crate::domain::{Id, Visibility};
 use crate::error::AppError;
-
-fn map_query_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// Maps a [`Visibility`] to its `account_profiles.source_privacy` `TEXT`
 /// column representation. Matches [`Visibility`]'s own
@@ -316,7 +312,7 @@ pub async fn find_profile(pool: &PgPool, actor_id: Id) -> Result<Option<AccountP
     .bind(actor_id.as_i64())
     .fetch_optional(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(row.map(row_to_profile))
 }
@@ -401,7 +397,7 @@ pub async fn upsert_profile(
     .bind(now)
     .fetch_one(pool)
     .await
-    .map_err(map_query_error)?;
+    .map_err(map_server_error)?;
 
     Ok(row_to_profile(row))
 }

@@ -57,30 +57,42 @@
 //! the proxy's externally-visible origin. Flagged in this task's own status
 //! report `CONCERNS` for reviewer confirmation — not a silent gap.
 //!
-//! ## Rendering glue: reuses repositories/serializer, does not reuse
-//! `crate::statuses::endpoints`'s own private assembly methods
-//! `crate::statuses::endpoints::StatusesEndpointsState`'s own
-//! `render_status_json`/`resolve_common`/`leaf_render_input` (task 7.1)
-//! already assemble a bare [`Status`] into `serializer::status_to_json`'s
-//! input shape — but they are private methods on a router-local, still-
-//! generic (`<A, D, L, H, R, M>`) state bundle this module has no reason to
-//! parameterize over (this provider needs no `StatusActivityBuilder`/
-//! delivery port at all — it only ever *reads*). This module therefore
-//! writes its own small, self-contained equivalent
-//! ([`AccountStatusesProviderImpl::render`]/`leaf_render_input`), reusing
-//! the exact same underlying repositories/serializer functions
-//! `endpoints.rs` itself reuses (`interaction_repository`/`tag_repository`/
-//! `media_repository`/`poll_repository`/`serializer::status_to_json`/
-//! `poll_to_json`/`AccountService::show_account`) — the same "small helper
-//! duplication across sibling modules is this crate's own documented
-//! convention" this spec's own Implementation Notes already invoke for
-//! `UndoKind` (task 4.1) and `format_time` (task 7.1), applied here to a
-//! larger assembly function for the same reason: no `pub(crate)` surface
-//! exists yet to share it instead, and widening `endpoints.rs`'s private
-//! methods to `pub(crate)` (adding six more generic parameters' worth of
-//! surface this module would have to satisfy) is a larger, out-of-scope
-//! refactor this task's own boundary (`AccountStatusesProviderImpl,
-//! AccountCountsContribution`) does not ask for.
+//! ## Status JSON assembly is shared, and batched per page
+//! [`AccountStatusesProviderImpl::render_page`] resolves each boost target
+//! and its visibility itself, then hands the whole page to
+//! [`crate::statuses::render_assembler::StatusRenderAssembler`], which every
+//! module that renders statuses now goes through. This module used to carry
+//! its own copy of that assembly glue — one of four in the crate — written
+//! because `crate::statuses::endpoints`'s equivalent was private to a
+//! router-local, six-parameter generic state bundle this provider (which
+//! only ever *reads*) had no reason to parameterize over. The extraction has
+//! happened; what remains here is only the part that is genuinely this
+//! module's own: which target is visible, and to whom.
+//!
+//! That handoff is a single [`crate::statuses::render_assembler::StatusRenderAssembler::assemble_many`]
+//! call per page rather than one per status, so the media/tag/emoji/
+//! interaction/poll lookups a page needs are issued a number of times that
+//! does not depend on how many statuses it holds, and an author appearing
+//! twice on one page is resolved once (Requirements 5.1, 5.2, 5.3, 5.6).
+//! Boost targets ride in the same batch. What stays outside it — and stays
+//! per status — is exactly the two judgments above this rendering:
+//! [`AccountStatusesProviderImpl::visible_to`] and
+//! [`AccountStatusesProviderImpl::passes_filters`]. Those decide *which*
+//! statuses reach the page, which design.md leaves with this module rather
+//! than the assembler.
+//!
+//! One of them still costs a query per candidate, and that is a real
+//! remaining gap rather than a property of the design:
+//! [`AccountStatusesProviderImpl::passes_filters`] issues
+//! [`status_repository::media_ids_for_status`] when `only_media` is set and
+//! [`interaction_repository::exists_pin`] when `pinned` is set — media and
+//! interaction state, both of which Requirement 5.1 does enumerate. Batching
+//! them would not change which statuses reach the page:
+//! [`status_repository::media_ids_for_statuses`] and
+//! [`interaction_repository::pinned_status_ids`] already exist and answer the
+//! same question for a whole candidate set. Doing so means restructuring the
+//! filter chain, which the task that batched this rendering deliberately left
+//! untouched, so it is still outstanding.
 //!
 //! ## Filtering: fetch-then-filter-then-paginate, not sixteen SQL variants
 //! [`status_repository::list_by_actor`] fetches every status `query.target`
@@ -129,6 +141,9 @@
 //! `new` already accepts exactly that via the registry's
 //! `set_relationship_query`).
 
+#[cfg(test)]
+mod tests;
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -140,23 +155,20 @@ use sqlx::PgPool;
 use crate::accounts::account_service::AccountService;
 use crate::accounts::model::AccountCounts;
 use crate::accounts::ports::{AccountCountsProvider, AccountStatusesProvider, StatusesQuery};
+use crate::api::origin::self_origin;
 use crate::api::pagination::{ForwardedOrigin, Page, StatusIdCursor, paginate};
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
 use crate::federation::signatures::ReqwestFederationHttpClient;
 use crate::media::local_fs::LocalFsStore;
-use crate::media::media_repository;
-use crate::media::serializer::to_media_attachment;
 use crate::runtime::RuntimeContext;
 use crate::statuses::interaction_repository;
 use crate::statuses::model::Status;
 use crate::statuses::poll_repository;
-use crate::statuses::serializer::{
-    SerializeContext, StatusInteractionState, StatusRenderInput, TagJson, poll_to_json,
-    status_to_json,
+use crate::statuses::render_assembler::{
+    PollResolution, PollResolver, RenderContext, StatusRenderAssembler,
 };
 use crate::statuses::status_repository;
-use crate::statuses::tag_repository;
 use crate::statuses::visibility::{self, RelationshipQuery, RelationshipQueryRegistry};
 
 /// Recovers the [`Id`] both ports need from an [`AccountRef`], regardless of
@@ -217,7 +229,7 @@ impl AccountStatusesProviderImpl {
     /// See this module's doc comment ("Rendering without a live request's
     /// own forwarded origin").
     fn origin(&self) -> ForwardedOrigin {
-        ForwardedOrigin::resolve("https", &self.domain, None, None)
+        self_origin(&self.domain)
     }
 
     /// The real visibility judgment (task 3.1's [`visibility::is_visible`]),
@@ -263,159 +275,120 @@ impl AccountStatusesProviderImpl {
         Ok(true)
     }
 
-    async fn account_json(
-        &self,
-        actor_id: Id,
-        origin: &ForwardedOrigin,
-    ) -> Result<Value, AppError> {
-        self.accounts
-            .show_account(&actor_id.as_i64().to_string(), None, origin)
-            .await
+    /// Builds the shared Status assembler this provider renders through.
+    fn assembler(&self) -> StatusRenderAssembler {
+        StatusRenderAssembler::new(
+            self.pool.clone(),
+            Arc::clone(&self.accounts),
+            self.media_store.clone(),
+        )
     }
 
-    async fn media_json(
+    /// Fetches a boost's target and re-checks its visibility against the
+    /// *target's own* author.
+    ///
+    /// Boost-target resolution stays here rather than moving into the
+    /// assembler — design.md's `Status 一覧の組み立て` flow, "ブースト先の
+    /// 解決と可視性判定は**呼び出し元に残る**": this provider re-checks the
+    /// target against its own [`RelationshipQueryRegistry`]-backed
+    /// visibility judgment, keyed to the *target's* author rather than the
+    /// booster's, and a target that fails is dropped entirely rather than
+    /// partially rendered.
+    async fn resolve_reblog_target(
         &self,
-        status_id: Id,
+        status: &Status,
+        viewer: Option<Id>,
+    ) -> Result<Option<Status>, AppError> {
+        let Some(target_id) = status.reblog_of_id else {
+            return Ok(None);
+        };
+        let Some(target) = status_repository::find_by_id(&self.pool, target_id).await? else {
+            return Ok(None);
+        };
+        Ok(self.visible_to(&target, viewer).await?.then_some(target))
+    }
+
+    /// Renders one already-filtered, already-paginated page into Status
+    /// JSON, in the order given.
+    ///
+    /// Every boost target is resolved first, so that the whole page —
+    /// targets included (Requirement 5.6) — reaches
+    /// [`StatusRenderAssembler::assemble_many`] as one batch and its
+    /// per-status materials are fetched a number of times that does not
+    /// depend on the page's length (Requirement 5.1).
+    async fn render_page(
+        &self,
+        viewer: Option<Id>,
+        statuses: &[Status],
         origin: &ForwardedOrigin,
     ) -> Result<Vec<Value>, AppError> {
-        let media_ids = status_repository::media_ids_for_status(&self.pool, status_id).await?;
-        let mut out = Vec::with_capacity(media_ids.len());
-        for media_id in media_ids {
-            if let Some(media) = media_repository::find_by_id(&self.pool, media_id).await? {
-                out.push(
-                    serde_json::to_value(to_media_attachment(&media, &self.media_store, origin))
-                        .expect("MediaAttachmentJson always serializes to JSON"),
-                );
-            }
+        let mut reblog_targets = Vec::with_capacity(statuses.len());
+        for status in statuses {
+            reblog_targets.push(self.resolve_reblog_target(status, viewer).await?);
         }
-        Ok(out)
-    }
 
-    async fn tags_json(
-        &self,
-        status_id: Id,
-        origin: &ForwardedOrigin,
-    ) -> Result<Vec<TagJson>, AppError> {
-        let tags = tag_repository::tags_for_status(&self.pool, status_id).await?;
-        Ok(tags
-            .into_iter()
-            .map(|tag| TagJson {
-                url: format!("{}://{}/tags/{}", origin.scheme, origin.host, tag.name),
-                name: tag.name,
-            })
-            .collect())
-    }
-
-    async fn interaction_state(
-        &self,
-        viewer: Option<Id>,
-        status_id: Id,
-    ) -> Result<StatusInteractionState, AppError> {
-        let Some(actor_id) = viewer else {
-            return Ok(StatusInteractionState::default());
+        let polls = RequiredPolls {
+            pool: self.pool.clone(),
         };
-        let favourited =
-            interaction_repository::exists_favourite(&self.pool, actor_id, status_id).await?;
-        let bookmarked =
-            interaction_repository::exists_bookmark(&self.pool, actor_id, status_id).await?;
-        let pinned = interaction_repository::exists_pin(&self.pool, actor_id, status_id).await?;
-        let reblogged = interaction_repository::find_reblog(&self.pool, actor_id, status_id)
-            .await?
-            .is_some();
-        Ok(StatusInteractionState {
-            favourited,
-            reblogged,
-            bookmarked,
-            pinned,
-            muted: false,
-        })
-    }
-
-    async fn poll_json(&self, viewer: Option<Id>, poll_id: Id) -> Result<Value, AppError> {
-        let poll = poll_repository::find_poll_by_id(&self.pool, poll_id)
-            .await?
-            .ok_or_else(not_found)?;
-        let tally = poll_repository::tally(&self.pool, poll_id, viewer).await?;
-        let ctx = SerializeContext {
+        let ctx = RenderContext {
+            // One `now` for the page rather than one per status. The values
+            // it feeds — a poll's `expired` flag — are now answered
+            // consistently across a single response, which rendering each
+            // status against its own clock reading did not guarantee.
             viewer,
             now: self.runtime.clock.now(),
+            origin,
+            muted: None,
+            polls: &polls,
         };
-        Ok(poll_to_json(&poll, &tally, &[], &ctx))
+        self.assembler()
+            .assemble_many(statuses, &reblog_targets, &ctx)
+            .await
     }
+}
 
-    /// Builds a non-recursive [`StatusRenderInput`] (its own `reblog` field
-    /// always `None`) — used only for a reblog *target*, mirroring
-    /// `crate::statuses::endpoints`'s identical "at most one level of
-    /// nesting" precedent.
-    async fn leaf_render_input<'a>(
-        &self,
-        viewer: Option<Id>,
-        status: &'a Status,
-        origin: &ForwardedOrigin,
-    ) -> Result<StatusRenderInput<'a>, AppError> {
-        let account = self.account_json(status.actor_id, origin).await?;
-        let media_attachments = self.media_json(status.id, origin).await?;
-        let tags = self.tags_json(status.id, origin).await?;
-        let interactions = self.interaction_state(viewer, status.id).await?;
-        let poll = match status.poll_id {
-            Some(poll_id) => Some(self.poll_json(viewer, poll_id).await?),
-            None => None,
-        };
-        Ok(StatusRenderInput {
-            status,
-            account,
-            media_attachments,
-            mentions: Vec::new(),
-            tags,
-            emojis: Vec::new(),
-            poll,
-            interactions,
-            reblog: None,
+/// Reads polls straight from the repository and treats a dangling
+/// `poll_id` as this module's own not-found error, matching what this path
+/// has always done.
+struct RequiredPolls {
+    pool: PgPool,
+}
+
+impl PollResolver for RequiredPolls {
+    /// Two queries for the whole batch — one
+    /// [`poll_repository::find_polls_by_ids`], one
+    /// [`poll_repository::tally_many`] — regardless of how many ids it is
+    /// given, and none at all for an empty one (Requirement 5.1: an account's
+    /// status page must not have its poll lookups scale with its length).
+    fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
+        Box::pin(async move {
+            let polls = poll_repository::find_polls_by_ids(&self.pool, poll_ids).await?;
+
+            // Walked in `poll_ids` order, so a dangling id raises where the
+            // per-id loop this replaces raised: on the *first* one, not on
+            // whichever the map happened to iterate to. Both this ordering
+            // and the result's own are fixed by this one pass.
+            let mut resolved = Vec::with_capacity(poll_ids.len());
+            for &poll_id in poll_ids {
+                let poll = polls.get(&poll_id).ok_or_else(not_found)?;
+                resolved.push((poll_id, poll.clone()));
+            }
+
+            // Only reached once every id resolved, so `tally_many` is never
+            // asked about a poll that does not exist — the same condition
+            // under which the per-id loop reached `tally`.
+            let tallies = poll_repository::tally_many(&self.pool, poll_ids, viewer).await?;
+
+            let mut out = Vec::with_capacity(resolved.len());
+            for (poll_id, poll) in resolved {
+                // Absent only for a poll deleted between the two queries
+                // above, which this resolver reports exactly as it reports
+                // one that was never there.
+                let tally = tallies.get(&poll_id).ok_or_else(not_found)?;
+                out.push((poll_id, poll, tally.clone()));
+            }
+            Ok(out)
         })
-    }
-
-    /// Resolves `status` (owned) into its full Mastodon-compatible JSON
-    /// representation — see this module's own doc comment ("Rendering
-    /// glue").
-    async fn render(
-        &self,
-        viewer: Option<Id>,
-        status: Status,
-        origin: &ForwardedOrigin,
-    ) -> Result<Value, AppError> {
-        let reblog_target = match status.reblog_of_id {
-            Some(target_id) => match status_repository::find_by_id(&self.pool, target_id).await? {
-                Some(target) if self.visible_to(&target, viewer).await? => Some(target),
-                _ => None,
-            },
-            None => None,
-        };
-        let reblog_box = match &reblog_target {
-            Some(target) => Some(Box::new(
-                self.leaf_render_input(viewer, target, origin).await?,
-            )),
-            None => None,
-        };
-        let account = self.account_json(status.actor_id, origin).await?;
-        let media_attachments = self.media_json(status.id, origin).await?;
-        let tags = self.tags_json(status.id, origin).await?;
-        let interactions = self.interaction_state(viewer, status.id).await?;
-        let poll = match status.poll_id {
-            Some(poll_id) => Some(self.poll_json(viewer, poll_id).await?),
-            None => None,
-        };
-        let input = StatusRenderInput {
-            status: &status,
-            account,
-            media_attachments,
-            mentions: Vec::new(),
-            tags,
-            emojis: Vec::new(),
-            poll,
-            interactions,
-            reblog: reblog_box,
-        };
-        Ok(status_to_json(&input))
     }
 }
 
@@ -447,10 +420,9 @@ impl AccountStatusesProvider for AccountStatusesProviderImpl {
             );
 
             let origin = self.origin();
-            let mut items = Vec::with_capacity(paged.items.len());
-            for status in paged.items {
-                items.push(self.render(query.viewer, status, &origin).await?);
-            }
+            let items = self
+                .render_page(query.viewer, &paged.items, &origin)
+                .await?;
 
             Ok(Page {
                 items,

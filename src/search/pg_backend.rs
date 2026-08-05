@@ -124,9 +124,9 @@
 //! type requires (Requirement 7.2); `url`/`history` are dropped here as
 //! `TagSerializer`'s (task 4.1's) concern, not this port's.
 
-use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 
+use crate::api::db::map_server_error;
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;
 use crate::runtime::RuntimeContext;
@@ -134,10 +134,6 @@ use crate::search::hashtag_indexer::catch_up_from_watermark;
 use crate::search::hashtag_repository::match_hashtags;
 use crate::search::model::TagMatch;
 use crate::search::ports::{AccountQuery, HashtagQuery, SearchBackend, StatusQuery};
-
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// The fixed margin half of this module's overfetch convention (see this
 /// module's own doc comment, "Overfetch convention"): [`overfetch_limit`]

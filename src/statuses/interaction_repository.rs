@@ -31,7 +31,13 @@
 //! [`remove_bookmark`] / [`exists_bookmark`] / [`list_bookmarks`]
 //! (Requirements 11.1, 11.2, 11.3), [`set_pin`] / [`exists_pin`]
 //! (Requirements 12.1, 12.2), and [`find_reblog`] (Requirement 9.3's
-//! read-only half, see above). No `StatusRepository`/`TagRepository`
+//! read-only half, see above), plus the batched forms of those four
+//! existence checks — [`favourited_status_ids`] / [`bookmarked_status_ids`] /
+//! [`pinned_status_ids`] / [`reblogged_status_ids`] (added later, by
+//! structural-refactor task 4.3, Requirements 5.1 and 5.5, so a list
+//! endpoint's per-viewer interaction lookups stop scaling with the number of
+//! statuses it renders; the singular checks stay, they have other callers).
+//! No `StatusRepository`/`TagRepository`
 //! functionality, no `PollRepository`/`IdempotencyStore` (task 2.3), no
 //! visibility/addressing policy, no Activity generation, no scope/ownership
 //! enforcement (`write:favourites`/`write:bookmarks`/`12.3`'s ownership
@@ -141,18 +147,17 @@
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashSet;
+
 use axum::http::StatusCode;
 use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::api::pagination::{Cursor, Page, PageParams};
 use crate::domain::{Id, Visibility};
 use crate::error::AppError;
 use crate::statuses::model::Status;
-
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// Reconstructs a [`Visibility`] from an already-persisted
 /// `statuses.visibility` column value. Mirrors
@@ -584,4 +589,155 @@ pub async fn find_reblog(
     .map_err(map_server_error)?;
 
     Ok(row.map(row_to_status))
+}
+
+// -- batched interaction state (structural-refactor task 4.3) ---------------
+
+/// Runs one of the four batched interaction-state queries below and collects
+/// its single-column result into a set.
+///
+/// `sql` must select exactly the status id column to report as "present",
+/// take the viewer as `$1` and the status-id array as `$2`, and otherwise
+/// carry the same `WHERE` scoping as the singular check it batches — that
+/// equivalence is what task 4.3's per-function comparison tests pin down.
+/// Ordering is deliberately unconstrained: the result is a [`HashSet`], so
+/// unlike `tags_for_statuses` there is no per-key sequence for a batched
+/// query to disagree with its singular counterpart about, and a duplicate row
+/// (possible for [`reblogged_status_ids`], whose underlying `statuses` table
+/// has no unique constraint over `(actor_id, reblog_of_id)`) collapses on
+/// insertion rather than needing a `DISTINCT`.
+async fn status_id_set(
+    pool: &PgPool,
+    sql: &'static str,
+    viewer: Id,
+    status_ids: &[Id],
+) -> Result<HashSet<Id>, AppError> {
+    if status_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let raw_ids: Vec<i64> = status_ids.iter().map(|id| id.as_i64()).collect();
+    let rows: Vec<(i64,)> = sqlx::query_as(sql)
+        .bind(viewer.as_i64())
+        .bind(&raw_ids)
+        .fetch_all(pool)
+        .await
+        .map_err(map_server_error)?;
+
+    Ok(rows.into_iter().map(|(id,)| Id::from_i64(id)).collect())
+}
+
+/// The batched form of [`exists_favourite`] (structural-refactor task 4.3,
+/// Requirements 5.1 and 5.5): reports which of `status_ids` `viewer` has
+/// favourited, in one query instead of one query per status.
+///
+/// Equivalent to calling [`exists_favourite`] once per id, by construction —
+/// same table, same `actor_id = $1 AND status_id = ...` scoping, just
+/// widened to `= ANY`. An id `viewer` has *not* favourited is simply **absent
+/// from the returned set** (the returned ids are the subset of `status_ids`
+/// `viewer` favourited), which also means an id with no `statuses` row at all
+/// is not distinguished from an existing but unfavourited one — the same
+/// "no row -> absent" contract [`tags_for_statuses`](crate::statuses::tag_repository::tags_for_statuses)
+/// carries. An empty `status_ids` returns an empty set without issuing a
+/// query at all: `= ANY` on an empty array would match nothing anyway, so the
+/// round trip would be pure cost.
+pub async fn favourited_status_ids(
+    pool: &PgPool,
+    viewer: Id,
+    status_ids: &[Id],
+) -> Result<HashSet<Id>, AppError> {
+    status_id_set(
+        pool,
+        "SELECT status_id FROM favourites WHERE actor_id = $1 AND status_id = ANY($2::bigint[])",
+        viewer,
+        status_ids,
+    )
+    .await
+}
+
+/// The batched form of [`exists_bookmark`] (task 4.3, Requirements 5.1 and
+/// 5.5): reports which of `status_ids` `viewer` has bookmarked, in one query.
+///
+/// Equivalent to calling [`exists_bookmark`] once per id, by construction
+/// (same table, same `actor_id`/`status_id` scoping widened to `= ANY`), with
+/// the same "no row -> absent" contract and the same empty-slice
+/// short-circuit as [`favourited_status_ids`].
+///
+/// Selects `bookmarks.status_id`, never `bookmarks.id` — this module's own
+/// [`BookmarkCursor`] doc comment is explicit that a bookmark row's primary
+/// key is deliberately distinct from the bookmarked status's id, and callers
+/// here are asking about the latter.
+pub async fn bookmarked_status_ids(
+    pool: &PgPool,
+    viewer: Id,
+    status_ids: &[Id],
+) -> Result<HashSet<Id>, AppError> {
+    status_id_set(
+        pool,
+        "SELECT status_id FROM bookmarks WHERE actor_id = $1 AND status_id = ANY($2::bigint[])",
+        viewer,
+        status_ids,
+    )
+    .await
+}
+
+/// The batched form of [`exists_pin`] (task 4.3, Requirements 5.1 and 5.5):
+/// reports which of `status_ids` `viewer` has pinned, in one query.
+///
+/// Equivalent to calling [`exists_pin`] once per id, by construction, with
+/// the same "no row -> absent" contract and empty-slice short-circuit as
+/// [`favourited_status_ids`].
+///
+/// A pin is conventionally an author's pin of their *own* post rather than a
+/// viewer-to-anyone relation, but that is a policy `InteractionService`
+/// enforces above this repository (Requirement 12.3; see [`set_pin`]'s own
+/// doc comment) — the `pins` table itself is keyed `(actor_id, status_id)`
+/// exactly like `favourites`/`bookmarks`, and [`exists_pin`] scopes purely by
+/// `actor_id`. This function therefore takes the same `viewer` parameter as
+/// its three siblings and mirrors that same `WHERE`, with no ownership
+/// predicate the singular version does not have.
+pub async fn pinned_status_ids(
+    pool: &PgPool,
+    viewer: Id,
+    status_ids: &[Id],
+) -> Result<HashSet<Id>, AppError> {
+    status_id_set(
+        pool,
+        "SELECT status_id FROM pins WHERE actor_id = $1 AND status_id = ANY($2::bigint[])",
+        viewer,
+        status_ids,
+    )
+    .await
+}
+
+/// The batched form of [`find_reblog`]'s existence half (task 4.3,
+/// Requirements 5.1 and 5.5): reports which of `status_ids` `viewer` has
+/// boosted, in one query.
+///
+/// Unlike its three siblings there is no interaction table to read — a boost
+/// is a `statuses` row of its own, with `actor_id` set to the booster and
+/// `reblog_of_id` set to the boosted post (see this module's doc comment,
+/// "Reblog scope"). This query therefore mirrors [`find_reblog`]'s own
+/// `actor_id = $1 AND reblog_of_id = ...` `WHERE` against `statuses`, and
+/// returns `reblog_of_id` — the **boosted** status's id, which is what the
+/// caller passed in — rather than the boost row's own id. [`find_reblog`]'s
+/// `LIMIT 1` has no batched counterpart because the set collapses duplicates
+/// on its own (see [`status_id_set`]).
+///
+/// Same "no row -> absent" contract (an id `viewer` has not boosted is absent
+/// from the set, exactly as [`find_reblog`] returns `None` for it) and same
+/// empty-slice short-circuit as [`favourited_status_ids`].
+pub async fn reblogged_status_ids(
+    pool: &PgPool,
+    viewer: Id,
+    status_ids: &[Id],
+) -> Result<HashSet<Id>, AppError> {
+    status_id_set(
+        pool,
+        "SELECT reblog_of_id FROM statuses \
+         WHERE actor_id = $1 AND reblog_of_id = ANY($2::bigint[])",
+        viewer,
+        status_ids,
+    )
+    .await
 }

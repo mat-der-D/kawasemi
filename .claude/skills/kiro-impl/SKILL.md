@@ -45,6 +45,11 @@ After all parallel research completes, synthesize implementation brief before st
 **Validate approvals**:
 - Verify tasks are approved in spec.json (stop if not, see Safety & Fallback)
 
+**Validate SSoT ownership**:
+- Read `ssot` in `spec.json`. Treat a missing field as `"spec"`.
+- `"spec"` → proceed. The spec is authoritative; implement what `design.md` specifies.
+- `"implementation"` → **STOP** (see Safety & Fallback). This spec was handed off: the implementation is now the source of truth and `design.md` is a log of how it was originally built. Implementing from it would reintroduce a superseded design over working code.
+
 **Discover validation commands**:
 - Inspect repository-local sources of truth in this order: project scripts/manifests (`package.json`, `pyproject.toml`, `go.mod`, `Cargo.toml`, app manifests), task runners (`Makefile`, `justfile`), CI/workflow files, existing e2e/integration configs, then `README*`
 - Derive a canonical validation set for this repo: `TEST_COMMANDS`, `BUILD_COMMANDS`, and `SMOKE_COMMANDS`
@@ -227,6 +232,15 @@ For tasks that add or change behavior, enforce RED → GREEN with a feature flag
 **Tasks Not Approved or Missing Spec Files**:
 - **Stop Execution**: All spec files must exist and tasks must be approved
 - **Suggested Action**: "Complete previous phases: `/kiro-spec-requirements`, `/kiro-spec-design`, `/kiro-spec-tasks`"
+
+**Spec Already Handed Off (`"ssot": "implementation"`)**:
+- **Stop Execution**: Do not implement, and do not "just check" whether the code still matches `design.md` — after handoff, a divergence means the design is stale, not that the code is wrong.
+- **Report**: name the feature, its `handoff` record, and why it was skipped.
+- **Suggested Action**, in preference order:
+  1. **New work → new spec.** `/kiro-spec-init` for the new capability. This is almost always the right answer; it keeps each spec a coherent record of one build.
+  2. **Genuinely amending this feature's design** → deliberately re-open the spec: re-run `/kiro-spec-requirements` / `/kiro-spec-design` / `/kiro-spec-tasks`, which sets `ssot` back to `"spec"` and moves the old `handoff` into `handoff_history`. Only then re-run `/kiro-impl`. Re-opening means the spec outranks the working code again — do it on purpose, not to unblock a command.
+  3. **Understanding or changing existing behavior** → read the implementation and its contract tests. Use `/kiro-validate-gap` if you need a requirements-to-code gap analysis; that skill is built for an existing codebase.
+- **Never** flip `ssot` by hand to get past this check.
 
 **Test Failures**:
 - **Stop Implementation**: Fix failing tests before continuing

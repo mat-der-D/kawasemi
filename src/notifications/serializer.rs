@@ -123,8 +123,8 @@ mod tests;
 use serde::Serialize;
 use serde_json::Value;
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
+use crate::api::time::format_time;
 use crate::domain::Id;
 use crate::notifications::model::{Notification, NotificationType};
 
@@ -177,14 +177,6 @@ pub struct NotificationJson {
     pub created_at: String,
     pub account: Value,
     pub status: Option<Value>,
-}
-
-/// Renders `when` as an RFC 3339 timestamp string, matching
-/// `accounts/serializer.rs::format_time`'s/`statuses/serializer.rs::format_time`'s
-/// identical convention (Mastodon's own ISO 8601 timestamp shape).
-fn format_time(when: OffsetDateTime) -> String {
-    when.format(&Rfc3339)
-        .expect("a valid OffsetDateTime always formats as RFC 3339")
 }
 
 /// Maps a [`NotificationType`] to Mastodon's own wire string for it

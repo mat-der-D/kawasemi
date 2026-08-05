@@ -41,6 +41,55 @@ clock / id generator / RNG / 署名鍵は具体実装に直接依存させず、
 - 仕様（個別フィーチャー）：`.kiro/specs/`
 - 設計の一次情報：`docs/`（`fediverse-design.md` / `mastodon-api-compat.md` / `mastodon-api-estimate.md`）
 
+## SSoT（一次情報）の所在
+
+**`.kiro/specs/<feature>/spec.json` の `ssot` フィールドで判定する。** spec が常に正しいわけでも、実装が常に正しいわけでもない。フィーチャーのライフサイクル上のどこにいるかで一次情報が移る。
+
+| `ssot` | 状態 | 一次情報 |
+|---|---|---|
+| `"spec"`（またはフィールド不在） | 実装中 | **その spec**。コードは spec に従う。design.md が正であり、コードとの差異はコード側の不足として扱う |
+| `"implementation"` | handoff 済み | **実装**。spec は当時のログ。現状説明として読んではならない |
+
+- **不在時は `"spec"` として扱う**（保守的側）。`/kiro-spec-init` で作られた新規 spec は自動的に正しい状態から始まる。
+- **遷移は `/kiro-validate-impl` の GO でのみ発生する。** 手で書き換えない。GO は requirements カバレッジ・design の Boundary Commitments 整合・フルスイート通過を検査済みであり、「実装と spec に差異がない」ことの確認そのものである。
+- `phase` の完了状態は `"implemented"`。`ready_for_implementation` は spec の承認状態という歴史的事実であり、現在の SSoT を表さない。
+
+### handoff で行うこと（`/kiro-validate-impl` GO 時の 3 点セット）
+
+1. `spec.json` の `ssot` を `"implementation"` に反転し、`handoff` を記録する — **`/kiro-validate-impl` 自身が実行**
+2. 用済みになったトレーサビリティ参照を実装コードから除去する（下記）— **委譲**。独立したコミットとしてレビューする
+3. steering を**コードから**同期する（`/kiro-steering`）— **委譲**。spec や計画から書き下ろさない。そうすると steering 自体が予言＝ログになる
+
+2 と 3 を gate 自身にやらせない理由は、**検証対象を書き換えられる gate は gate ではない**から。`/kiro-validate-impl` の書き込み権限は自身の判定を `spec.json` に記録することだけに限る。GO に到達するためにソースの変更が要ると感じたら、それは GO ではなく NO-GO である。
+
+### handoff 済み spec の再オープン（逆遷移）
+
+`ssot: "implementation"` の spec に対して `/kiro-impl` は停止する。ログである `design.md` に従って動くコードを書き換えてしまうため。優先順位は以下：
+
+1. **新しい機能なら新しい spec を切る**（`/kiro-spec-init`）。ほぼ常にこれが正解。1 spec = 1 回のビルドの記録、という単位を保てる
+2. **そのフィーチャーの設計自体を改める場合のみ再オープン**：`/kiro-spec-design` または `/kiro-spec-tasks` を再実行する。これらが `ssot` を `"spec"` に戻し、既存の `handoff` を `handoff_history` に退避する。再オープンとは「spec が再び実コードより上位に立つ」宣言であり、コマンドを通すためではなく意図してやること
+3. **既存のふるまいを理解・変更したいだけなら** 実装と契約テストを読む。要件とコードの差分分析が要るなら `/kiro-validate-gap`（既存コードベース向けに作られている）
+
+`ssot` を手で書き換えてチェックを迂回しない。迂回した時点で、この protocol が防いでいる状態そのものに戻る。
+
+### コード内コメントの扱い
+
+実装が SSoT である以上、実装ファイルは自分を説明できなければならない。spec ログの残骸を SSoT に混入させない。
+
+| コメント | 扱い |
+|---|---|
+| `task 5.2 で追加` / `task 7.3 までは main.rs にあった` | **除去**（履歴は git の仕事） |
+| `design.md の X コンポーネントに従う` | **除去**（外部文書への従属は SSoT の否定） |
+| `Requirements 1.1 を満たす` | **除去**（ふるまいの根拠は契約テストが持つ） |
+| なぜ generic ではなく boxed future か | **保持**（コードから読み取れない設計判断は SSoT の一部） |
+| なぜこの lint を抑制するか | **保持**（同上） |
+
+トレーサビリティ参照は**実装中は残してよい**（`/kiro-validate-impl` が requirements → implementation 行列を組むのに使う）。除去するのは handoff 時。実装中は足場、handoff 後は負債。
+
+### ふるまいの仕様は契約テストが持つ
+
+requirements.md も handoff 後はログである。ふるまいの一次情報は `src/contract.rs` の golden 契約テスト — 実行可能であり、腐れば落ちるので検証機構が内蔵されている。「requirements.md を読め」ではなく「契約テストを読め」と言える状態を維持する。
+
 ## Naming Conventions
 
 - Rust：標準慣習（モジュール/関数 `snake_case`、型/トレイト `PascalCase`）。

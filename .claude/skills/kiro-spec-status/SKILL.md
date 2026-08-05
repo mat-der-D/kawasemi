@@ -30,6 +30,7 @@ argument-hint: <feature-name>
 - **Design**: Check for architecture, components, diagrams, and whether boundary sections are present
 - **Tasks**: Count completed vs total tasks (parse `- [x]` vs `- [ ]`)
 - **Approvals**: Check approval status in spec.json
+- **SSoT ownership**: Read `ssot` in spec.json (missing counts as `"spec"`). `"spec"` = spec is authoritative, implementation follows it. `"implementation"` = handed off; the code is authoritative and this spec is a log of the original build. When handed off, also read `handoff` and note whether `method` is `"validated"` (passed `/kiro-validate-impl`) or `"retroactive"` (declared without that gate)
 - **Boundary context**:
   - From brief.md: note `Boundary Candidates`, `Upstream / Downstream`, and `Existing Spec Touchpoints` if present
   - From design.md: note `Boundary Commitments`, `Out of Boundary`, `Allowed Dependencies`, and `Revalidation Triggers` if present
@@ -41,7 +42,7 @@ argument-hint: <feature-name>
 ### Step 3: Generate Report
 
 Create report in the language specified in spec.json covering:
-1. **Current Phase & Progress**: Where the spec is in the workflow
+1. **Current Phase & Progress**: Where the spec is in the workflow. **Lead with SSoT ownership** — a handed-off spec's "progress" describes a finished build, not work in flight, and reporting its phase without that context invites someone to resume implementing from a log
 2. **Completion Status**: Percentage complete for each phase
 3. **Task Breakdown**: If tasks exist, show completed/remaining counts
 4. **Boundary Context**: Upstream/downstream, out-of-boundary, and allowed dependency notes when available

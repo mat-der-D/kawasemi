@@ -18,11 +18,14 @@
 //! deterministic `RuntimeContext` (`app.runtime.ids`/`app.runtime.clock`),
 //! never hand-picked literals.
 
+use std::collections::HashMap;
+
 use time::Duration;
 
 use super::{
-    CountKind, adjust_counts, ancestors, apply_edit, count_for_actor, delete_status, descendants,
-    find_visible, insert_status, last_created_at_for_actor, list_by_actor, list_edits,
+    CountKind, adjust_counts, ancestors, apply_edit, attach_media, count_for_actor, delete_status,
+    descendants, find_visible, insert_status, last_created_at_for_actor, list_by_actor, list_edits,
+    media_ids_for_status, media_ids_for_statuses,
 };
 use crate::domain::{Id, Visibility};
 use crate::statuses::model::{Status, StatusEdit};
@@ -863,6 +866,95 @@ async fn last_created_at_for_actor_reflects_the_most_recent_post() {
         .unwrap()
         .expect("an actor with posts has a last_status_at");
     assert_eq!(last, second.created_at);
+
+    app.cleanup().await;
+}
+
+// -- media_ids_for_statuses (task 4.1) ---------------------------------
+
+/// Requirements 5.1/5.4, task 4.1's own completion condition ("単数版を N 回
+/// 呼んだ結果と複数版を 1 回呼んだ結果が一致する"): `media_ids_for_statuses`
+/// returns, for every id, exactly what `media_ids_for_status` returns for
+/// that same id on its own — same `WHERE` scoping, same attachment order,
+/// same treatment of a status with no attachments at all.
+#[tokio::test]
+async fn media_ids_for_statuses_matches_calling_the_singular_version_per_status() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+
+    let with_many = sample_status(&app, actor_id, Visibility::Public, None, None);
+    let with_one = sample_status(&app, actor_id, Visibility::Public, None, None);
+    let without_media = sample_status(&app, actor_id, Visibility::Public, None, None);
+    insert(&app, &with_many).await;
+    insert(&app, &with_one).await;
+    insert(&app, &without_media).await;
+
+    // Deliberately attached in *descending* media-id order, so a plural
+    // implementation that ordered by `media_id` (or left the rows
+    // unordered) could not coincidentally agree with the singular version's
+    // `ORDER BY position`.
+    let media_a = Id::from_i64(9_000);
+    let media_b = Id::from_i64(8_000);
+    let media_c = Id::from_i64(7_000);
+    attach_media(&app.pool, with_many.id, &[media_a, media_b, media_c])
+        .await
+        .expect("attach_media must succeed");
+    attach_media(&app.pool, with_one.id, &[media_b])
+        .await
+        .expect("attach_media must succeed");
+
+    // A status id nothing was ever attached to *and* that no `statuses` row
+    // exists for: the plural version must handle it exactly like the
+    // singular one does (no entry, not an error).
+    let unknown = Id::from_i64(i64::MAX - 11);
+    let ids = [with_many.id, with_one.id, without_media.id, unknown];
+
+    let mut per_call: HashMap<Id, Vec<Id>> = HashMap::new();
+    for &status_id in &ids {
+        let singular = media_ids_for_status(&app.pool, status_id)
+            .await
+            .expect("media_ids_for_status must succeed");
+        if !singular.is_empty() {
+            per_call.insert(status_id, singular);
+        }
+    }
+
+    let batched = media_ids_for_statuses(&app.pool, &ids)
+        .await
+        .expect("media_ids_for_statuses must succeed");
+    assert_eq!(
+        batched, per_call,
+        "one batched call must agree with N singular calls"
+    );
+
+    // Spelled out too, so the comparison above cannot pass vacuously if
+    // both sides were to degrade the same way.
+    assert_eq!(
+        batched.get(&with_many.id),
+        Some(&vec![media_a, media_b, media_c]),
+        "attachment order (position), not media-id order, must be preserved"
+    );
+    assert_eq!(batched.get(&with_one.id), Some(&vec![media_b]));
+    assert_eq!(batched.get(&without_media.id), None);
+    assert_eq!(batched.get(&unknown), None);
+
+    app.cleanup().await;
+}
+
+/// Task 4.1's precondition: an empty `status_ids` returns an empty map
+/// *without issuing a query*. Closing the pool first is what makes that
+/// second half observable — every statement against a closed `PgPool` fails
+/// with `sqlx::Error::PoolClosed`, so an `Ok` here can only mean the
+/// function short-circuited before touching the database.
+#[tokio::test]
+async fn media_ids_for_statuses_returns_empty_for_an_empty_slice_without_querying() {
+    let app = spawn_test_app().await;
+    app.pool.close().await;
+
+    let batched = media_ids_for_statuses(&app.pool, &[])
+        .await
+        .expect("an empty slice must succeed even against a closed pool");
+    assert!(batched.is_empty());
 
     app.cleanup().await;
 }

@@ -108,6 +108,7 @@ Before writing `tasks.md`, run one lightweight independent sanity review of the 
   - Set `approvals.requirements.approved: true`
   - Set `approvals.design.approved: true`
   - Update `updated_at` timestamp
+  - **If `ssot` was `"implementation"`** (this spec had been handed off): set `ssot: "spec"` and move the existing `handoff` object into a `handoff_history` array. Regenerating tasks re-opens the spec, so `/kiro-impl` will run against it again. Say so explicitly in the output — the user is re-asserting the spec over working code, and should know that is what just happened.
 
 **Approval**:
 - If auto-approve flag (`-y`) is true:

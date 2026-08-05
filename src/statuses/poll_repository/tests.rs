@@ -9,14 +9,20 @@
 //! (`polls.status_id` carries a real FK to `statuses(id)`, so a genuine
 //! target status row is required).
 
+use std::collections::HashMap;
+
 use time::Duration;
 
 use crate::domain::{Id, Visibility};
+use crate::error::ErrorTag;
 use crate::statuses::model::{Poll, PollOption, Status};
 use crate::statuses::status_repository::insert_status;
 use crate::test_harness::{TestApp, spawn_test_app};
 
-use super::{VoteOutcome, insert_poll, record_vote, tally};
+use super::{
+    PollTally, VoteOutcome, find_poll_by_id, find_polls_by_ids, insert_poll, record_vote, tally,
+    tally_many,
+};
 
 /// A small, deliberate duplicate of `status_repository/tests.rs`'s own
 /// `sample_status` helper (private to its own module, not visible here) —
@@ -88,6 +94,43 @@ async fn insert_target_poll(
         .collect();
 
     insert_poll(&app.pool, &poll, &options)
+        .await
+        .expect("insert_poll must succeed for a fresh poll");
+
+    poll
+}
+
+/// Like [`insert_target_poll`], but takes explicit `(idx, title)` pairs **in
+/// the order they are to be inserted** rather than deriving `idx` from that
+/// order. Task 4.4's batched `tally_many` has to preserve each poll's option
+/// order exactly as `tally` does (`ORDER BY idx`), and that can only be
+/// detected when `idx` order, physical insertion order, and title
+/// alphabetical order all disagree, which is what this helper makes
+/// expressible.
+async fn insert_target_poll_with_options(
+    app: &TestApp,
+    actor_id: Id,
+    options: &[(i32, &str)],
+    multiple: bool,
+) -> Poll {
+    let status = insert_target_status(app, actor_id).await;
+    let poll = Poll {
+        id: app.runtime.ids.next_id(),
+        status_id: status.id,
+        expires_at: None,
+        multiple,
+    };
+    let rows: Vec<PollOption> = options
+        .iter()
+        .map(|(idx, title)| PollOption {
+            poll_id: poll.id,
+            idx: *idx,
+            title: (*title).to_string(),
+            votes_count: 0,
+        })
+        .collect();
+
+    insert_poll(&app.pool, &poll, &rows)
         .await
         .expect("insert_poll must succeed for a fresh poll");
 
@@ -260,6 +303,11 @@ async fn record_vote_rejects_when_now_equals_expires_at() {
         .await
         .expect_err("vote exactly at the deadline must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        err.tag, None,
+        "a closed poll is a genuine client error, not the already-applied case \
+         the inbound handler treats as idempotent"
+    );
 
     app.cleanup().await;
 }
@@ -294,6 +342,11 @@ async fn record_vote_rejects_out_of_range_choice_index() {
         .await
         .expect_err("an out-of-range option index must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        err.tag, None,
+        "an out-of-range choice is a genuine client error, not the \
+         already-applied case the inbound handler treats as idempotent"
+    );
 
     let result = tally(&app.pool, poll.id, None)
         .await
@@ -332,6 +385,11 @@ async fn record_vote_rejects_multiple_choices_on_a_single_choice_poll() {
         .await
         .expect_err("multiple choices on a single-choice poll must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        err.tag, None,
+        "a single-vs-multiple violation is a genuine client error, not the \
+         already-applied case the inbound handler treats as idempotent"
+    );
 
     let result = tally(&app.pool, poll.id, None)
         .await
@@ -380,6 +438,15 @@ async fn record_vote_rejects_a_duplicate_vote_by_the_same_actor() {
         .await
         .expect_err("a resubmitted vote by the same actor must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        err.public_message, "actor has already voted in this poll",
+        "the wire-visible wording is part of the API contract and must not drift"
+    );
+    assert_eq!(
+        err.tag,
+        Some(ErrorTag::DuplicateVote),
+        "the duplicate-vote rejection must be recognizable by tag, not by message text"
+    );
 
     let result = tally(&app.pool, poll.id, None)
         .await
@@ -556,6 +623,321 @@ async fn record_vote_serializes_concurrent_votes_by_the_same_actor() {
     assert_eq!(
         result.voters_count, 1,
         "exactly one distinct voter must be recorded"
+    );
+
+    app.cleanup().await;
+}
+
+// -- batched poll reads (structural-refactor task 4.4) ---------------------
+
+/// The fixture task 4.4's `tally_many` comparison test builds: polls whose
+/// option order, vote pattern, and viewer dimension are all arranged so that
+/// a batched implementation cannot agree with the singular one by accident.
+struct BatchFixture {
+    viewer: Id,
+    other_actor: Id,
+    /// Multiple-choice, options inserted out of `idx` order.
+    ordered: Poll,
+    /// Single-choice, voted differently by each of the two actors.
+    single: Poll,
+    /// Exists, has options, nobody voted in it.
+    quiet: Poll,
+    /// Exists, has no `poll_options` rows at all.
+    optionless: Poll,
+    /// Matches no `polls` row.
+    unknown: Id,
+    ids: Vec<Id>,
+}
+
+async fn batch_fixture(app: &TestApp) -> BatchFixture {
+    let owner = app.runtime.ids.next_id();
+    let viewer = app.runtime.ids.next_id();
+    let other_actor = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+
+    // Inserted as idx 2, 0, 3, 1, with titles whose alphabetical order is the
+    // reverse of their idx order: neither the physical row order (what
+    // dropping `ORDER BY idx` surfaces) nor an `ORDER BY title` can
+    // coincidentally agree with the `ORDER BY idx` the singular `tally`
+    // promises.
+    let ordered = insert_target_poll_with_options(
+        app,
+        owner,
+        &[(2, "delta"), (0, "zulu"), (3, "alpha"), (1, "mike")],
+        true,
+    )
+    .await;
+    let single = insert_target_poll_with_options(app, owner, &[(0, "Yes"), (1, "No")], false).await;
+    let quiet = insert_target_poll_with_options(app, owner, &[(0, "Yes"), (1, "No")], false).await;
+    let optionless = insert_target_poll_with_options(app, owner, &[], false).await;
+
+    // `viewer` casts a genuine multiple-choice ballot (two `poll_votes` rows
+    // for one voter) and `other_actor` a single one: three rows, two distinct
+    // voters, so a `voters_count` that lost its `DISTINCT` — or that a join
+    // inflated — reads 3 rather than 2.
+    record_vote(&app.pool, ordered.id, viewer, &[0, 2], now)
+        .await
+        .expect("viewer's multi-choice vote must succeed");
+    record_vote(&app.pool, ordered.id, other_actor, &[1], now)
+        .await
+        .expect("other_actor's vote must succeed");
+    record_vote(&app.pool, single.id, viewer, &[1], now)
+        .await
+        .expect("viewer's vote must succeed");
+    record_vote(&app.pool, single.id, other_actor, &[0], now)
+        .await
+        .expect("other_actor's vote must succeed");
+
+    let unknown = Id::from_i64(i64::MAX - 23);
+    let ids = vec![ordered.id, single.id, quiet.id, optionless.id, unknown];
+
+    BatchFixture {
+        viewer,
+        other_actor,
+        ordered,
+        single,
+        quiet,
+        optionless,
+        unknown,
+        ids,
+    }
+}
+
+/// Calls the singular [`tally`] once per id, collecting what it returns.
+/// A poll that does not exist is a `404` from the singular version rather
+/// than a value, which is exactly the "no row -> key absent" shape the
+/// batched version reports — so it contributes no entry here.
+async fn tallies_per_call(app: &TestApp, ids: &[Id], viewer: Option<Id>) -> HashMap<Id, PollTally> {
+    let mut per_call: HashMap<Id, PollTally> = HashMap::new();
+    for &poll_id in ids {
+        match tally(&app.pool, poll_id, viewer).await {
+            Ok(result) => {
+                per_call.insert(poll_id, result);
+            }
+            Err(err) => assert_eq!(
+                err.status,
+                axum::http::StatusCode::NOT_FOUND,
+                "the only tolerated singular failure here is the nonexistent poll"
+            ),
+        }
+    }
+    per_call
+}
+
+/// Requirement 5.1, task 4.4's own completion condition ("単数版 N 回 ==
+/// 複数版 1 回"): `find_polls_by_ids` returns, for every id, exactly what
+/// `find_poll_by_id` returns for that same id on its own — same `WHERE`
+/// scoping, same treatment of an id matching no row.
+#[tokio::test]
+async fn find_polls_by_ids_matches_calling_the_singular_version_per_poll() {
+    let app = spawn_test_app().await;
+    let owner = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+
+    // Deliberately varied along both of a `polls` row's own dimensions
+    // (`multiple`, `expires_at`), so a batched read that dropped or
+    // transposed a column could not agree with the singular one.
+    let open = insert_target_poll(&app, owner, &["Yes", "No"], false, None).await;
+    let multiple = insert_target_poll(&app, owner, &["Pizza", "Sushi"], true, None).await;
+    let expiring = insert_target_poll(
+        &app,
+        owner,
+        &["Yes"],
+        false,
+        Some(now + Duration::seconds(600)),
+    )
+    .await;
+    let unknown = Id::from_i64(i64::MAX - 23);
+    let ids = [open.id, multiple.id, expiring.id, unknown];
+
+    let mut per_call: HashMap<Id, Poll> = HashMap::new();
+    for &poll_id in &ids {
+        let singular = find_poll_by_id(&app.pool, poll_id)
+            .await
+            .expect("find_poll_by_id must succeed");
+        if let Some(poll) = singular {
+            per_call.insert(poll_id, poll);
+        }
+    }
+
+    let batched = find_polls_by_ids(&app.pool, &ids)
+        .await
+        .expect("find_polls_by_ids must succeed");
+    assert_eq!(
+        batched, per_call,
+        "one batched call must agree with N singular calls"
+    );
+
+    // Spelled out too, so the comparison above cannot pass vacuously if both
+    // sides were to degrade the same way.
+    assert_eq!(batched.get(&open.id), Some(&open));
+    assert_eq!(batched.get(&multiple.id), Some(&multiple));
+    assert_eq!(batched.get(&expiring.id), Some(&expiring));
+    assert_eq!(
+        batched.get(&unknown),
+        None,
+        "an id matching no `polls` row is absent from the map, not an error"
+    );
+
+    app.cleanup().await;
+}
+
+/// Requirement 5.1, task 4.4's own completion condition, for the aggregate
+/// half: `tally_many` returns, for every id and for every shape of `viewer`,
+/// exactly what `tally` returns for that same id on its own — same option
+/// order, same per-option counts, same `voters_count`, same `own_votes`.
+#[tokio::test]
+async fn tally_many_matches_calling_the_singular_version_per_poll() {
+    let app = spawn_test_app().await;
+    let fixture = batch_fixture(&app).await;
+
+    // All three viewer shapes, because `own_votes` is the one part of a
+    // tally that moves with the viewer: a batched query that dropped its
+    // `actor_id` predicate would still agree with the singular version for
+    // whichever single viewer happened to be tested alone.
+    for viewer in [Some(fixture.viewer), Some(fixture.other_actor), None] {
+        let per_call = tallies_per_call(&app, &fixture.ids, viewer).await;
+        let batched = tally_many(&app.pool, &fixture.ids, viewer)
+            .await
+            .expect("tally_many must succeed");
+        assert_eq!(
+            batched, per_call,
+            "one batched call must agree with N singular calls (viewer = {viewer:?})"
+        );
+        assert_eq!(
+            batched.get(&fixture.unknown),
+            None,
+            "an id matching no `polls` row is absent from the map, not an error"
+        );
+    }
+
+    // Spelled out too, so the comparisons above cannot pass vacuously if both
+    // sides were to degrade the same way.
+    let mine = tally_many(&app.pool, &fixture.ids, Some(fixture.viewer))
+        .await
+        .expect("tally_many must succeed");
+    let theirs = tally_many(&app.pool, &fixture.ids, Some(fixture.other_actor))
+        .await
+        .expect("tally_many must succeed");
+    let anonymous = tally_many(&app.pool, &fixture.ids, None)
+        .await
+        .expect("tally_many must succeed");
+
+    let ordered = mine
+        .get(&fixture.ordered.id)
+        .expect("the multiple-choice poll must be present");
+    assert_eq!(
+        ordered
+            .options
+            .iter()
+            .map(|option| (option.idx, option.title.as_str(), option.votes_count))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, "zulu", 1),
+            (1, "mike", 1),
+            (2, "delta", 1),
+            (3, "alpha", 0)
+        ],
+        "options must come back in `idx` order — not insertion or title order — \
+         each carrying its own real count"
+    );
+    assert_eq!(
+        ordered.voters_count, 2,
+        "three ballots cast by two distinct actors: a non-DISTINCT or \
+         join-inflated count would read 3"
+    );
+    assert_eq!(
+        ordered.own_votes,
+        vec![0, 2],
+        "a multiple-choice voter's own selections, ascending"
+    );
+
+    let ordered_theirs = theirs
+        .get(&fixture.ordered.id)
+        .expect("the multiple-choice poll must be present for the other viewer too");
+    assert_eq!(
+        ordered_theirs.own_votes,
+        vec![1],
+        "a different viewer must yield a different voted set, not the first viewer's"
+    );
+    assert_eq!(
+        ordered_theirs.options, ordered.options,
+        "the aggregate half of a tally must not move with the viewer"
+    );
+
+    let ordered_anonymous = anonymous
+        .get(&fixture.ordered.id)
+        .expect("the multiple-choice poll must be present without a viewer too");
+    assert!(
+        ordered_anonymous.own_votes.is_empty(),
+        "no viewer means no own votes"
+    );
+    assert_eq!(ordered_anonymous.voters_count, 2);
+
+    assert_eq!(
+        mine.get(&fixture.single.id)
+            .expect("the single-choice poll must be present")
+            .own_votes,
+        vec![1]
+    );
+    assert_eq!(
+        theirs
+            .get(&fixture.single.id)
+            .expect("the single-choice poll must be present")
+            .own_votes,
+        vec![0],
+        "each viewer's own selection on the single-choice poll differs"
+    );
+
+    let quiet = mine
+        .get(&fixture.quiet.id)
+        .expect("a poll nobody voted in must still be present");
+    assert_eq!(quiet.voters_count, 0);
+    assert!(quiet.own_votes.is_empty());
+    assert_eq!(quiet.options.len(), 2);
+    assert!(quiet.options.iter().all(|option| option.votes_count == 0));
+
+    let optionless = mine.get(&fixture.optionless.id).expect(
+        "an existing poll with no options must still be present — the map is \
+         keyed off `polls`, not off option rows",
+    );
+    assert!(optionless.options.is_empty());
+    assert_eq!(optionless.voters_count, 0);
+
+    app.cleanup().await;
+}
+
+/// Task 4.4's precondition, for both functions at once: an empty `poll_ids`
+/// returns an empty map *without issuing a query*. Closing the pool first is
+/// what makes that second half observable — every statement against a closed
+/// `PgPool` fails with `sqlx::Error::PoolClosed`, so an `Ok` here can only
+/// mean the function short-circuited before touching the database. Both
+/// share one closed pool rather than one test app each (task 4.3's
+/// precedent): the assertion is identical and a test app is the scarce
+/// resource, since each holds its own connection pool.
+#[tokio::test]
+async fn batched_poll_reads_return_empty_for_an_empty_slice_without_querying() {
+    let app = spawn_test_app().await;
+    let viewer = app.runtime.ids.next_id();
+    app.pool.close().await;
+
+    assert!(
+        find_polls_by_ids(&app.pool, &[])
+            .await
+            .expect("an empty slice must succeed even against a closed pool")
+            .is_empty()
+    );
+    assert!(
+        tally_many(&app.pool, &[], Some(viewer))
+            .await
+            .expect("an empty slice must succeed even against a closed pool")
+            .is_empty()
+    );
+    assert!(
+        tally_many(&app.pool, &[], None)
+            .await
+            .expect("an empty slice must succeed even against a closed pool")
+            .is_empty()
     );
 
     app.cleanup().await;

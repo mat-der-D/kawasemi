@@ -63,7 +63,9 @@ If `$ARGUMENTS` names a feature explicitly, use it — but still run the eligibi
 
 1. Read `.kiro/steering/roadmap.md`, section "Specs (dependency order)" — this is the topologically-sorted Phase 1 list, each entry with a `Dependencies:` line.
 2. For each spec in that order, compute completeness from `.kiro/specs/<name>/tasks.md`: complete iff there are zero remaining `- [ ] <n>.<m>` actionable lines (a spec with unresolved `_Blocked:_` tasks still pending is NOT complete).
-3. A spec is **eligible** iff: it is not yet complete, `.kiro/specs/<name>/spec.json` has `"ready_for_implementation": true`, and every spec named in its `Dependencies:` is complete per step 2.
+3. A spec is **eligible** iff: it is not yet complete, `.kiro/specs/<name>/spec.json` has `"ready_for_implementation": true`, `spec.json`'s `ssot` is **not** `"implementation"` (missing field counts as `"spec"`), and every spec named in its `Dependencies:` is complete per step 2.
+
+   `ssot: "implementation"` means the spec was handed off and the code is now the source of truth — `design.md` is a log of the original build. Such a spec is ineligible even if new `- [ ] <n>.<m>` lines have appeared in its `tasks.md`, because implementing them would drive working code back toward a superseded design. `ready_for_implementation` does **not** override this: it records the spec's historical approval, not its current authority. This loop runs unattended and pushes directly to `agent`, so never re-open a handed-off spec on its own initiative — report it and let a human decide (`/kiro-spec-init` for new work, or a deliberate re-open).
 4. Pick the **first** eligible spec in roadmap order. That is the feature for this run.
 5. If no Phase 1 spec is eligible, check "Future Phases" entries that already have a `.kiro/specs/<name>/` directory (meaning a spec was created since roadmap.md was written) and repeat 2-4 over those.
 6. If nothing is eligible anywhere (all complete, or the next one has no spec directory yet — spec creation is out of scope for this skill), STOP: report that implementation is caught up and, if applicable, which spec needs `/kiro-spec-init` next. Skip to Step 6.

@@ -23,6 +23,18 @@
 //!   minimal test-only router driven with `tower::ServiceExt::oneshot`;
 //!   wiring it into the live production router is task 7.1's job.
 
+//! - Boilerplate that every feature module was otherwise reimplementing at
+//!   its own boundary: query-parameter interpretation ([`query`]),
+//!   timestamp formatting ([`time`]), the standard database-error
+//!   conversion ([`db`]), and request-free origin resolution ([`origin`]).
+//!   These carry no domain knowledge — they exist so that "how this API
+//!   reads a `limit`" or "how this API renders a timestamp" is a fact with
+//!   one definition rather than a convention with N copies.
+
+pub mod db;
 pub mod error;
+pub mod origin;
 pub mod pagination;
+pub mod query;
 pub mod ratelimit;
+pub mod time;

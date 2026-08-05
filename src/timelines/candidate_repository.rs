@@ -94,24 +94,15 @@
 //! Implementation Notes / this task's CONCERNS for why that duplication is
 //! expected here, not a violation of "条件の二重定義禁止").
 
-use axum::http::StatusCode;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use time::OffsetDateTime;
 
+use crate::api::db::map_server_error;
 use crate::domain::{Id, Visibility};
 use crate::error::AppError;
 use crate::statuses::model::Status;
 
 use super::model::{TagFilter, TimelineKind, TimelineQuerySpec};
-
-/// Maps a raw `sqlx::Error` the same way
-/// `crate::statuses::status_repository::map_server_error` does (mirrored
-/// here, not imported — that function is private to its own module): every
-/// failure from this read-only repository is a 5xx `AppError`, never a new
-/// error type (steering: エラーは `AppError` に集約).
-fn map_server_error(source: sqlx::Error) -> AppError {
-    AppError::server(StatusCode::INTERNAL_SERVER_ERROR, source)
-}
 
 /// Reconstructs a [`Visibility`] from an already-persisted
 /// `statuses.visibility` column value — mirrors

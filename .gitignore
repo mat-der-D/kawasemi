@@ -1,2 +1,4 @@
 /target
-/.claude/hooks/.cargo-lint-stop.lock
+# Stop hook の flock 用ロックファイル。並行するサブエージェントの Stop イベントが
+# 共有の target ディレクトリを奪い合わないよう直列化するためのもので、内容は空。
+/.claude/hooks/*.lock
