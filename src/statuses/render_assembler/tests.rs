@@ -26,6 +26,7 @@ use crate::statuses::model::{PollOption, Tag};
 use crate::statuses::poll_repository::{find_poll_by_id, insert_poll, tally};
 use crate::statuses::status_repository::{attach_media, insert_status};
 use crate::statuses::tag_repository::{associate_tag, upsert_tag};
+use crate::test_harness::query_log::{QueryKind, QueryLog, record_queries};
 use crate::test_harness::{TestApp, spawn_test_app};
 
 // -- fixtures ---------------------------------------------------------------
@@ -920,6 +921,144 @@ async fn an_unauthenticated_batch_reports_no_interactions_but_still_mutes() {
     assert_eq!(rendered[0]["pinned"], serde_json::json!(false));
     assert_eq!(rendered[0]["reblogged"], serde_json::json!(false));
     assert_eq!(rendered[0]["muted"], serde_json::json!(true));
+
+    app.cleanup().await;
+}
+
+// -- author resolution (Requirements 5.2, 5.3; task 4.6) --------------------
+
+/// Inserts `count` statuses whose authors cycle through `authors`, so that a
+/// list of a fixed length can be built with any number of distinct authors
+/// in it.
+async fn statuses_by(app: &TestApp, authors: &[Id], count: usize) -> Vec<Status> {
+    let mut out = Vec::with_capacity(count);
+    for nth in 0..count {
+        out.push(create_test_status(app, authors[nth % authors.len()], "hello").await);
+    }
+    out
+}
+
+/// Assembles `statuses` (none of them boosts) and hands back what it cost.
+async fn measure(app: &TestApp, statuses: &[Status], ctx: &RenderContext<'_>) -> QueryLog {
+    let no_reblogs = vec![None; statuses.len()];
+    let (rendered, log) = record_queries(
+        &app.pool,
+        assembler(app).assemble_many(statuses, &no_reblogs, ctx),
+    )
+    .await;
+    assert_eq!(
+        rendered.expect("assembling must succeed").len(),
+        statuses.len(),
+        "every status in the list must render"
+    );
+    log
+}
+
+/// Requirements 5.2 and 5.3, measured: the number of account-resolution
+/// queries a call issues tracks the number of **distinct authors** in the
+/// list, and not the number of statuses.
+///
+/// Nothing here is compared against a literal query count. The cost of
+/// resolving one author is *derived*, from the one list whose resolution
+/// count is not in question — a single status by a single author, which
+/// resolves exactly one author however the assembler is written — and every
+/// other assertion is stated in terms of that derived unit. So the test
+/// keeps meaning what it says if `AccountService::show_account` ever grows
+/// or loses a query of its own, and it still fails the moment the
+/// memoization in `resolve_materials` stops collapsing repeat authors.
+///
+/// The list carries no polls, so the injected [`PollResolver`] is never
+/// consulted — asserted, not assumed — and the counts below are the
+/// assembler's own rather than partly a test double's.
+#[tokio::test]
+async fn author_resolution_tracks_distinct_authors_and_not_list_length() {
+    let app = spawn_test_app().await;
+    let viewer = create_test_actor(&app, "authorscale_viewer").await;
+    let mut authors = Vec::with_capacity(20);
+    for nth in 0..20 {
+        authors.push(create_test_actor(&app, &format!("authorscale_{nth}")).await);
+    }
+
+    let polls = TolerantPolls(app.pool.clone());
+    let origin = origin();
+    let ctx = RenderContext {
+        viewer: Some(viewer),
+        now: app.runtime.clock.now(),
+        origin: &origin,
+        muted: None,
+        polls: &polls,
+    };
+
+    let one_author_one_status =
+        measure(&app, &statuses_by(&app, &authors[..1], 1).await, &ctx).await;
+    let one_author = measure(&app, &statuses_by(&app, &authors[..1], 20).await, &ctx).await;
+    let two_authors = measure(&app, &statuses_by(&app, &authors[..2], 20).await, &ctx).await;
+    let twenty_authors = measure(&app, &statuses_by(&app, &authors[..20], 20).await, &ctx).await;
+
+    let resolutions = |log: &QueryLog| log.count(QueryKind::AccountResolution);
+
+    // One status by one author resolves one author — the unit every other
+    // count below is expressed in.
+    let per_author = resolutions(&one_author_one_status);
+    assert!(
+        per_author > 0,
+        "resolving an author must cost at least one query, or this test could \
+         not tell memoization from a no-op.\nobserved: {:#?}",
+        one_author_one_status.per_statement(),
+    );
+
+    // Requirement 5.2: twenty statuses sharing one author resolve them once
+    // — the same cost as a single status by them.
+    assert_eq!(
+        resolutions(&one_author),
+        per_author,
+        "twenty statuses by one author must resolve that author exactly once, \
+         at the cost of {per_author} queries, not {}.\nobserved: {:#?}",
+        resolutions(&one_author),
+        one_author.per_statement(),
+    );
+
+    // Requirement 5.3: K distinct authors cost K resolutions — at K = 2 and
+    // at K = N, where "proportional to K" and "proportional to N" would
+    // otherwise be indistinguishable.
+    assert_eq!(
+        resolutions(&two_authors),
+        2 * per_author,
+        "twenty statuses by two authors must resolve two authors.\nobserved: {:#?}",
+        two_authors.per_statement(),
+    );
+    assert_eq!(
+        resolutions(&twenty_authors),
+        20 * per_author,
+        "twenty statuses by twenty authors must resolve twenty authors, no more.\n\
+         observed: {:#?}",
+        twenty_authors.per_statement(),
+    );
+
+    // The materials Requirement 5.1 enumerates are unchanged by any of it:
+    // same list length, same author count, same everything.
+    one_author_one_status.require_kinds(&[
+        QueryKind::Media,
+        QueryKind::Tags,
+        QueryKind::Interaction,
+    ]);
+    for kind in [QueryKind::Media, QueryKind::Tags, QueryKind::Interaction] {
+        assert_eq!(
+            one_author_one_status.count(kind),
+            one_author.count(kind),
+            "{kind:?} queries must not depend on the list's length"
+        );
+        assert_eq!(
+            one_author.count(kind),
+            twenty_authors.count(kind),
+            "{kind:?} queries must not depend on the author count either"
+        );
+    }
+    assert_eq!(
+        twenty_authors.count(QueryKind::Poll) + twenty_authors.count(QueryKind::PollPerPoll),
+        0,
+        "a poll-less list must not consult the injected resolver at all"
+    );
 
     app.cleanup().await;
 }

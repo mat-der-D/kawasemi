@@ -29,9 +29,13 @@ use crate::actor::repository::insert_actor;
 use crate::actor::{ActorState, ActorType, Handle};
 use crate::api::pagination::PageParams;
 use crate::domain::Visibility;
+use crate::media::media_repository::insert_media;
+use crate::media::model::{Focus, Media, MediaState, MediaType};
+use crate::media::store::ObjectKey;
 use crate::statuses::model::{Poll, PollOption, Tag};
 use crate::statuses::poll_repository::PollTally;
 use crate::statuses::tag_repository::{associate_tag, upsert_tag};
+use crate::test_harness::query_log::{QueryKind, record_queries};
 use crate::test_harness::{TestApp, spawn_test_app};
 
 fn sample_status(app: &TestApp, actor_id: Id) -> Status {
@@ -594,6 +598,284 @@ async fn list_statuses_keeps_every_rendered_material_and_order() {
                 "reblog": Value::Null,
             }),
         ]
+    );
+
+    app.cleanup().await;
+}
+
+// -- query counts (Requirement 5.1; task 4.6) ------------------------------
+//
+// This section, together with `render_assembler/tests.rs`'s own query-count
+// test, is where this spec's query counts are *recorded* — measured rather
+// than written down. `tasks.md`'s prose tally of what one page costs drifted
+// twice while task 4.5 was in progress, so no number below is asserted
+// against a literal: each test compares one measured run against another.
+//
+// `list_statuses` is measured rather than `assemble_many` alone because the
+// per-status loop task 4.5 removed lived *here*, at the caller
+// (`account_provider.rs:361` before the change), not inside the assembler.
+// A test that only measured the assembler would stay green with the loop put
+// back around it.
+
+/// Inserts a ready `media` row owned by `actor_id` and hands back its id.
+/// No bytes are stored: rendering an attachment derives its URLs from the id
+/// alone, so the row is the whole fixture.
+async fn seed_media(app: &TestApp, actor_id: Id) -> Id {
+    let media_id = app.runtime.ids.next_id();
+    insert_media(
+        &app.pool,
+        &Media {
+            id: media_id,
+            actor_id,
+            media_type: MediaType::Image,
+            state: MediaState::Ready,
+            description: Some("an attachment".to_string()),
+            focus: Focus::default(),
+            meta: None,
+            blurhash: None,
+            created_at: app.runtime.clock.now(),
+        },
+        ObjectKey::original(media_id).as_str(),
+        "image/png",
+    )
+    .await
+    .expect("insert_media must succeed");
+    media_id
+}
+
+/// Seeds one status carrying **every** material Requirement 5.1 enumerates,
+/// so that a page of these exercises all five lookups at once: an
+/// attachment (media), a hashtag (tags), two shortcodes in its content plus
+/// a third in a poll option title (emoji), a poll, and the viewer's own
+/// favourite/bookmark/pin (interaction state).
+///
+/// All of them on every status rather than spread across the page: the
+/// question these tests ask is whether the *number of lookups* changes with
+/// the page's length, and a material present on only some statuses would let
+/// a per-status implementation pass by having fewer of them to do.
+async fn seed_rich_status(app: &TestApp, author: Id, viewer: Id) -> Id {
+    let poll_id = app.runtime.ids.next_id();
+    let status = Status {
+        content: "lunch :zulu: or :alpha:?".to_string(),
+        poll_id: Some(poll_id),
+        ..sample_status(app, author)
+    };
+    let status_id = insert(app, &status).await;
+
+    poll_repository::insert_poll(
+        &app.pool,
+        &Poll {
+            id: poll_id,
+            status_id,
+            expires_at: None,
+            multiple: false,
+        },
+        &[
+            PollOption {
+                poll_id,
+                idx: 0,
+                title: "curry :yes:".to_string(),
+                votes_count: 0,
+            },
+            PollOption {
+                poll_id,
+                idx: 1,
+                title: "ramen".to_string(),
+                votes_count: 0,
+            },
+        ],
+    )
+    .await
+    .expect("insert_poll must succeed");
+
+    attach_tag(app, status_id, "lunch").await;
+
+    let media_id = seed_media(app, author).await;
+    status_repository::attach_media(&app.pool, status_id, &[media_id])
+        .await
+        .expect("attach_media must succeed");
+
+    let now = app.runtime.clock.now();
+    interaction_repository::add_favourite(&app.pool, viewer, status_id, now)
+        .await
+        .expect("add_favourite must succeed");
+    interaction_repository::add_bookmark(
+        &app.pool,
+        app.runtime.ids.next_id(),
+        viewer,
+        status_id,
+        now,
+    )
+    .await
+    .expect("add_bookmark must succeed");
+    interaction_repository::set_pin(&app.pool, viewer, status_id, true, now)
+        .await
+        .expect("set_pin must succeed");
+
+    status_id
+}
+
+/// The kinds Requirement 5.1 enumerates — "メディア・タグ・絵文字・
+/// インタラクション状態・投票".
+const ANCILLARY_KINDS: [QueryKind; 5] = [
+    QueryKind::Media,
+    QueryKind::Tags,
+    QueryKind::Emoji,
+    QueryKind::Interaction,
+    QueryKind::Poll,
+];
+
+/// Requirement 5.1, measured: a twenty-status page issues exactly as many
+/// media / tag / emoji / interaction-state / poll queries as a one-status
+/// page.
+///
+/// Both pages are rendered by the same provider against the same seeded
+/// materials, so the only difference between the two measurements is how
+/// many statuses reached the assembler. Each kind is additionally required
+/// to be non-zero on the one-status run ([`QueryLog::require_kinds`]): a
+/// page with no polls in it would have equal poll counts on both sides
+/// forever, batched or not.
+///
+/// This is the test that goes red if `render_page`'s single
+/// `assemble_many` call becomes a loop again, or if any of the assembler's
+/// batch lookups is put back inside its render pass.
+#[tokio::test]
+async fn a_page_costs_the_same_ancillary_queries_at_one_status_and_at_twenty() {
+    let app = spawn_test_app().await;
+    let author = create_test_actor(&app, "querycount_author").await;
+    let viewer = create_test_actor(&app, "querycount_viewer").await;
+    for shortcode in ["alpha", "zulu", "yes"] {
+        seed_custom_emoji(&app, shortcode).await;
+    }
+
+    let provider = build_provider(&app);
+    let query = unfiltered_query(author, Some(viewer));
+
+    seed_rich_status(&app, author, viewer).await;
+    let (one, one_log) = record_queries(&app.pool, provider.list_statuses(&query)).await;
+    let one = one.expect("listing a one-status page must succeed");
+    assert_eq!(one.items.len(), 1, "the fixture must render one status");
+
+    // Nineteen more, i.e. exactly one default-limit page (`DEFAULT_LIMIT`
+    // is 20), so nothing is left to a second page.
+    for _ in 0..19 {
+        seed_rich_status(&app, author, viewer).await;
+    }
+    let (twenty, twenty_log) = record_queries(&app.pool, provider.list_statuses(&query)).await;
+    let twenty = twenty.expect("listing a twenty-status page must succeed");
+    assert_eq!(twenty.items.len(), 20, "the fixture must render twenty");
+
+    one_log.require_kinds(&ANCILLARY_KINDS);
+    for kind in ANCILLARY_KINDS {
+        assert_eq!(
+            one_log.count(kind),
+            twenty_log.count(kind),
+            "{kind:?} queries must not depend on the page's length, but a \
+             1-status page issued {} and a 20-status page issued {}.\n\
+             1-status page: {:#?}\n20-status page: {:#?}",
+            one_log.count(kind),
+            twenty_log.count(kind),
+            one_log.per_statement(),
+            twenty_log.per_statement(),
+        );
+    }
+
+    // The author is the same on both pages, so their resolution must not
+    // have grown either (Requirement 5.2, measured end-to-end here and
+    // isolated in `render_assembler/tests.rs`).
+    assert_eq!(
+        one_log.count(QueryKind::AccountResolution),
+        twenty_log.count(QueryKind::AccountResolution),
+        "twenty statuses by one author must resolve that author as many \
+         times as one status by them does"
+    );
+
+    // Not one of the materials Requirement 5.1 enumerates, but measured here
+    // rather than left unsaid: `visible_to` resolves the viewer's
+    // relationship to the author once per *candidate*, so this path's total
+    // query count does still grow with how many statuses the author has.
+    // design.md's `Status 一覧の組み立て` flow leaves that judgment with the
+    // caller ("ブースト先の解決と可視性判定は**呼び出し元に残る**"), and it
+    // decides which statuses reach the page rather than what a page's
+    // statuses are made of — so it is out of 5.1's scope but squarely inside
+    // Requirement 5's Objective. Pinned to the candidate count, not merely
+    // asserted to be "more than one", so that batching it later has to come
+    // back here and strike the record.
+    const RELATIONSHIP_LOOKUP: &str = "FROM mutes WHERE muter_kind";
+    assert_eq!(
+        one_log.count_matching(RELATIONSHIP_LOOKUP),
+        1,
+        "one candidate, one relationship resolution"
+    );
+    assert_eq!(
+        twenty_log.count_matching(RELATIONSHIP_LOOKUP),
+        20,
+        "twenty candidates, twenty relationship resolutions — still per \
+         candidate, by design"
+    );
+
+    app.cleanup().await;
+}
+
+/// The accepted residual, pinned rather than papered over: `passes_filters`
+/// still issues **one query per candidate** when `only_media` or `pinned` is
+/// set, because task 4.5's boundary was "do not change the filter chain"
+/// (`tasks.md`, Implementation Notes: "`account_provider` のフィルタ鎖に
+/// Requirement 5.1 の未達分が残っている").
+///
+/// Asserted as an equality against the candidate count, not as an
+/// inequality, so that batching those two lookups later fails this test and
+/// forces the residual to be struck from the record rather than silently
+/// outliving it.
+#[tokio::test]
+async fn the_only_media_and_pinned_filters_still_cost_one_query_per_candidate() {
+    let app = spawn_test_app().await;
+    let author = create_test_actor(&app, "filterresidual_author").await;
+    let viewer = create_test_actor(&app, "filterresidual_viewer").await;
+
+    const CANDIDATES: usize = 5;
+    for _ in 0..CANDIDATES {
+        insert(&app, &sample_status(&app, author)).await;
+    }
+
+    let provider = build_provider(&app);
+
+    let only_media = StatusesQuery {
+        only_media: true,
+        ..unfiltered_query(author, Some(viewer))
+    };
+    let (page, log) = record_queries(&app.pool, provider.list_statuses(&only_media)).await;
+    let page = page.expect("listing with only_media must succeed");
+    assert!(
+        page.items.is_empty(),
+        "no seeded status has an attachment, so only_media must filter all of them out"
+    );
+    assert_eq!(
+        log.count(QueryKind::MediaPerStatus),
+        CANDIDATES,
+        "only_media still asks about attachments one candidate at a time"
+    );
+    assert_eq!(
+        log.count(QueryKind::Media),
+        0,
+        "and does not reach the batched lookup at all — every candidate is \
+         filtered out before a page is assembled"
+    );
+
+    let pinned = StatusesQuery {
+        pinned: true,
+        ..unfiltered_query(author, Some(viewer))
+    };
+    let (page, log) = record_queries(&app.pool, provider.list_statuses(&pinned)).await;
+    let page = page.expect("listing with pinned must succeed");
+    assert!(
+        page.items.is_empty(),
+        "no seeded status is pinned, so pinned must filter all of them out"
+    );
+    assert_eq!(
+        log.count(QueryKind::InteractionPerStatus),
+        CANDIDATES,
+        "pinned still checks the pin one candidate at a time"
     );
 
     app.cleanup().await;

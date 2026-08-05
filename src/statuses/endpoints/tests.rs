@@ -47,6 +47,7 @@ use crate::oauth::token_repository::{self, NewAccessToken};
 use crate::runtime::{IdGenerator, SeqIdGenerator};
 use crate::statuses::activity_builder::StatusActivityBuilder;
 use crate::statuses::visibility::ViewerRelation;
+use crate::test_harness::query_log::{QueryKind, record_queries};
 use crate::test_harness::{TestApp, spawn_test_app};
 
 mod wire_shape_tests {
@@ -2287,6 +2288,155 @@ async fn bookmark_list_renders_every_material_newest_bookmark_first() {
         field_list(&limited_json, "id"),
         vec![id_string(boost_of_hidden), id_string(boost_of_visible)],
         "limit=2 must cap the page at the two newest bookmarks"
+    );
+
+    app.cleanup().await;
+}
+
+// ==== Query counts for `GET /api/v1/bookmarks` (Requirement 5.1; task 4.6)
+//      ====
+
+/// Seeds one bookmarked status carrying every material Requirement 5.1
+/// enumerates except the viewer's pin, and hands back its id.
+async fn seed_bookmarked_status(app: &TestApp, author: Id, viewer: Id) -> Id {
+    let poll_id = app.runtime.ids.next_id();
+    let status_id = seed_status(
+        app,
+        SeedStatus {
+            actor_id: author,
+            visibility: Visibility::Public,
+            content: "bookmark me :blobcat:",
+            in_reply_to_id: None,
+            reblog_of_id: None,
+            poll_id: Some(poll_id),
+        },
+    )
+    .await;
+    seed_poll(app, status_id, poll_id).await;
+    attach_tag(app, status_id, "kawasemi").await;
+    crate::statuses::interaction_repository::add_bookmark(
+        &app.pool,
+        app.runtime.ids.next_id(),
+        viewer,
+        status_id,
+        app.runtime.clock.now(),
+    )
+    .await
+    .expect("add_bookmark must succeed");
+    status_id
+}
+
+/// Requirement 5.1 through the real HTTP surface, and the one place this
+/// spec's record of it is qualified: on `GET /api/v1/bookmarks` the media,
+/// tag, emoji and interaction-state lookups are page-sized — but the **poll
+/// lookups are still per poll**, and that is a known, accepted residual
+/// rather than an oversight.
+///
+/// `tasks.md`'s Implementation Notes carry the decision: this endpoint's
+/// `PollServiceResolver` goes through `PollService::poll`, which applies its
+/// own per-poll `visible_poll_and_status` check, and batching it needs a
+/// visibility-checking multi-poll entry point `PollService` does not have.
+/// The residual is asserted here as an exact multiple of the page's poll
+/// count rather than excluded from the measurement, so that (a) nobody
+/// reading this suite concludes the whole endpoint is batched, and (b)
+/// closing the gap later fails this test and forces the note to be struck.
+///
+/// Measured through `router.oneshot` rather than against the handler
+/// directly: the loop task 4.5 replaced was in the handler, and a page
+/// assembled through the real request path is the thing the requirement is
+/// about.
+#[tokio::test]
+async fn the_bookmark_page_batches_every_material_except_its_polls() {
+    let app = spawn_test_app().await;
+    let viewer = create_owner_with_actor(&app, "bmqcviewer").await;
+    let author = create_owner_with_actor(&app, "bmqcauthor").await;
+    let (state, _local, _http) = build_state(
+        &app,
+        &[(viewer, "bmqcviewer"), (author, "bmqcauthor")],
+        false,
+    );
+    seed_custom_emoji(&app, "blobcat").await;
+    seed_custom_emoji(&app, "partyparrot").await;
+
+    let router = test_router(state);
+    let app_id = register_test_app(&app.pool, &app.runtime).await;
+    let token =
+        issue_test_token(&app.pool, &app.runtime, app_id, viewer, &["read:bookmarks"]).await;
+
+    let fetch_page = |page_size: usize| {
+        let router = router.clone();
+        let token = token.clone();
+        async move {
+            let response = router
+                .oneshot(get_request(BOOKMARKS_PATH, Some(&token)))
+                .await
+                .expect("bookmark list dispatch must succeed");
+            assert_eq!(response.status(), StatusCode::OK);
+            let json = body_json(response).await;
+            assert_eq!(
+                json.as_array().map(Vec::len),
+                Some(page_size),
+                "the fixture must render {page_size} bookmarks"
+            );
+        }
+    };
+
+    seed_bookmarked_status(&app, author, viewer).await;
+    let ((), one_log) = record_queries(&app.pool, fetch_page(1)).await;
+
+    // Nineteen more, filling exactly one default-limit page.
+    for _ in 0..19 {
+        seed_bookmarked_status(&app, author, viewer).await;
+    }
+    let ((), twenty_log) = record_queries(&app.pool, fetch_page(20)).await;
+
+    one_log.require_kinds(&[
+        QueryKind::Media,
+        QueryKind::Tags,
+        QueryKind::Emoji,
+        QueryKind::Interaction,
+    ]);
+    for kind in [
+        QueryKind::Media,
+        QueryKind::Tags,
+        QueryKind::Emoji,
+        QueryKind::Interaction,
+    ] {
+        assert_eq!(
+            one_log.count(kind),
+            twenty_log.count(kind),
+            "{kind:?} queries must not depend on the page's length, but a \
+             1-item page issued {} and a 20-item page issued {}.\n\
+             1-item page: {:#?}\n20-item page: {:#?}",
+            one_log.count(kind),
+            twenty_log.count(kind),
+            one_log.per_statement(),
+            twenty_log.per_statement(),
+        );
+    }
+
+    // The residual. Every status on this page carries a poll, so the
+    // per-poll cost is the one-item page's own count and the twenty-item
+    // page pays it twenty times over.
+    let per_poll = one_log.count(QueryKind::PollPerPoll);
+    assert!(
+        per_poll > 0,
+        "the fixture must actually carry polls for this residual to be \
+         measurable.\nobserved: {:#?}",
+        one_log.per_statement(),
+    );
+    assert_eq!(
+        twenty_log.count(QueryKind::PollPerPoll),
+        20 * per_poll,
+        "`PollServiceResolver` still resolves one poll at a time — an \
+         accepted residual (tasks.md, Implementation Notes: \
+         \"endpoints.rs の 3 経路では投票だけが件数比例のまま残る\"). \
+         Batching it must strike that note and this assertion together."
+    );
+    assert_eq!(
+        twenty_log.count(QueryKind::Poll),
+        0,
+        "and it reaches none of the batched poll lookups"
     );
 
     app.cleanup().await;
