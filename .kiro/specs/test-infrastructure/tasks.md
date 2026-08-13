@@ -53,7 +53,7 @@
   - _Depends: 1.1_
   - _Boundary: TestDb_
 
-- [ ] 3.2 移行対象を分類する
+- [x] 3.2 移行対象を分類する
   - 実インスタンスを使っているテストと、SQL とドメイン型だけで完結するテストを判別する
   - 判別基準は design の使い分け基準（HTTP 送出・ルーター・トークン・モジュール参照の
     いずれかを使うか）に従う
@@ -140,6 +140,16 @@
 - 1.1: `src/test_harness.rs` の `mod reaper;` に付けた `#[allow(dead_code)]` は 1.1/1.2 分割による
   過渡的なもの。`src/lib.rs` が `pub mod test_harness` を無ゲートで公開しているため、production
   caller（`Drop for TestApp`）が来る 1.2 まで全項目が未使用警告になる。**1.2 でこの属性を外すこと。**
+- 3.2: 分類結果は `.kiro/specs/test-infrastructure/migration-classification.md`。745 件中
+  **539 件が移行対象**（機械判定 540 から、ハーネス自己検証テスト 1 件を除外）。3.3–3.5 は
+  この文書だけで自グループの対象を一意に特定できる。混在ファイルは 3 つだけで、残りは
+  ファイル単位で all-or-nothing。
+- 3.2: design の「750 件」はテスト件数ではなく `spawn_test_app(` の**テキスト出現回数**だった。
+  実件数は `#[tokio::test]` 関数で 745。タスク 6.2 でベースラインと比較する際はこの違いに注意。
+- 3.2: 両フィクスチャでコンパイルが通るのに挙動が変わる経路は 2 つ。(a) `runtime.keys`
+  （`TestApp` は実 DB 由来、`TestDb` は固定値）、(b) `spawn_test_app` が起動する配送・プルーニング・
+  メディアの各バックグラウンドループが `TestDb` には無い。(b) は決定性が上がる方向だが、
+  移行後にキュー系テストの挙動が変わったらまずこれを疑うこと。
 - 3.1: `TestDb.runtime.keys` は `RuntimeContext::deterministic` の `FixedSigningKeyProvider` の
   まま。design の TestDb Invariant が clock / id / RNG のみを列挙し keys を意図的に外していること、
   および「署名鍵生成を行わない」が根拠。`DbSigningKeyProvider` は `KeyCache` と `ActorModule` を
