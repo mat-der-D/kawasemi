@@ -259,8 +259,15 @@
   - _Requirements: 1.4, 1.6, 7.1, 7.5, 7.7_
   - _Depends: 6.1_
 
-- [ ] 6.5 配線順序の検証テストを追加する
-  - フォロワーと投稿を持つアクターについて、アカウント表現の各カウントが実データを反映した非ゼロの値であることを検証する。アカウントポート登録が呼ばれていなければ 0 になり、ソーシャルグラフが先に登録されていれば合成実装が期待どおりに効かない
+- [x] 6.5 配線順序の検証テストを追加する
+  - フォロワーと投稿を持つアクターについて、アカウント表現の各カウントが実データを反映した非ゼロの値であることを検証する。
+    **[task 6.5 実装・レビューで訂正] 「アカウントポート登録が呼ばれていなければ 0 になり」は不正確だった。**
+    実測では stage 7 (`register_account_ports`) と stage 8 (`build_social_graph_module`) の順序を
+    入れ替えると `followers_count`/`following_count` のみが 0 になり、`statuses_count` は影響を
+    受けない（`social_graph::build_social_graph_module` の `CombinedAccountCountsProvider` が
+    `AccountCountsContribution` を自前構築し stage 7 の登録を読み戻さないため）。
+    stage 7 を丸ごと落とした場合は逆に 3 カウントは全て正しいまま、投稿一覧のみが空になる。
+    2 つの故障モードは独立しており、テストは両方を別ケースで検証する。
   - アカウントの投稿一覧が空でないこと（組み込み既定の空プロバイダが使われていないこと）を検証する
   - 完了状態：上記 2 つの検証が通り、合成関数内で登録順を入れ替えると落ちる状態になっている
   - _Requirements: 7.3, 7.4_
@@ -506,3 +513,11 @@
 - **task 6.3: `compose_modules` 内で `social_graph_pending_delivery.resolve()` が
   `federation_background.spawn()` より前になった**（旧ハーネスは spawn の方が先）。
   未解決セルを配送ワーカーが観測する窓が消える方向の変化で、安全側。是正不要。
+- **task 6.5: 2 つの故障モードは独立に pin してある。** `account_counts_reflect_real_data_when_the_wiring_order_is_intact`
+  （stage 7/8 の順序破壊を検出、followers/following が 0 に）と
+  `account_statuses_page_is_not_the_built_in_empty_default`（stage 7 の欠落を検出、投稿一覧が空に）。
+  レビューが両方の変異を独立に再現して確認済み。stage 6→7 の入れ替えは
+  `statuses_module.relationship_query_registry()` の型依存によりコンパイルエラーになるため
+  実行時テストの対象外（型で守られている）。
+  期待値 `statuses_count=2 / followers_count=1 / following_count=1` は followers と following が
+  同値のため、この 2 フィールドの取り違えは検出できない（非ブロッキング、レビュー指摘）。
