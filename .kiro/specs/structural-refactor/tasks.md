@@ -235,7 +235,7 @@
   - _Requirements: 1.6, 7.1, 7.5, 7.6_
   - _Depends: 6.1_
 
-- [ ] 6.3 テストハーネスを合成関数に移行する
+- [x] 6.3 テストハーネスを合成関数に移行する
   - 通常のテストアプリ起動から配線部分を削除し、合成関数の呼び出しに置き換える。決定的ランタイム・スキーマ隔離プール・エフェメラルなリスナー bind は残す
   - バックグラウンドタスクは従来どおり終わらない信号で spawn する
   - 完了状態：テストハーネスに配線シーケンスの複製が残っておらず、テストハーネスを使う既存テストがグリーン
@@ -493,3 +493,16 @@
   `federation_pair_instances_wire_statuses_account_ports_like_production` を追加し、
   両インスタンスで投稿一覧が実データを反映することを検証（RED フェーズで実際に失敗することを
   実装・レビュー双方が独立に再現済み）。
+- **task 6.3: `--lib` の既知ベースライン 15 件に加え、`--lib` の外側で 3 本の既存不具合バイナリを発見。**
+  いずれも `main` 時点（本タスク着手前）で再現し、task 6.3 とは無関係：
+  - `notification_generation_it`：`delivery_sink_is_called_exactly_once_per_created_notification_and_never_for_a_suppressed_event`
+    が "signer is blocked by this recipient" で失敗（notification_generation_it.rs:342）
+  - `notification_list_it`：`list_returns_only_the_authenticated_actors_own_notifications_newest_first`
+    が scope 不足エラーで失敗（notification_list_it.rs:347）
+  - `notification_contract_it`：9 件失敗。ゴールデンファイル名の不一致（ハーネスは
+    `notification_contract_it_<kind>.json` を解決するが実ファイルは `notification_<kind>.json`）。
+    これは 4.5 の Implementation Notes に既出の既知課題と同一。
+  **task 7 の既存不具合一覧に上記 3 バイナリを追加すること。**
+- **task 6.3: `compose_modules` 内で `social_graph_pending_delivery.resolve()` が
+  `federation_background.spawn()` より前になった**（旧ハーネスは spawn の方が先）。
+  未解決セルを配送ワーカーが観測する窓が消える方向の変化で、安全側。是正不要。
