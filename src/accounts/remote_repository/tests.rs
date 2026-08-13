@@ -4,7 +4,7 @@
 //! green".
 //!
 //! Mirrors `src/accounts/profile_repository/tests.rs`'s established
-//! convention: reuses `crate::test_harness::spawn_test_app` for an isolated,
+//! convention: reuses `crate::test_harness::db_fixture::spawn_test_db` for an isolated,
 //! already-migrated schema and a deterministic `RuntimeContext`.
 //! `remote_accounts` has no hard FK to any local-actor/owner row (it is a
 //! standalone cache table, `migrations/0006_accounts.sql`), so unlike
@@ -17,7 +17,7 @@ use time::macros::datetime;
 use super::{find_remote_by_id, find_remote_by_uri, is_stale, upsert_remote};
 use crate::accounts::model::{ProfileField, RemoteAccount};
 use crate::domain::Id;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// Builds a sample [`RemoteAccount`] for `actor_uri`, with `id` and
 /// `fetched_at` supplied by the caller so tests can control both precisely.
@@ -51,19 +51,19 @@ fn sample_remote_account(
 /// an error.
 #[tokio::test]
 async fn find_remote_returns_none_for_unknown_actor_uri_and_id() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let by_uri = find_remote_by_uri(&app.pool, "https://remote.example/users/nobody")
+    let by_uri = find_remote_by_uri(&db.pool, "https://remote.example/users/nobody")
         .await
         .expect("find_remote_by_uri must succeed even with no matching row");
     assert!(by_uri.is_none());
 
-    let by_id = find_remote_by_id(&app.pool, Id::from_i64(999_999))
+    let by_id = find_remote_by_id(&db.pool, Id::from_i64(999_999))
         .await
         .expect("find_remote_by_id must succeed even with no matching row");
     assert!(by_id.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 3.1, 3.2, 7.2: after `upsert_remote`, the same account is
@@ -71,29 +71,29 @@ async fn find_remote_returns_none_for_unknown_actor_uri_and_id() {
 /// normalized field intact.
 #[tokio::test]
 async fn upsert_remote_is_findable_by_both_actor_uri_and_id() {
-    let app = spawn_test_app().await;
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let account = sample_remote_account(id, "https://remote.example/users/alice", now);
 
-    let upserted = upsert_remote(&app.pool, &account)
+    let upserted = upsert_remote(&db.pool, &account)
         .await
         .expect("upsert_remote must succeed for a fresh actor_uri");
     assert_eq!(upserted, account);
 
-    let by_uri = find_remote_by_uri(&app.pool, "https://remote.example/users/alice")
+    let by_uri = find_remote_by_uri(&db.pool, "https://remote.example/users/alice")
         .await
         .expect("find_remote_by_uri must succeed")
         .expect("the row just upserted must be findable by actor_uri");
     assert_eq!(by_uri, account);
 
-    let by_id = find_remote_by_id(&app.pool, id)
+    let by_id = find_remote_by_id(&db.pool, id)
         .await
         .expect("find_remote_by_id must succeed")
         .expect("the row just upserted must be findable by id");
     assert_eq!(by_id, account);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The crux of task 2.2's own observable completion condition: a second
@@ -107,13 +107,13 @@ async fn upsert_remote_is_findable_by_both_actor_uri_and_id() {
 /// stability across re-upserts of the same `actor_uri`").
 #[tokio::test]
 async fn upsert_remote_is_idempotent_and_keeps_the_original_id() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let actor_uri = "https://remote.example/users/bob";
-    let original_id = app.runtime.ids.next_id();
-    let first_fetched_at = app.runtime.clock.now();
+    let original_id = db.runtime.ids.next_id();
+    let first_fetched_at = db.runtime.clock.now();
 
     let first = sample_remote_account(original_id, actor_uri, first_fetched_at);
-    let after_first = upsert_remote(&app.pool, &first)
+    let after_first = upsert_remote(&db.pool, &first)
         .await
         .expect("first upsert_remote must succeed");
     assert_eq!(after_first.id, original_id);
@@ -121,7 +121,7 @@ async fn upsert_remote_is_idempotent_and_keeps_the_original_id() {
 
     // Second upsert: same actor_uri, different id, and materially different
     // values (simulating a re-normalized document with fresher content).
-    let different_id = app.runtime.ids.next_id();
+    let different_id = db.runtime.ids.next_id();
     assert_ne!(different_id, original_id);
     let second_fetched_at = first_fetched_at + Duration::hours(1);
     let mut second = sample_remote_account(different_id, actor_uri, second_fetched_at);
@@ -137,7 +137,7 @@ async fn upsert_remote_is_idempotent_and_keeps_the_original_id() {
         verified_at: Some(second_fetched_at),
     }];
 
-    let after_second = upsert_remote(&app.pool, &second)
+    let after_second = upsert_remote(&db.pool, &second)
         .await
         .expect("second upsert_remote must succeed");
 
@@ -166,7 +166,7 @@ async fn upsert_remote_is_idempotent_and_keeps_the_original_id() {
     let row_count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM remote_accounts WHERE actor_uri = $1")
             .bind(actor_uri)
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("counting rows must succeed");
     assert_eq!(row_count.0, 1);
@@ -174,20 +174,20 @@ async fn upsert_remote_is_idempotent_and_keeps_the_original_id() {
     let persisted_id: (i64,) =
         sqlx::query_as("SELECT id FROM remote_accounts WHERE actor_uri = $1")
             .bind(actor_uri)
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("selecting the persisted id must succeed");
     assert_eq!(persisted_id.0, original_id.as_i64());
 
     // Both find_remote_by_uri and find_remote_by_id (under the *original*
     // id) resolve to the latest values.
-    let reloaded_by_uri = find_remote_by_uri(&app.pool, actor_uri)
+    let reloaded_by_uri = find_remote_by_uri(&db.pool, actor_uri)
         .await
         .expect("find_remote_by_uri must succeed")
         .expect("row must exist");
     assert_eq!(reloaded_by_uri, after_second);
 
-    let reloaded_by_id = find_remote_by_id(&app.pool, original_id)
+    let reloaded_by_id = find_remote_by_id(&db.pool, original_id)
         .await
         .expect("find_remote_by_id must succeed")
         .expect("row must exist under the original id");
@@ -195,12 +195,12 @@ async fn upsert_remote_is_idempotent_and_keeps_the_original_id() {
 
     // The different_id from the second upsert's input never became a real
     // row of its own.
-    let by_different_id = find_remote_by_id(&app.pool, different_id)
+    let by_different_id = find_remote_by_id(&db.pool, different_id)
         .await
         .expect("find_remote_by_id must succeed even for an id that was never persisted");
     assert!(by_different_id.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 7.3: `is_stale` is a pure, threshold-parameterized check —

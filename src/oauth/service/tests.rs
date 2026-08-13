@@ -5,7 +5,7 @@
 //! 確認できる".
 //!
 //! Mirrors `src/oauth/app_repository/tests.rs`'s/`code_repository/tests.rs`'s
-//! established convention: reuses `crate::test_harness::spawn_test_app` for
+//! established convention: reuses `crate::test_harness::db_fixture::spawn_test_db` for
 //! an isolated, already-migrated schema and a deterministic `RuntimeContext`.
 
 use super::{AuthorizeApproval, NewApp, OauthService, TokenRequest};
@@ -15,7 +15,7 @@ use crate::oauth::hash::TokenHashKey;
 use crate::oauth::pkce::PkceChallenge as RealPkceChallenge;
 use crate::runtime::RuntimeContext;
 use crate::runtime::clock::FixedClock;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 use std::sync::Arc;
 
 /// A fixed, non-production token-hashing key for this test module only —
@@ -48,8 +48,8 @@ async fn register_sample_app(service: &OauthService, name: &str) -> crate::oauth
 /// the registered redirect URI.
 #[tokio::test]
 async fn register_app_returns_client_credentials_and_registered_redirect_uri() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
 
     let registered = register_sample_app(&service, "Test Client").await;
 
@@ -60,14 +60,14 @@ async fn register_app_returns_client_credentials_and_registered_redirect_uri() {
         vec!["https://client.example/callback".to_string()]
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.2: an empty name is rejected.
 #[tokio::test]
 async fn register_app_rejects_an_empty_name() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
 
     let err = service
         .register_app(NewApp {
@@ -79,14 +79,14 @@ async fn register_app_rejects_an_empty_name() {
         .expect_err("an empty/whitespace-only name must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.2: no redirect URIs at all is rejected.
 #[tokio::test]
 async fn register_app_rejects_no_redirect_uris() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
 
     let err = service
         .register_app(NewApp {
@@ -98,14 +98,14 @@ async fn register_app_rejects_no_redirect_uris() {
         .expect_err("no redirect_uris must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.2: a malformed redirect URI (no scheme) is rejected.
 #[tokio::test]
 async fn register_app_rejects_a_malformed_redirect_uri() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
 
     let err = service
         .register_app(NewApp {
@@ -117,14 +117,14 @@ async fn register_app_rejects_a_malformed_redirect_uri() {
         .expect_err("a redirect_uri with no scheme must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.3: an unknown scope token is rejected.
 #[tokio::test]
 async fn register_app_rejects_an_unknown_scope() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
 
     let err = service
         .register_app(NewApp {
@@ -136,7 +136,7 @@ async fn register_app_rejects_an_unknown_scope() {
         .expect_err("an unknown scope token must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // ---- issue_authorization_code ----
@@ -145,10 +145,10 @@ async fn register_app_rejects_an_unknown_scope() {
 /// selected actor and approved scopes.
 #[tokio::test]
 async fn issue_authorization_code_binds_actor_and_approved_scopes() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
     let registered = register_sample_app(&service, "Test Client").await;
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
 
     let issued = service
         .issue_authorization_code(AuthorizeApproval {
@@ -170,14 +170,14 @@ async fn issue_authorization_code_binds_actor_and_approved_scopes() {
     assert!(issued.code.pkce.is_none());
     assert!(!issued.code.consumed);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 2.1: an unknown `client_id` is rejected.
 #[tokio::test]
 async fn issue_authorization_code_rejects_an_unknown_client_id() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
 
     let err = service
         .issue_authorization_code(AuthorizeApproval {
@@ -191,15 +191,15 @@ async fn issue_authorization_code_rejects_an_unknown_client_id() {
         .expect_err("an unknown client_id must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 2.1: a `redirect_uri` not matching the registered redirect
 /// URI is rejected.
 #[tokio::test]
 async fn issue_authorization_code_rejects_a_mismatched_redirect_uri() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
     let registered = register_sample_app(&service, "Test Client").await;
 
     let err = service
@@ -214,15 +214,15 @@ async fn issue_authorization_code_rejects_a_mismatched_redirect_uri() {
         .expect_err("a mismatched redirect_uri must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.3 (reused by authorization): an unknown approved scope is
 /// rejected.
 #[tokio::test]
 async fn issue_authorization_code_rejects_an_unknown_scope() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
     let registered = register_sample_app(&service, "Test Client").await;
 
     let err = service
@@ -237,7 +237,7 @@ async fn issue_authorization_code_rejects_an_unknown_scope() {
         .expect_err("an unknown approved scope must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 4.5's shared inclusion judgment, applied as a narrowing
@@ -245,8 +245,8 @@ async fn issue_authorization_code_rejects_an_unknown_scope() {
 /// rejected.
 #[tokio::test]
 async fn issue_authorization_code_rejects_approved_scopes_exceeding_registered_scopes() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
     // Registered with only `read`.
     let registered = service
         .register_app(NewApp {
@@ -269,15 +269,15 @@ async fn issue_authorization_code_rejects_approved_scopes_exceeding_registered_s
         .expect_err("approving a scope beyond the app's registered scopes must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::UNPROCESSABLE_ENTITY);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 2.6: a PKCE challenge is bound to the issued code and
 /// persists through storage.
 #[tokio::test]
 async fn issue_authorization_code_binds_pkce_challenge_when_present() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
     let registered = register_sample_app(&service, "Test Client").await;
     let verifier = "a-high-entropy-code-verifier-1234567890";
     let challenge = RealPkceChallenge::from_verifier_s256(verifier);
@@ -298,7 +298,7 @@ async fn issue_authorization_code_binds_pkce_challenge_when_present() {
         challenge.challenge
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // ---- exchange_token ----
@@ -308,11 +308,11 @@ async fn issue_authorization_code_binds_pkce_challenge_when_present() {
 /// and scopes.
 #[tokio::test]
 async fn exchange_token_issues_a_token_bound_to_the_codes_actor_and_scopes() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), key.clone());
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), key.clone());
     let registered = register_sample_app(&service, "Test Client").await;
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
 
     let issued_code = service
         .issue_authorization_code(AuthorizeApproval {
@@ -344,16 +344,16 @@ async fn exchange_token_issues_a_token_bound_to_the_codes_actor_and_scopes() {
     assert!(!issued_token.plaintext.expose_secret().is_empty());
     assert!(!issued_token.token.revoked);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 2.5: a code can only be exchanged once; the second attempt
 /// is rejected.
 #[tokio::test]
 async fn exchange_token_rejects_a_code_that_was_already_redeemed() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), key.clone());
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), key.clone());
     let registered = register_sample_app(&service, "Test Client").await;
 
     let issued_code = service
@@ -386,16 +386,16 @@ async fn exchange_token_rejects_a_code_that_was_already_redeemed() {
         .expect_err("redeeming the same code twice must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.2: wrong client credentials are rejected and do not issue
 /// a token.
 #[tokio::test]
 async fn exchange_token_rejects_wrong_client_credentials() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), key.clone());
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), key.clone());
     let registered = register_sample_app(&service, "Test Client").await;
 
     let issued_code = service
@@ -421,16 +421,16 @@ async fn exchange_token_rejects_wrong_client_credentials() {
         .expect_err("wrong client_secret must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.2: a mismatched `redirect_uri` at exchange time is
 /// rejected, even with correct credentials and an otherwise-valid code.
 #[tokio::test]
 async fn exchange_token_rejects_a_mismatched_redirect_uri() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), key.clone());
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), key.clone());
     let registered = register_sample_app(&service, "Test Client").await;
 
     let issued_code = service
@@ -456,16 +456,16 @@ async fn exchange_token_rejects_a_mismatched_redirect_uri() {
         .expect_err("a mismatched redirect_uri at exchange time must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.3: a code issued with a PKCE challenge, exchanged with the
 /// matching verifier, succeeds.
 #[tokio::test]
 async fn exchange_token_succeeds_with_a_matching_pkce_verifier() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), key.clone());
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), key.clone());
     let registered = register_sample_app(&service, "Test Client").await;
     let verifier = "a-high-entropy-code-verifier-abcdefghijkl";
     let challenge = RealPkceChallenge::from_verifier_s256(verifier);
@@ -494,16 +494,16 @@ async fn exchange_token_succeeds_with_a_matching_pkce_verifier() {
 
     assert!(!issued_token.plaintext.expose_secret().is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.3: a code issued with a PKCE challenge, exchanged with a
 /// non-matching verifier, is rejected and issues no token.
 #[tokio::test]
 async fn exchange_token_rejects_a_mismatched_pkce_verifier() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), key.clone());
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), key.clone());
     let registered = register_sample_app(&service, "Test Client").await;
     let real_verifier = "the-real-verifier-the-client-actually-used";
     let challenge = RealPkceChallenge::from_verifier_s256(real_verifier);
@@ -531,7 +531,7 @@ async fn exchange_token_rejects_a_mismatched_pkce_verifier() {
         .expect_err("a mismatched code_verifier must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 2.6's `Where`-conditionality: a code issued *with* a PKCE
@@ -539,9 +539,9 @@ async fn exchange_token_rejects_a_mismatched_pkce_verifier() {
 /// silently accepted.
 #[tokio::test]
 async fn exchange_token_rejects_a_missing_verifier_when_the_code_required_pkce() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), key.clone());
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), key.clone());
     let registered = register_sample_app(&service, "Test Client").await;
     let verifier = "a-high-entropy-code-verifier-zzzzzzzzzzzz";
     let challenge = RealPkceChallenge::from_verifier_s256(verifier);
@@ -569,16 +569,16 @@ async fn exchange_token_rejects_a_missing_verifier_when_the_code_required_pkce()
         .expect_err("a missing verifier for a pkce-bound code must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A code_verifier presented for a code that was issued *without* PKCE is
 /// rejected rather than silently ignored.
 #[tokio::test]
 async fn exchange_token_rejects_an_unexpected_verifier_when_the_code_had_no_pkce() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), key.clone());
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), key.clone());
     let registered = register_sample_app(&service, "Test Client").await;
 
     let issued_code = service
@@ -604,7 +604,7 @@ async fn exchange_token_rejects_an_unexpected_verifier_when_the_code_had_no_pkce
         .expect_err("an unexpected verifier must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 2.5, 3.2: an expired code is rejected even though it was
@@ -614,17 +614,17 @@ async fn exchange_token_rejects_an_unexpected_verifier_when_the_code_had_no_pkce
 /// code's TTL.
 #[tokio::test]
 async fn exchange_token_rejects_an_expired_code() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
 
-    let issuance_time = app.runtime.clock.now();
+    let issuance_time = db.runtime.clock.now();
     let issuance_runtime = RuntimeContext {
         clock: Arc::new(FixedClock::new(issuance_time)),
-        ids: app.runtime.ids.clone(),
-        rng: app.runtime.rng.clone(),
-        keys: app.runtime.keys.clone(),
+        ids: db.runtime.ids.clone(),
+        rng: db.runtime.rng.clone(),
+        keys: db.runtime.keys.clone(),
     };
-    let issuing_service = OauthService::new(app.pool.clone(), issuance_runtime, key.clone());
+    let issuing_service = OauthService::new(db.pool.clone(), issuance_runtime, key.clone());
     let registered = register_sample_app(&issuing_service, "Test Client").await;
 
     let issued_code = issuing_service
@@ -641,11 +641,11 @@ async fn exchange_token_rejects_an_expired_code() {
     let later_time = issuance_time + time::Duration::minutes(11);
     let later_runtime = RuntimeContext {
         clock: Arc::new(FixedClock::new(later_time)),
-        ids: app.runtime.ids.clone(),
-        rng: app.runtime.rng.clone(),
-        keys: app.runtime.keys.clone(),
+        ids: db.runtime.ids.clone(),
+        rng: db.runtime.rng.clone(),
+        keys: db.runtime.keys.clone(),
     };
-    let exchanging_service = OauthService::new(app.pool.clone(), later_runtime, key.clone());
+    let exchanging_service = OauthService::new(db.pool.clone(), later_runtime, key.clone());
 
     let err = exchanging_service
         .exchange_token(TokenRequest {
@@ -659,7 +659,7 @@ async fn exchange_token_rejects_an_expired_code() {
         .expect_err("an expired code must be rejected");
     assert_eq!(err.status, axum::http::StatusCode::BAD_REQUEST);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // ---- revoke_token ----
@@ -668,9 +668,9 @@ async fn exchange_token_rejects_an_expired_code() {
 /// resolution.
 #[tokio::test]
 async fn revoke_token_invalidates_the_token_for_subsequent_resolution() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), key.clone());
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), key.clone());
     let registered = register_sample_app(&service, "Test Client").await;
 
     let issued_code = service
@@ -701,7 +701,7 @@ async fn revoke_token_invalidates_the_token_for_subsequent_resolution() {
         .expect("revoking an active token must succeed");
 
     let resolved = crate::oauth::token_repository::resolve_token(
-        &app.pool,
+        &db.pool,
         &key,
         issued_token.plaintext.expose_secret(),
     )
@@ -709,20 +709,20 @@ async fn revoke_token_invalidates_the_token_for_subsequent_resolution() {
     .expect("resolve_token must not error");
     assert!(resolved.is_none(), "a revoked token must no longer resolve");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.4 (RFC 7009 alignment): revoking an unknown/already-revoked
 /// token is not an error.
 #[tokio::test]
 async fn revoke_token_is_idempotent_and_does_not_error_on_an_unknown_token() {
-    let app = spawn_test_app().await;
-    let service = OauthService::new(app.pool.clone(), app.runtime.clone(), test_token_hash_key());
+    let db = spawn_test_db().await;
+    let service = OauthService::new(db.pool.clone(), db.runtime.clone(), test_token_hash_key());
 
     service
         .revoke_token("a-token-value-that-was-never-issued")
         .await
         .expect("revoking an unknown token must not error");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

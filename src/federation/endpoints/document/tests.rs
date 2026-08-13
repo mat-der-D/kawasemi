@@ -21,7 +21,7 @@ use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
 use crate::domain::Id;
 use crate::federation::urls::ActorUrls;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 fn handle(raw: &str) -> Handle {
     Handle::new(raw).expect("test handle must be valid")
@@ -306,7 +306,7 @@ async fn actor_and_page_are_passed_through_to_each_source_unchanged() {
 // Requirements 6.1, 6.2, 6.5, 8.1, 8.2, 8.3)
 //
 // `build_actor_document` tests use a real, Postgres-backed `ActorDirectory`
-// via `spawn_test_app` (mirroring `src/actor/directory/tests.rs`'s and
+// via `spawn_test_db` (mirroring `src/actor/directory/tests.rs`'s and
 // `src/federation/outbound/target/tests.rs`'s own established fixture
 // pattern) -- this task's own instructions call for a real directory, not a
 // mock, since `ActorDirectory` has no narrow port introduced for it here
@@ -314,7 +314,7 @@ async fn actor_and_page_are_passed_through_to_each_source_unchanged() {
 // in-memory over stub `OutboxSource`s (this module's own `StubOutboxSource`,
 // reused from the `OutboxSourceRegistry` tests above), but still construct
 // their `ActivityPubDocumentBuilder` with a real `ActorDirectory` (via the
-// same `spawn_test_app`), since the builder always requires one -- these
+// same `spawn_test_db`), since the builder always requires one -- these
 // tests just never call anything that would query it.
 // ==========================================================================
 
@@ -401,17 +401,17 @@ async fn insert_active_key_fixture(
 /// the PEM from a real, fixture-inserted active signing key.
 #[tokio::test]
 async fn build_actor_document_includes_id_inbox_outbox_and_public_key() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let urls = test_urls();
-    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+    let directory = Arc::new(ActorDirectory::new(db.pool.clone()));
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    let actor = insert_actor_fixture(&app.pool, owner_id, actor_id, "doc_alice", now).await;
-    let key_id = app.runtime.ids.next_id();
-    let key = insert_active_key_fixture(&app.pool, key_id, actor_id, now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    let actor = insert_actor_fixture(&db.pool, owner_id, actor_id, "doc_alice", now).await;
+    let key_id = db.runtime.ids.next_id();
+    let key = insert_active_key_fixture(&db.pool, key_id, actor_id, now).await;
 
     let resolved = directory
         .resolve_actor_by_handle(&actor.handle)
@@ -444,7 +444,7 @@ async fn build_actor_document_includes_id_inbox_outbox_and_public_key() {
         "publicKey.publicKeyPem must carry the real active signing key's PEM"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 6.5: the built actor document never includes any
@@ -461,17 +461,17 @@ async fn build_actor_document_includes_id_inbox_outbox_and_public_key() {
 /// is not present anywhere in the serialized output.
 #[tokio::test]
 async fn build_actor_document_never_includes_owner_identifying_information() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let urls = test_urls();
-    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+    let directory = Arc::new(ActorDirectory::new(db.pool.clone()));
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    let actor = insert_actor_fixture(&app.pool, owner_id, actor_id, "doc_no_owner", now).await;
-    let key_id = app.runtime.ids.next_id();
-    insert_active_key_fixture(&app.pool, key_id, actor_id, now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    let actor = insert_actor_fixture(&db.pool, owner_id, actor_id, "doc_no_owner", now).await;
+    let key_id = db.runtime.ids.next_id();
+    insert_active_key_fixture(&db.pool, key_id, actor_id, now).await;
 
     let resolved = directory
         .resolve_actor_by_handle(&actor.handle)
@@ -500,7 +500,7 @@ async fn build_actor_document_never_includes_owner_identifying_information() {
          {serialized}"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 9.1 (as applied to this builder's own output, per this
@@ -508,15 +508,15 @@ async fn build_actor_document_never_includes_owner_identifying_information() {
 /// established `ACTIVITYSTREAMS_CONTEXT` JSON-LD context value.
 #[tokio::test]
 async fn build_actor_document_includes_the_activitystreams_context() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let urls = test_urls();
-    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+    let directory = Arc::new(ActorDirectory::new(db.pool.clone()));
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    let actor = insert_actor_fixture(&app.pool, owner_id, actor_id, "doc_context", now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    let actor = insert_actor_fixture(&db.pool, owner_id, actor_id, "doc_context", now).await;
 
     let resolved = directory
         .resolve_actor_by_handle(&actor.handle)
@@ -538,7 +538,7 @@ async fn build_actor_document_includes_the_activitystreams_context() {
         "@context must match this spec's established JSON-LD context value"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// An actor with no active signing key gets no `publicKey` field at all
@@ -547,15 +547,15 @@ async fn build_actor_document_includes_the_activitystreams_context() {
 /// null/empty placeholder.
 #[tokio::test]
 async fn build_actor_document_omits_public_key_when_actor_has_no_active_key() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let urls = test_urls();
-    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+    let directory = Arc::new(ActorDirectory::new(db.pool.clone()));
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    let actor = insert_actor_fixture(&app.pool, owner_id, actor_id, "doc_keyless", now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    let actor = insert_actor_fixture(&db.pool, owner_id, actor_id, "doc_keyless", now).await;
 
     let resolved = directory
         .resolve_actor_by_handle(&actor.handle)
@@ -576,7 +576,7 @@ async fn build_actor_document_omits_public_key_when_actor_has_no_active_key() {
         "an actor with no active signing key must get no publicKey field at all, found: {doc:?}"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- build_outbox_page ---
@@ -586,9 +586,9 @@ async fn build_actor_document_omits_public_key_when_actor_has_no_active_key() {
 /// fabricated.
 #[tokio::test]
 async fn build_outbox_page_with_no_registered_sources_yields_an_empty_but_validly_shaped_page() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let urls = test_urls();
-    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+    let directory = Arc::new(ActorDirectory::new(db.pool.clone()));
     let builder =
         ActivityPubDocumentBuilder::new(urls.clone(), directory, OutboxSourceRegistry::new());
 
@@ -614,7 +614,7 @@ async fn build_outbox_page_with_no_registered_sources_yields_an_empty_but_validl
         "an empty registry must not fabricate a next cursor"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The task's own observable completion condition: with two or more stub
@@ -623,9 +623,9 @@ async fn build_outbox_page_with_no_registered_sources_yields_an_empty_but_validl
 /// items -- nothing invented, nothing dropped.
 #[tokio::test]
 async fn build_outbox_page_bundles_exactly_the_union_of_all_registered_sources() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let urls = test_urls();
-    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+    let directory = Arc::new(ActorDirectory::new(db.pool.clone()));
 
     let sources = OutboxSourceRegistry::new();
     let item_a = json!({ "type": "Create", "source": "a", "published": "2024-01-01T00:00:00Z" });
@@ -657,7 +657,7 @@ async fn build_outbox_page_bundles_exactly_the_union_of_all_registered_sources()
     assert!(items.contains(&item_a));
     assert!(items.contains(&item_b));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.1's "順序付きコレクション": items collected from multiple
@@ -665,9 +665,9 @@ async fn build_outbox_page_bundles_exactly_the_union_of_all_registered_sources()
 /// merely in registration order.
 #[tokio::test]
 async fn build_outbox_page_orders_items_chronologically_by_published() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let urls = test_urls();
-    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+    let directory = Arc::new(ActorDirectory::new(db.pool.clone()));
 
     let newer = json!({ "type": "Create", "id": "newer", "published": "2024-06-01T00:00:00Z" });
     let older = json!({ "type": "Create", "id": "older", "published": "2024-01-01T00:00:00Z" });
@@ -699,7 +699,7 @@ async fn build_outbox_page_orders_items_chronologically_by_published() {
         "items must be ordered ascending by their own published timestamp, not registration order"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// This builder's documented fallback: items missing `published` (or where
@@ -708,9 +708,9 @@ async fn build_outbox_page_orders_items_chronologically_by_published() {
 /// themselves.
 #[tokio::test]
 async fn build_outbox_page_sorts_items_missing_published_after_all_dated_items_preserving_order() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let urls = test_urls();
-    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+    let directory = Arc::new(ActorDirectory::new(db.pool.clone()));
 
     let dated = json!({ "type": "Create", "id": "dated", "published": "2024-01-01T00:00:00Z" });
     let undated_first = json!({ "type": "Create", "id": "undated-first" });
@@ -742,7 +742,7 @@ async fn build_outbox_page_sorts_items_missing_published_after_all_dated_items_p
          sort after it, in their original relative (registration-then-page) order"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// This builder's documented MVP next-cursor rule: the first non-`None`
@@ -750,9 +750,9 @@ async fn build_outbox_page_sorts_items_missing_published_after_all_dated_items_p
 /// is propagated as this page's own `next`.
 #[tokio::test]
 async fn build_outbox_page_propagates_the_first_non_none_next_cursor() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let urls = test_urls();
-    let directory = Arc::new(ActorDirectory::new(app.pool.clone()));
+    let directory = Arc::new(ActorDirectory::new(db.pool.clone()));
 
     let sources = OutboxSourceRegistry::new();
     sources.register(StubOutboxSource::new(OutboxItemsPage {
@@ -784,5 +784,5 @@ async fn build_outbox_page_propagates_the_first_non_none_next_cursor() {
         "the first registered source's non-None next cursor must win, not a later one's"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

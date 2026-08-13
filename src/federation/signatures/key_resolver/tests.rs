@@ -4,7 +4,7 @@
 //! TTL 超過後の解決要求では再度ネットワーク取得が走る統合テストが通る".
 //!
 //! Mirrors `src/actor/keys/repository/tests.rs`'s established convention:
-//! `spawn_test_app` for an isolated, already-migrated schema (so this test
+//! `spawn_test_db` for an isolated, already-migrated schema (so this test
 //! exercises the real `remote_public_keys` table, not a stand-in), paired
 //! with `MockFederationHttpClient` (task 1.4) so the "fetches over the
 //! network" assertions are deterministic without any real HTTP call.
@@ -26,7 +26,7 @@ use time::macros::datetime;
 use super::*;
 use crate::federation::signatures::http_client::{HttpResponse, MockFederationHttpClient};
 use crate::runtime::FixedClock;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 const TEST_KEY_ID: &str = "https://remote.example/users/alice#main-key";
 const TEST_ACTOR_URI: &str = "https://remote.example/users/alice";
@@ -63,11 +63,11 @@ fn fixed_clock_at(offset_seconds: i64) -> Arc<dyn Clock> {
 
 #[tokio::test]
 async fn first_resolve_with_no_cache_fetches_over_http_and_caches() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(actor_document_response("PEM-ONE"));
     let resolver = DbFederationPublicKeyResolver::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock.clone(),
         fixed_clock_at(0),
         Duration::hours(24),
@@ -87,25 +87,25 @@ async fn first_resolve_with_no_cache_fetches_over_http_and_caches() {
         "first resolution for an uncached keyId must fetch over the network exactly once"
     );
 
-    let (cached, _fetched_at) = find_cached(&app.pool, TEST_KEY_ID)
+    let (cached, _fetched_at) = find_cached(&db.pool, TEST_KEY_ID)
         .await
         .expect("reading the cache must succeed")
         .expect("the resolved key must have been cached");
     assert_eq!(cached, resolved);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- 2: second resolve within TTL, force=false -> cache hit, no fetch ---
 
 #[tokio::test]
 async fn resolve_within_ttl_without_force_returns_cached_value_without_fetching() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(actor_document_response("PEM-ONE"));
     let clock = fixed_clock_at(0);
     let resolver = DbFederationPublicKeyResolver::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock.clone(),
         clock,
         Duration::hours(24),
@@ -131,20 +131,20 @@ async fn resolve_within_ttl_without_force_returns_cached_value_without_fetching(
         "a within-TTL, non-forced resolution must not perform a second network fetch"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- 3: force=true always re-fetches, even within TTL, and updates the cache ---
 
 #[tokio::test]
 async fn force_true_always_refetches_and_updates_the_cache_even_within_ttl() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(actor_document_response("PEM-ONE"));
     mock.queue_fetch_response(actor_document_response("PEM-TWO"));
     let clock = fixed_clock_at(0);
     let resolver = DbFederationPublicKeyResolver::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock.clone(),
         clock,
         Duration::hours(24),
@@ -166,7 +166,7 @@ async fn force_true_always_refetches_and_updates_the_cache_even_within_ttl() {
         "force=true must always perform a network fetch, regardless of a still-valid cache"
     );
 
-    let (cached, _fetched_at) = find_cached(&app.pool, TEST_KEY_ID)
+    let (cached, _fetched_at) = find_cached(&db.pool, TEST_KEY_ID)
         .await
         .expect("reading the cache must succeed")
         .expect("a cache row must still exist");
@@ -175,19 +175,19 @@ async fn force_true_always_refetches_and_updates_the_cache_even_within_ttl() {
         "the forced re-fetch's result must overwrite the previously cached value"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- 4: resolve after fetched_at + TTL has elapsed, force=false -> stale, refetches ---
 
 #[tokio::test]
 async fn resolve_after_ttl_elapsed_without_force_treats_cache_as_stale_and_refetches() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(actor_document_response("PEM-ONE"));
     let ttl = Duration::seconds(60);
     let resolver_at_t0 =
-        DbFederationPublicKeyResolver::new(app.pool.clone(), mock.clone(), fixed_clock_at(0), ttl);
+        DbFederationPublicKeyResolver::new(db.pool.clone(), mock.clone(), fixed_clock_at(0), ttl);
     resolver_at_t0
         .resolve_public_key(TEST_KEY_ID, false)
         .await
@@ -199,7 +199,7 @@ async fn resolve_after_ttl_elapsed_without_force_treats_cache_as_stale_and_refet
     // clock mid-test (`FixedClock` cannot be advanced in place).
     mock.queue_fetch_response(actor_document_response("PEM-AFTER-TTL"));
     let resolver_after_ttl =
-        DbFederationPublicKeyResolver::new(app.pool.clone(), mock.clone(), fixed_clock_at(61), ttl);
+        DbFederationPublicKeyResolver::new(db.pool.clone(), mock.clone(), fixed_clock_at(61), ttl);
 
     let resolved = resolver_after_ttl
         .resolve_public_key(TEST_KEY_ID, false)
@@ -214,14 +214,14 @@ async fn resolve_after_ttl_elapsed_without_force_treats_cache_as_stale_and_refet
          over the network instead of returning the stale cached value"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- Non-success HTTP status surfaces as an error and never caches ---
 
 #[tokio::test]
 async fn fetch_returning_a_non_success_status_surfaces_as_an_error_and_does_not_cache() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(HttpResponse {
         status: StatusCode::NOT_FOUND,
@@ -229,7 +229,7 @@ async fn fetch_returning_a_non_success_status_surfaces_as_an_error_and_does_not_
         body: b"not found".to_vec(),
     });
     let resolver = DbFederationPublicKeyResolver::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock.clone(),
         fixed_clock_at(0),
         Duration::hours(24),
@@ -238,7 +238,7 @@ async fn fetch_returning_a_non_success_status_surfaces_as_an_error_and_does_not_
     let result = resolver.resolve_public_key(TEST_KEY_ID, false).await;
 
     assert!(result.is_err());
-    let cached = find_cached(&app.pool, TEST_KEY_ID)
+    let cached = find_cached(&db.pool, TEST_KEY_ID)
         .await
         .expect("reading the cache must succeed");
     assert!(
@@ -246,7 +246,7 @@ async fn fetch_returning_a_non_success_status_surfaces_as_an_error_and_does_not_
         "a failed fetch must not leave a cache row behind"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- parse_public_key_document: pure unit tests, no DB/network involved ---

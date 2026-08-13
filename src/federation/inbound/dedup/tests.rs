@@ -4,7 +4,7 @@
 //! 日数を超えた行がプルーニング実行後に削除される統合テストが通る".
 //!
 //! Mirrors `src/federation/signatures/key_resolver/tests.rs`'s established
-//! convention: `spawn_test_app` for an isolated, already-migrated schema (so
+//! convention: `spawn_test_db` for an isolated, already-migrated schema (so
 //! this exercises the real `received_activities` table, not a stand-in),
 //! and a fixed, per-`DbReceivedActivityStore` `FixedClock` (`FixedClock`
 //! itself cannot be advanced mid-instance) so "time has passed" between
@@ -18,7 +18,7 @@ use time::macros::datetime;
 
 use super::*;
 use crate::runtime::FixedClock;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 const ACTIVITY_ID: &str = "https://remote.example/activities/1";
 const OTHER_ACTIVITY_ID: &str = "https://remote.example/activities/2";
@@ -32,9 +32,9 @@ fn fixed_clock_at(offset_seconds: i64) -> Arc<dyn Clock> {
 
 #[tokio::test]
 async fn record_if_new_is_true_first_time_and_false_on_the_same_id_again() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let store = DbReceivedActivityStore::new(
-        app.pool.clone(),
+        db.pool.clone(),
         fixed_clock_at(0),
         DEFAULT_RECEIVED_ACTIVITY_RETENTION,
     );
@@ -65,14 +65,14 @@ async fn record_if_new_is_true_first_time_and_false_on_the_same_id_again() {
         "a different activity id must be treated as new regardless of an unrelated id's history"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[tokio::test]
 async fn record_if_new_persists_a_row_in_received_activities() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let store = DbReceivedActivityStore::new(
-        app.pool.clone(),
+        db.pool.clone(),
         fixed_clock_at(0),
         DEFAULT_RECEIVED_ACTIVITY_RETENTION,
     );
@@ -85,23 +85,23 @@ async fn record_if_new_persists_a_row_in_received_activities() {
     let row: (String,) =
         sqlx::query_as("SELECT activity_id FROM received_activities WHERE activity_id = $1")
             .bind(ACTIVITY_ID)
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("the recorded activity id must be persisted in received_activities");
     assert_eq!(row.0, ACTIVITY_ID);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- 3: pruning deletes rows older than retention, keeps rows within retention ---
 
 #[tokio::test]
 async fn prune_expired_deletes_rows_older_than_retention_and_keeps_rows_within_it() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let retention = Duration::days(14);
 
     // Recorded "now" (t = 0).
-    let store_at_t0 = DbReceivedActivityStore::new(app.pool.clone(), fixed_clock_at(0), retention);
+    let store_at_t0 = DbReceivedActivityStore::new(db.pool.clone(), fixed_clock_at(0), retention);
     store_at_t0
         .record_if_new(ACTIVITY_ID)
         .await
@@ -112,7 +112,7 @@ async fn prune_expired_deletes_rows_older_than_retention_and_keeps_rows_within_i
     // must survive pruning ("boundary: within retention is not pruned").
     let within_retention_offset = retention.whole_seconds() - Duration::hours(1).whole_seconds();
     let store_within_retention = DbReceivedActivityStore::new(
-        app.pool.clone(),
+        db.pool.clone(),
         fixed_clock_at(within_retention_offset),
         retention,
     );
@@ -127,7 +127,7 @@ async fn prune_expired_deletes_rows_older_than_retention_and_keeps_rows_within_i
     // this pruning clock's own "now".
     let prune_offset = retention.whole_seconds() + Duration::hours(1).whole_seconds();
     let pruning_store =
-        DbReceivedActivityStore::new(app.pool.clone(), fixed_clock_at(prune_offset), retention);
+        DbReceivedActivityStore::new(db.pool.clone(), fixed_clock_at(prune_offset), retention);
 
     let deleted = pruning_store
         .prune_expired()
@@ -141,7 +141,7 @@ async fn prune_expired_deletes_rows_older_than_retention_and_keeps_rows_within_i
     let old_still_present: Option<(String,)> =
         sqlx::query_as("SELECT activity_id FROM received_activities WHERE activity_id = $1")
             .bind(ACTIVITY_ID)
-            .fetch_optional(&app.pool)
+            .fetch_optional(&db.pool)
             .await
             .expect("querying received_activities must succeed");
     assert!(
@@ -152,7 +152,7 @@ async fn prune_expired_deletes_rows_older_than_retention_and_keeps_rows_within_i
     let recent_still_present: Option<(String,)> =
         sqlx::query_as("SELECT activity_id FROM received_activities WHERE activity_id = $1")
             .bind(OTHER_ACTIVITY_ID)
-            .fetch_optional(&app.pool)
+            .fetch_optional(&db.pool)
             .await
             .expect("querying received_activities must succeed");
     assert!(
@@ -160,7 +160,7 @@ async fn prune_expired_deletes_rows_older_than_retention_and_keeps_rows_within_i
         "a row within the retention window must NOT be pruned"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[test]

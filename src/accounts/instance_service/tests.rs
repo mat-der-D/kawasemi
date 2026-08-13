@@ -3,7 +3,7 @@
 //! サービステストが green".
 //!
 //! Mirrors `src/accounts/settings_repository/tests.rs`'s established
-//! convention: `spawn_test_app` for an isolated, already-migrated schema,
+//! convention: `spawn_test_db` for an isolated, already-migrated schema,
 //! seeding `instance_settings` directly with raw `sqlx::query` `INSERT`s
 //! (this crate never seeds that table itself — see
 //! `settings_repository.rs`'s own doc comment, "Read-only, by
@@ -19,7 +19,7 @@ use super::InstanceService;
 use crate::accounts::instance_serializer::{InstanceSerializer, ServerCapabilities};
 use crate::config::MediaConfig;
 use crate::domain::Id;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// A `MediaConfig` fixture with distinct, non-default-looking upload
 /// constraints, so `configuration.media_attachments` in the assertions below
@@ -51,8 +51,8 @@ fn service(pool: sqlx::PgPool) -> InstanceService {
 /// reflected verbatim in the Instance(v2) JSON the service returns.
 #[tokio::test]
 async fn instance_v2_reflects_operator_configured_settings() {
-    let app = spawn_test_app().await;
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let now = db.runtime.clock.now();
     let contact_account_id = Id::from_i64(99);
 
     sqlx::query(
@@ -78,11 +78,11 @@ async fn instance_v2_reflects_operator_configured_settings() {
     .bind("https://kawasemi.example/thumbnail.png")
     .bind(serde_json::json!(["en", "ja"]))
     .bind(now)
-    .execute(&app.pool)
+    .execute(&db.pool)
     .await
     .expect("seeding a full instance_settings row must succeed");
 
-    let svc = service(app.pool.clone());
+    let svc = service(db.pool.clone());
     let json = svc
         .instance_v2()
         .await
@@ -124,7 +124,7 @@ async fn instance_v2_reflects_operator_configured_settings() {
     );
     assert_eq!(json["languages"], serde_json::json!(["en", "ja"]));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.3: with no `instance_settings` row present at all (this
@@ -135,10 +135,10 @@ async fn instance_v2_reflects_operator_configured_settings() {
 /// the repository/serializer in isolation.
 #[tokio::test]
 async fn instance_v2_with_no_settings_row_returns_a_fully_defaulted_instance() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
     let row_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM instance_settings")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting rows must succeed");
     assert_eq!(
@@ -146,7 +146,7 @@ async fn instance_v2_with_no_settings_row_returns_a_fully_defaulted_instance() {
         "the test database must start with no instance_settings row"
     );
 
-    let svc = service(app.pool.clone());
+    let svc = service(db.pool.clone());
     let json = svc
         .instance_v2()
         .await
@@ -186,7 +186,7 @@ async fn instance_v2_with_no_settings_row_returns_a_fully_defaulted_instance() {
         serde_json::json!(env!("CARGO_PKG_VERSION"))
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.4: `configuration` must align with this server's actual
@@ -195,9 +195,9 @@ async fn instance_v2_with_no_settings_row_returns_a_fully_defaulted_instance() {
 /// values and asserting the JSON echoes exactly those.
 #[tokio::test]
 async fn instance_v2_configuration_reflects_the_real_media_config_limits() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let svc = service(app.pool.clone());
+    let svc = service(db.pool.clone());
     let json = svc.instance_v2().await.expect("instance_v2 must succeed");
 
     let config = media_config();
@@ -210,5 +210,5 @@ async fn instance_v2_configuration_reflects_the_real_media_config_limits() {
         serde_json::json!(config.max_upload_size_bytes)
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

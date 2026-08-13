@@ -4,7 +4,7 @@
 //! キャッシュが更新され、不在アクターのローテーションがエラーを返す".
 //!
 //! Mirrors `src/actor/keys/repository/tests.rs`'s established convention:
-//! `spawn_test_app` for an isolated, already-migrated schema and a
+//! `spawn_test_db` for an isolated, already-migrated schema and a
 //! deterministic `RuntimeContext`; a real owner + actor fixture created
 //! first (`actor_signing_keys.actor_id` is a mandatory foreign key into
 //! `local_actors`).
@@ -25,7 +25,7 @@ use crate::config::Secret;
 use crate::domain::Id;
 use crate::runtime::RuntimeContext;
 use crate::runtime::signing_key::KeyRef;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// Builds a `SigningKeyService` bound to `pool`/`runtime`, a fresh
 /// `ChaCha20Poly1305KeyCipher` under a fixed test KEK, and `cache`.
@@ -93,24 +93,24 @@ async fn count_rows_with_status(pool: &PgPool, actor_id: Id, status: &str) -> i6
 /// the same PEM the DB's sealed bytes decrypt to.
 #[tokio::test]
 async fn provision_key_persists_active_key_and_updates_the_cache_with_matching_plaintext() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_id, "alice", now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    insert_actor_fixture(&db.pool, owner_id, actor_id, "alice", now).await;
 
     let cache = KeyCache::new();
     let cipher = ChaCha20Poly1305KeyCipher::new(Secret::new([3u8; 32]));
     let service = SigningKeyService::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         Arc::new(ChaCha20Poly1305KeyCipher::new(Secret::new([3u8; 32]))),
         cache.clone(),
     );
 
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -124,7 +124,7 @@ async fn provision_key_persists_active_key_and_updates_the_cache_with_matching_p
         .expect("committing the transaction must succeed");
 
     // Persisted: exactly one active key row, sealed (not plaintext).
-    let public_key = find_active_public_key(&app.pool, actor_id)
+    let public_key = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("find_active_public_key must succeed")
         .expect("provision_key must have inserted an active key");
@@ -135,7 +135,7 @@ async fn provision_key_persists_active_key_and_updates_the_cache_with_matching_p
             .starts_with("-----BEGIN PUBLIC KEY-----")
     );
 
-    let active = load_all_active(&app.pool)
+    let active = load_all_active(&db.pool)
         .await
         .expect("load_all_active must succeed");
     let stored = active
@@ -159,7 +159,7 @@ async fn provision_key_persists_active_key_and_updates_the_cache_with_matching_p
         .expect("opening the sealed bytes must succeed");
     assert_eq!(cached.expose_pem_bytes(), opened.expose_secret().as_bytes());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 4.1's "single transaction" contract: `provision_key` never
@@ -168,18 +168,18 @@ async fn provision_key_persists_active_key_and_updates_the_cache_with_matching_p
 /// `provision_key` already returned `Ok`.
 #[tokio::test]
 async fn provision_key_write_is_rolled_back_if_the_callers_transaction_is_rolled_back() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_id, "bob", now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    insert_actor_fixture(&db.pool, owner_id, actor_id, "bob", now).await;
 
     let cache = KeyCache::new();
-    let service = service_under_test(app.pool.clone(), app.runtime.clone(), cache.clone());
+    let service = service_under_test(db.pool.clone(), db.runtime.clone(), cache.clone());
 
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -192,7 +192,7 @@ async fn provision_key_write_is_rolled_back_if_the_callers_transaction_is_rolled
         .await
         .expect("rolling back the transaction must succeed");
 
-    let public_key = find_active_public_key(&app.pool, actor_id)
+    let public_key = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("find_active_public_key must succeed");
     assert!(
@@ -200,7 +200,7 @@ async fn provision_key_write_is_rolled_back_if_the_callers_transaction_is_rolled
         "a rolled-back caller transaction must leave no persisted active key"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 5.1, 5.2, 5.3, 6.4: `rotate_key` retires the previous
@@ -209,18 +209,18 @@ async fn provision_key_write_is_rolled_back_if_the_callers_transaction_is_rolled
 /// to the new key.
 #[tokio::test]
 async fn rotate_key_retires_old_key_activates_new_key_and_keeps_active_at_most_one() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_id, "carol", now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    insert_actor_fixture(&db.pool, owner_id, actor_id, "carol", now).await;
 
     let cache = KeyCache::new();
-    let service = service_under_test(app.pool.clone(), app.runtime.clone(), cache.clone());
+    let service = service_under_test(db.pool.clone(), db.runtime.clone(), cache.clone());
 
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -233,7 +233,7 @@ async fn rotate_key_retires_old_key_activates_new_key_and_keeps_active_at_most_o
         .await
         .expect("committing the initial provision must succeed");
 
-    let original = find_active_public_key(&app.pool, actor_id)
+    let original = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("find_active_public_key must succeed")
         .expect("an active key must exist after provisioning");
@@ -243,7 +243,7 @@ async fn rotate_key_retires_old_key_activates_new_key_and_keeps_active_at_most_o
         .await
         .expect("rotate_key must succeed for an existing actor");
 
-    let rotated = find_active_public_key(&app.pool, actor_id)
+    let rotated = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("find_active_public_key must succeed")
         .expect("an active key must still exist after rotation");
@@ -259,11 +259,11 @@ async fn rotate_key_retires_old_key_activates_new_key_and_keeps_active_at_most_o
     // At most one active row for the actor (Requirement 5.3), and the old
     // row is retained as retired, not deleted (Requirement 5.4).
     assert_eq!(
-        count_rows_with_status(&app.pool, actor_id, "active").await,
+        count_rows_with_status(&db.pool, actor_id, "active").await,
         1
     );
     assert_eq!(
-        count_rows_with_status(&app.pool, actor_id, "retired").await,
+        count_rows_with_status(&db.pool, actor_id, "retired").await,
         1
     );
 
@@ -277,18 +277,18 @@ async fn rotate_key_retires_old_key_activates_new_key_and_keeps_active_at_most_o
         "sanity: cached key must be non-empty"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 5.5: rotating a nonexistent actor is rejected with a
 /// caller-facing error, and must not write anything to the DB.
 #[tokio::test]
 async fn rotate_key_rejects_a_nonexistent_actor() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let cache = KeyCache::new();
-    let service = service_under_test(app.pool.clone(), app.runtime.clone(), cache.clone());
+    let service = service_under_test(db.pool.clone(), db.runtime.clone(), cache.clone());
 
-    let nonexistent_actor_id = app.runtime.ids.next_id();
+    let nonexistent_actor_id = db.runtime.ids.next_id();
 
     let result = service.rotate_key(nonexistent_actor_id).await;
 
@@ -297,7 +297,7 @@ async fn rotate_key_rejects_a_nonexistent_actor() {
     assert!(error.status.is_client_error());
 
     assert_eq!(
-        count_rows_with_status(&app.pool, nonexistent_actor_id, "active").await,
+        count_rows_with_status(&db.pool, nonexistent_actor_id, "active").await,
         0,
         "no row should ever be written for a rejected rotation"
     );
@@ -306,25 +306,25 @@ async fn rotate_key_rejects_a_nonexistent_actor() {
         "the cache must not be touched for a rejected rotation"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 5.2, 5.3: rotating twice in a row keeps active-at-most-one
 /// each time, and each rotation's key differs from every previous one.
 #[tokio::test]
 async fn rotating_twice_keeps_active_at_most_one_and_produces_distinct_keys_each_time() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_id, "dave", now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    insert_actor_fixture(&db.pool, owner_id, actor_id, "dave", now).await;
 
     let cache = KeyCache::new();
-    let service = service_under_test(app.pool.clone(), app.runtime.clone(), cache.clone());
+    let service = service_under_test(db.pool.clone(), db.runtime.clone(), cache.clone());
 
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -335,7 +335,7 @@ async fn rotating_twice_keeps_active_at_most_one_and_produces_distinct_keys_each
         .expect("initial provision_key must succeed");
     tx.commit().await.expect("commit must succeed");
 
-    let first = find_active_public_key(&app.pool, actor_id)
+    let first = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("lookup must succeed")
         .expect("active key must exist");
@@ -344,12 +344,12 @@ async fn rotating_twice_keeps_active_at_most_one_and_produces_distinct_keys_each
         .rotate_key(actor_id)
         .await
         .expect("first rotation must succeed");
-    let second = find_active_public_key(&app.pool, actor_id)
+    let second = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("lookup must succeed")
         .expect("active key must exist");
     assert_eq!(
-        count_rows_with_status(&app.pool, actor_id, "active").await,
+        count_rows_with_status(&db.pool, actor_id, "active").await,
         1
     );
 
@@ -357,16 +357,16 @@ async fn rotating_twice_keeps_active_at_most_one_and_produces_distinct_keys_each
         .rotate_key(actor_id)
         .await
         .expect("second rotation must succeed");
-    let third = find_active_public_key(&app.pool, actor_id)
+    let third = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("lookup must succeed")
         .expect("active key must exist");
     assert_eq!(
-        count_rows_with_status(&app.pool, actor_id, "active").await,
+        count_rows_with_status(&db.pool, actor_id, "active").await,
         1
     );
     assert_eq!(
-        count_rows_with_status(&app.pool, actor_id, "retired").await,
+        count_rows_with_status(&db.pool, actor_id, "retired").await,
         2
     );
 
@@ -377,5 +377,5 @@ async fn rotating_twice_keeps_active_at_most_one_and_produces_distinct_keys_each
         "all three generations of the key must be distinct"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

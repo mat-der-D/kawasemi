@@ -4,7 +4,7 @@
 //! されることを統合テストで確認できる".
 //!
 //! Mirrors `src/actor/repository/tests.rs`'s established convention: reuses
-//! `crate::test_harness::spawn_test_app` for an isolated, already-migrated
+//! `crate::test_harness::db_fixture::spawn_test_db` for an isolated, already-migrated
 //! schema and a deterministic `RuntimeContext`. Every test creates a real
 //! owner + local actor row first (`media.actor_id` is a logical reference to
 //! `local_actors.id`; nothing here enforces a hard FK, but exercising real
@@ -21,18 +21,18 @@ use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
 use crate::domain::Id;
 use crate::media::model::{Dimensions, Focus, Media, MediaMeta, MediaState, MediaType};
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// Creates a real owner + local actor row, returning the actor's `Id`, so
 /// tests have a genuine owning actor to bind media to.
-async fn create_test_actor(app: &crate::test_harness::TestApp, handle: &str) -> Id {
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+async fn create_test_actor(db: &crate::test_harness::db_fixture::TestDb, handle: &str) -> Id {
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
     let actor = LocalActor {
         id: actor_id,
         owner_id,
@@ -44,7 +44,7 @@ async fn create_test_actor(app: &crate::test_harness::TestApp, handle: &str) -> 
         created_at: now,
         updated_at: now,
     };
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -78,42 +78,42 @@ fn sample_media(id: Id, actor_id: Id, now: time::OffsetDateTime) -> Media {
 /// `find_owned` by its owning actor, with the fields it was inserted with.
 #[tokio::test]
 async fn insert_media_persists_a_row_findable_by_its_owning_actor() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "alice").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "alice").await;
 
-    let media_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let media_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let media = sample_media(media_id, actor_id, now);
 
-    insert_media(&app.pool, &media, "1/original", "image/png")
+    insert_media(&db.pool, &media, "1/original", "image/png")
         .await
         .expect("insert_media must succeed for a fresh id/actor");
 
-    let found = find_owned(&app.pool, media_id, actor_id)
+    let found = find_owned(&db.pool, media_id, actor_id)
         .await
         .expect("find_owned must succeed")
         .expect("the just-inserted media must be found by its owning actor");
     assert_eq!(found, media);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 2.4: `find_owned` never returns another actor's media — the
 /// exact postcondition design.md states for this component.
 #[tokio::test]
 async fn find_owned_does_not_return_another_actors_media() {
-    let app = spawn_test_app().await;
-    let owner_actor = create_test_actor(&app, "owner_actor").await;
-    let other_actor = create_test_actor(&app, "other_actor").await;
+    let db = spawn_test_db().await;
+    let owner_actor = create_test_actor(&db, "owner_actor").await;
+    let other_actor = create_test_actor(&db, "other_actor").await;
 
-    let media_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let media_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let media = sample_media(media_id, owner_actor, now);
-    insert_media(&app.pool, &media, "2/original", "image/jpeg")
+    insert_media(&db.pool, &media, "2/original", "image/jpeg")
         .await
         .expect("insert_media must succeed");
 
-    let as_other = find_owned(&app.pool, media_id, other_actor)
+    let as_other = find_owned(&db.pool, media_id, other_actor)
         .await
         .expect("find_owned must succeed even for a non-owning actor");
     assert!(
@@ -121,29 +121,29 @@ async fn find_owned_does_not_return_another_actors_media() {
         "find_owned must not return media belonging to a different actor"
     );
 
-    let as_owner = find_owned(&app.pool, media_id, owner_actor)
+    let as_owner = find_owned(&db.pool, media_id, owner_actor)
         .await
         .expect("find_owned must succeed")
         .expect("the owning actor must still find its own media");
     assert_eq!(as_owner, media);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `find_owned` returns `Ok(None)` — not an error — for a `media_id`
 /// nothing was ever inserted under.
 #[tokio::test]
 async fn find_owned_returns_none_for_an_unknown_media_id() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "bob").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "bob").await;
 
     let unknown_id = Id::from_i64(i64::MAX - 1);
-    let found = find_owned(&app.pool, unknown_id, actor_id)
+    let found = find_owned(&db.pool, unknown_id, actor_id)
         .await
         .expect("find_owned must succeed even when nothing matches");
     assert!(found.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 3.1, 3.4: `update_metadata` updates description and focus
@@ -151,13 +151,13 @@ async fn find_owned_returns_none_for_an_unknown_media_id() {
 /// `Processing`.
 #[tokio::test]
 async fn update_metadata_updates_description_and_focus_and_reflects_it() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "carol").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "carol").await;
 
-    let media_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let media_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let media = sample_media(media_id, actor_id, now);
-    insert_media(&app.pool, &media, "3/original", "image/png")
+    insert_media(&db.pool, &media, "3/original", "image/png")
         .await
         .expect("insert_media must succeed");
     assert_eq!(
@@ -169,7 +169,7 @@ async fn update_metadata_updates_description_and_focus_and_reflects_it() {
     let later = now + time::Duration::seconds(30);
     let new_focus = Focus::new(0.5, -0.25).expect("valid focus");
     let updated = update_metadata(
-        &app.pool,
+        &db.pool,
         media_id,
         actor_id,
         Some("a red panda"),
@@ -188,34 +188,34 @@ async fn update_metadata_updates_description_and_focus_and_reflects_it() {
         "update_metadata must not change processing state"
     );
 
-    let refetched = find_owned(&app.pool, media_id, actor_id)
+    let refetched = find_owned(&db.pool, media_id, actor_id)
         .await
         .expect("find_owned must succeed")
         .expect("the media must still be found");
     assert_eq!(refetched, updated);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `update_metadata`'s patch semantics: an unset field (`None`) is left
 /// unchanged, not blanked out.
 #[tokio::test]
 async fn update_metadata_leaves_unset_fields_unchanged() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "dave").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "dave").await;
 
-    let media_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let media_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let mut media = sample_media(media_id, actor_id, now);
     media.description = Some("original description".to_string());
-    insert_media(&app.pool, &media, "4/original", "image/png")
+    insert_media(&db.pool, &media, "4/original", "image/png")
         .await
         .expect("insert_media must succeed");
 
     // Update only the focus; description must remain untouched.
     let later = now + time::Duration::seconds(10);
     let new_focus = Focus::new(-1.0, 1.0).expect("valid focus");
-    let updated = update_metadata(&app.pool, media_id, actor_id, None, Some(new_focus), later)
+    let updated = update_metadata(&db.pool, media_id, actor_id, None, Some(new_focus), later)
         .await
         .expect("update_metadata must succeed")
         .expect("media must be found");
@@ -228,7 +228,7 @@ async fn update_metadata_leaves_unset_fields_unchanged() {
 
     // Now update only the description; focus must remain untouched.
     let updated2 = update_metadata(
-        &app.pool,
+        &db.pool,
         media_id,
         actor_id,
         Some("new description"),
@@ -244,27 +244,27 @@ async fn update_metadata_leaves_unset_fields_unchanged() {
         "an unset focus patch field must not reset the existing value"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.3: updating a media that is not owned by the requesting
 /// actor is rejected (returns `None`, no row changed).
 #[tokio::test]
 async fn update_metadata_returns_none_for_a_non_owning_actor_and_does_not_modify_the_row() {
-    let app = spawn_test_app().await;
-    let owner_actor = create_test_actor(&app, "erin").await;
-    let intruder_actor = create_test_actor(&app, "frank").await;
+    let db = spawn_test_db().await;
+    let owner_actor = create_test_actor(&db, "erin").await;
+    let intruder_actor = create_test_actor(&db, "frank").await;
 
-    let media_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let media_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let media = sample_media(media_id, owner_actor, now);
-    insert_media(&app.pool, &media, "5/original", "image/png")
+    insert_media(&db.pool, &media, "5/original", "image/png")
         .await
         .expect("insert_media must succeed");
 
     let later = now + time::Duration::seconds(5);
     let result = update_metadata(
-        &app.pool,
+        &db.pool,
         media_id,
         intruder_actor,
         Some("hijacked description"),
@@ -279,26 +279,26 @@ async fn update_metadata_returns_none_for_a_non_owning_actor_and_does_not_modify
     );
 
     // The original row must be untouched.
-    let refetched = find_owned(&app.pool, media_id, owner_actor)
+    let refetched = find_owned(&db.pool, media_id, owner_actor)
         .await
         .expect("find_owned must succeed")
         .expect("media must still exist");
     assert_eq!(refetched, media);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 4.3: `set_ready` transitions state to Ready and reflects the
 /// derived dimensions/BlurHash.
 #[tokio::test]
 async fn set_ready_transitions_state_and_reflects_derived_metadata() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "grace").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "grace").await;
 
-    let media_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let media_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let media = sample_media(media_id, actor_id, now);
-    insert_media(&app.pool, &media, "6/original", "image/png")
+    insert_media(&db.pool, &media, "6/original", "image/png")
         .await
         .expect("insert_media must succeed");
 
@@ -316,7 +316,7 @@ async fn set_ready_transitions_state_and_reflects_derived_metadata() {
     };
     let later = now + time::Duration::seconds(15);
     set_ready(
-        &app.pool,
+        &db.pool,
         media_id,
         &meta,
         "LKO2?U%2Tw=w]~RBVZRi};RPxuwH",
@@ -326,7 +326,7 @@ async fn set_ready_transitions_state_and_reflects_derived_metadata() {
     .await
     .expect("set_ready must succeed");
 
-    let ready = find_owned(&app.pool, media_id, actor_id)
+    let ready = find_owned(&db.pool, media_id, actor_id)
         .await
         .expect("find_owned must succeed")
         .expect("media must be found");
@@ -342,35 +342,35 @@ async fn set_ready_transitions_state_and_reflects_derived_metadata() {
     assert_eq!(small.width, 400);
     assert_eq!(small.height, 225);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 4.5's resulting media-state transition: `set_failed`
 /// transitions state to Failed.
 #[tokio::test]
 async fn set_failed_transitions_state_to_failed() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "heidi").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "heidi").await;
 
-    let media_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let media_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let media = sample_media(media_id, actor_id, now);
-    insert_media(&app.pool, &media, "7/original", "image/png")
+    insert_media(&db.pool, &media, "7/original", "image/png")
         .await
         .expect("insert_media must succeed");
 
     let later = now + time::Duration::seconds(20);
-    set_failed(&app.pool, media_id, later)
+    set_failed(&db.pool, media_id, later)
         .await
         .expect("set_failed must succeed");
 
-    let failed = find_owned(&app.pool, media_id, actor_id)
+    let failed = find_owned(&db.pool, media_id, actor_id)
         .await
         .expect("find_owned must succeed")
         .expect("media must be found");
     assert_eq!(failed.state, MediaState::Failed);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `insert_media` requires a real `Media` value whose `actor_id` field is
@@ -379,24 +379,24 @@ async fn set_failed_transitions_state_to_failed() {
 /// the `Some(description)` insert path (the other tests all use `None`).
 #[tokio::test]
 async fn insert_media_round_trips_an_initial_description() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "ivan").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "ivan").await;
 
-    let media_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let media_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let mut media = sample_media(media_id, actor_id, now);
     media.description = Some("a photo of a cat".to_string());
-    insert_media(&app.pool, &media, "8/original", "image/webp")
+    insert_media(&db.pool, &media, "8/original", "image/webp")
         .await
         .expect("insert_media must succeed");
 
-    let found = find_owned(&app.pool, media_id, actor_id)
+    let found = find_owned(&db.pool, media_id, actor_id)
         .await
         .expect("find_owned must succeed")
         .expect("media must be found");
     assert_eq!(found.description.as_deref(), Some("a photo of a cat"));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Task 4.3 addition: `find_by_id` returns the row regardless of which
@@ -405,18 +405,18 @@ async fn insert_media_round_trips_an_initial_description() {
 /// job, never a requesting actor.
 #[tokio::test]
 async fn find_by_id_returns_the_media_row_without_any_owner_scoping() {
-    let app = spawn_test_app().await;
-    let owning_actor = create_test_actor(&app, "judy").await;
-    let unrelated_actor = create_test_actor(&app, "kevin").await;
+    let db = spawn_test_db().await;
+    let owning_actor = create_test_actor(&db, "judy").await;
+    let unrelated_actor = create_test_actor(&db, "kevin").await;
 
-    let media_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let media_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let media = sample_media(media_id, owning_actor, now);
-    insert_media(&app.pool, &media, "9/original", "image/png")
+    insert_media(&db.pool, &media, "9/original", "image/png")
         .await
         .expect("insert_media must succeed");
 
-    let found = find_by_id(&app.pool, media_id)
+    let found = find_by_id(&db.pool, media_id)
         .await
         .expect("find_by_id must succeed")
         .expect("media must be found even though the caller supplies no actor at all");
@@ -427,27 +427,27 @@ async fn find_by_id_returns_the_media_row_without_any_owner_scoping() {
     // filtering by some ambient actor: an unrelated actor querying via
     // `find_owned` must NOT see this row, while `find_by_id` does not even
     // accept an actor argument to filter by.
-    let not_owned = find_owned(&app.pool, media_id, unrelated_actor)
+    let not_owned = find_owned(&db.pool, media_id, unrelated_actor)
         .await
         .expect("find_owned must succeed");
     assert!(not_owned.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `find_by_id` returns `Ok(None)` for a `media_id` that was never
 /// inserted, the same "not found" contract `find_owned` has for that case.
 #[tokio::test]
 async fn find_by_id_returns_none_for_a_nonexistent_media_id() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let missing = crate::domain::Id::from_i64(999_999_999);
 
-    let found = find_by_id(&app.pool, missing)
+    let found = find_by_id(&db.pool, missing)
         .await
         .expect("find_by_id must succeed even for a nonexistent id");
     assert!(found.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- find_by_ids -------------------------------------------------------
@@ -459,14 +459,14 @@ async fn find_by_id_returns_none_for_a_nonexistent_media_id() {
 /// never an error).
 #[tokio::test]
 async fn find_by_ids_matches_calling_find_by_id_per_media() {
-    let app = spawn_test_app().await;
-    let owning_actor = create_test_actor(&app, "leo").await;
-    let unrelated_actor = create_test_actor(&app, "mia").await;
+    let db = spawn_test_db().await;
+    let owning_actor = create_test_actor(&db, "leo").await;
+    let unrelated_actor = create_test_actor(&db, "mia").await;
 
-    let now = app.runtime.clock.now();
-    let first_id = app.runtime.ids.next_id();
-    let second_id = app.runtime.ids.next_id();
-    let third_id = app.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    let first_id = db.runtime.ids.next_id();
+    let second_id = db.runtime.ids.next_id();
+    let third_id = db.runtime.ids.next_id();
 
     // Distinct descriptions, so a batched implementation that returned the
     // right *number* of rows but mapped them to the wrong keys would fail.
@@ -484,7 +484,7 @@ async fn find_by_ids_matches_calling_find_by_id_per_media() {
         (&second, "21/original"),
         (&third, "22/original"),
     ] {
-        insert_media(&app.pool, media, object_key, "image/png")
+        insert_media(&db.pool, media, object_key, "image/png")
             .await
             .expect("insert_media must succeed");
     }
@@ -494,7 +494,7 @@ async fn find_by_ids_matches_calling_find_by_id_per_media() {
 
     let mut per_call = HashMap::new();
     for &media_id in &ids {
-        let singular = find_by_id(&app.pool, media_id)
+        let singular = find_by_id(&db.pool, media_id)
             .await
             .expect("find_by_id must succeed");
         if let Some(media) = singular {
@@ -502,7 +502,7 @@ async fn find_by_ids_matches_calling_find_by_id_per_media() {
         }
     }
 
-    let batched = find_by_ids(&app.pool, &ids)
+    let batched = find_by_ids(&db.pool, &ids)
         .await
         .expect("find_by_ids must succeed");
     assert_eq!(
@@ -517,7 +517,7 @@ async fn find_by_ids_matches_calling_find_by_id_per_media() {
     assert_eq!(batched.get(&third_id), Some(&third));
     assert_eq!(batched.get(&missing), None);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// An empty `ids` returns an empty map *without issuing a query*. Closing the
@@ -527,13 +527,13 @@ async fn find_by_ids_matches_calling_find_by_id_per_media() {
 /// database.
 #[tokio::test]
 async fn find_by_ids_returns_empty_for_an_empty_slice_without_querying() {
-    let app = spawn_test_app().await;
-    app.pool.close().await;
+    let db = spawn_test_db().await;
+    db.pool.close().await;
 
-    let batched = find_by_ids(&app.pool, &[])
+    let batched = find_by_ids(&db.pool, &[])
         .await
         .expect("an empty slice must succeed even against a closed pool");
     assert!(batched.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

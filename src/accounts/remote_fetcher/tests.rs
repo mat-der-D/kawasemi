@@ -4,11 +4,11 @@
 //! プロパティ付き文書でも正規化が成功する統合テストが green".
 //!
 //! Mirrors `src/federation/signatures/key_resolver/tests.rs`'s established
-//! convention: `spawn_test_app` for an isolated, already-migrated schema (so
+//! convention: `spawn_test_db` for an isolated, already-migrated schema (so
 //! `upsert_remote`/`find_remote_by_uri` exercise the real `remote_accounts`
 //! table), paired with `MockFederationHttpClient` so every "fetches over the
 //! network" assertion is deterministic without any real HTTP call.
-//! `spawn_test_app`'s `RuntimeContext` uses a `FixedClock` (always returns
+//! `spawn_test_db`'s `RuntimeContext` uses a `FixedClock` (always returns
 //! the same fixed instant), so staleness is exercised by directly seeding a
 //! cached row's `fetched_at` relative to that fixed "now" -- never by
 //! advancing a clock mid-test.
@@ -19,7 +19,7 @@ use super::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::accounts::model::RemoteAccount;
 use crate::accounts::remote_repository::{find_remote_by_uri, upsert_remote};
 use crate::federation::signatures::{HttpResponse, MockFederationHttpClient};
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 use axum::http::{HeaderMap, StatusCode};
 
 const ACTOR_URI: &str = "https://remote.example/users/alice";
@@ -64,14 +64,14 @@ fn full_actor_document() -> serde_json::Value {
 /// is then persisted (visible via `find_remote_by_uri`).
 #[tokio::test]
 async fn cache_miss_fetches_normalizes_and_upserts_even_with_unknown_properties() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = std::sync::Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(ok_response(full_actor_document()));
 
     let fetcher = RemoteAccountFetcher::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock.clone(),
-        app.runtime.clone(),
+        db.runtime.clone(),
         DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
     );
 
@@ -104,14 +104,14 @@ async fn cache_miss_fetches_normalizes_and_upserts_even_with_unknown_properties(
     assert_eq!(mock.fetched_urls().len(), 1);
     assert_eq!(mock.fetched_urls()[0].0, ACTOR_URI);
 
-    let persisted = find_remote_by_uri(&app.pool, ACTOR_URI)
+    let persisted = find_remote_by_uri(&db.pool, ACTOR_URI)
         .await
         .expect("find_remote_by_uri must succeed")
         .expect("the normalized account must have been upserted into the cache");
     assert_eq!(persisted.id, account.id);
     assert_eq!(persisted.display_name, "Alice Example");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 7.5: `type: "Service"` normalizes to `bot: true`, matching
@@ -119,16 +119,16 @@ async fn cache_miss_fetches_normalizes_and_upserts_even_with_unknown_properties(
 /// (`src/accounts/serializer.rs`'s doc comment).
 #[tokio::test]
 async fn service_actor_type_normalizes_to_bot_true() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = std::sync::Arc::new(MockFederationHttpClient::new());
     let mut document = full_actor_document();
     document["type"] = json!("Service");
     mock.queue_fetch_response(ok_response(document));
 
     let fetcher = RemoteAccountFetcher::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock,
-        app.runtime.clone(),
+        db.runtime.clone(),
         DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
     );
 
@@ -138,21 +138,21 @@ async fn service_actor_type_normalizes_to_bot_true() {
         .expect("a Service-typed document must still normalize successfully");
     assert!(account.bot);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 7.3: a fresh (non-stale) cache entry is returned as-is, with
 /// no `FederationHttpClient::fetch` call at all.
 #[tokio::test]
 async fn fresh_cache_entry_skips_fetch_entirely() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = std::sync::Arc::new(MockFederationHttpClient::new());
     // Deliberately no queued fetch outcome: a fetch attempt would return
     // MockFederationHttpClient's own "no queued fetch() outcome" error,
     // which this test's assertions below would surface as a failure.
 
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let cached = RemoteAccount {
         id,
         actor_uri: ACTOR_URI.to_string(),
@@ -168,14 +168,14 @@ async fn fresh_cache_entry_skips_fetch_entirely() {
         locked: false,
         fetched_at: now,
     };
-    upsert_remote(&app.pool, &cached)
+    upsert_remote(&db.pool, &cached)
         .await
         .expect("seeding the cache must succeed");
 
     let fetcher = RemoteAccountFetcher::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock.clone(),
-        app.runtime.clone(),
+        db.runtime.clone(),
         DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
     );
 
@@ -187,19 +187,19 @@ async fn fresh_cache_entry_skips_fetch_entirely() {
     assert_eq!(account.display_name, "Cached Alice");
     assert!(mock.fetched_urls().is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 7.1, 7.3: a stale cache entry (older than the TTL) triggers a
 /// real fetch, and the cache is refreshed with the newly fetched values.
 #[tokio::test]
 async fn stale_cache_entry_triggers_a_fetch_and_refreshes_the_cache() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = std::sync::Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(ok_response(full_actor_document()));
 
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let stale_fetched_at = now - time::Duration::hours(48);
     let cached = RemoteAccount {
         id,
@@ -216,14 +216,14 @@ async fn stale_cache_entry_triggers_a_fetch_and_refreshes_the_cache() {
         locked: false,
         fetched_at: stale_fetched_at,
     };
-    upsert_remote(&app.pool, &cached)
+    upsert_remote(&db.pool, &cached)
         .await
         .expect("seeding the stale cache row must succeed");
 
     let fetcher = RemoteAccountFetcher::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock.clone(),
-        app.runtime.clone(),
+        db.runtime.clone(),
         DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
     );
 
@@ -238,21 +238,21 @@ async fn stale_cache_entry_triggers_a_fetch_and_refreshes_the_cache() {
     // a re-upsert for the same `actor_uri` keeps the original row `id`.
     assert_eq!(account.id, id);
 
-    let persisted = find_remote_by_uri(&app.pool, ACTOR_URI)
+    let persisted = find_remote_by_uri(&db.pool, ACTOR_URI)
         .await
         .expect("find_remote_by_uri must succeed")
         .expect("the refreshed account must remain cached");
     assert_eq!(persisted.display_name, "Alice Example");
     assert_eq!(persisted.id, id);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 7.4: a missing required `preferredUsername` property fails
 /// with an `AppError`, and no cache row is created.
 #[tokio::test]
 async fn missing_preferred_username_fails_and_upserts_nothing() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = std::sync::Arc::new(MockFederationHttpClient::new());
     let mut document = full_actor_document();
     document
@@ -262,9 +262,9 @@ async fn missing_preferred_username_fails_and_upserts_nothing() {
     mock.queue_fetch_response(ok_response(document));
 
     let fetcher = RemoteAccountFetcher::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock,
-        app.runtime.clone(),
+        db.runtime.clone(),
         DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
     );
 
@@ -274,7 +274,7 @@ async fn missing_preferred_username_fails_and_upserts_nothing() {
         .expect_err("a document missing preferredUsername must fail normalization");
     assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let persisted = find_remote_by_uri(&app.pool, ACTOR_URI)
+    let persisted = find_remote_by_uri(&db.pool, ACTOR_URI)
         .await
         .expect("find_remote_by_uri must succeed");
     assert!(
@@ -282,7 +282,7 @@ async fn missing_preferred_username_fails_and_upserts_nothing() {
         "no account should be cached when required-property validation fails"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 7.4: a missing required `id`/`type` property (enforced by
@@ -290,7 +290,7 @@ async fn missing_preferred_username_fails_and_upserts_nothing() {
 /// `preferredUsername` check) also fails, and upserts nothing.
 #[tokio::test]
 async fn missing_type_property_fails_via_jsonld_required_property_validation() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = std::sync::Arc::new(MockFederationHttpClient::new());
     let mut document = full_actor_document();
     document
@@ -300,9 +300,9 @@ async fn missing_type_property_fails_via_jsonld_required_property_validation() {
     mock.queue_fetch_response(ok_response(document));
 
     let fetcher = RemoteAccountFetcher::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock,
-        app.runtime.clone(),
+        db.runtime.clone(),
         DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
     );
 
@@ -312,19 +312,19 @@ async fn missing_type_property_fails_via_jsonld_required_property_validation() {
         .expect_err("a document missing 'type' must fail via parse_activity");
     assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let persisted = find_remote_by_uri(&app.pool, ACTOR_URI)
+    let persisted = find_remote_by_uri(&db.pool, ACTOR_URI)
         .await
         .expect("find_remote_by_uri must succeed");
     assert!(persisted.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 7.4: a non-success HTTP status on fetch fails with a
 /// caller-facing 404, and upserts nothing.
 #[tokio::test]
 async fn non_success_fetch_status_fails_as_not_found() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = std::sync::Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(HttpResponse {
         status: StatusCode::NOT_FOUND,
@@ -333,9 +333,9 @@ async fn non_success_fetch_status_fails_as_not_found() {
     });
 
     let fetcher = RemoteAccountFetcher::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock,
-        app.runtime.clone(),
+        db.runtime.clone(),
         DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
     );
 
@@ -345,12 +345,12 @@ async fn non_success_fetch_status_fails_as_not_found() {
         .expect_err("a non-success upstream status must fail fetch_and_normalize");
     assert_eq!(error.status, StatusCode::NOT_FOUND);
 
-    let persisted = find_remote_by_uri(&app.pool, ACTOR_URI)
+    let persisted = find_remote_by_uri(&db.pool, ACTOR_URI)
         .await
         .expect("find_remote_by_uri must succeed");
     assert!(persisted.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 7.4: a network-level fetch failure (the
@@ -358,14 +358,14 @@ async fn non_success_fetch_status_fails_as_not_found() {
 /// failure, and upserts nothing.
 #[tokio::test]
 async fn fetch_transport_failure_propagates_and_upserts_nothing() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = std::sync::Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_error(StatusCode::BAD_GATEWAY, "connection refused");
 
     let fetcher = RemoteAccountFetcher::new(
-        app.pool.clone(),
+        db.pool.clone(),
         mock,
-        app.runtime.clone(),
+        db.runtime.clone(),
         DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
     );
 
@@ -375,10 +375,10 @@ async fn fetch_transport_failure_propagates_and_upserts_nothing() {
         .expect_err("a transport-level fetch failure must propagate");
     assert_eq!(error.status, StatusCode::BAD_GATEWAY);
 
-    let persisted = find_remote_by_uri(&app.pool, ACTOR_URI)
+    let persisted = find_remote_by_uri(&db.pool, ACTOR_URI)
         .await
         .expect("find_remote_by_uri must succeed");
     assert!(persisted.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

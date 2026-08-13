@@ -5,7 +5,7 @@
 //!
 //! Mirrors `src/actor/repository/tests.rs`'s and
 //! `src/actor/keys/repository/tests.rs`'s established convention:
-//! `spawn_test_app` for an isolated, already-migrated schema and a
+//! `spawn_test_db` for an isolated, already-migrated schema and a
 //! deterministic `RuntimeContext`; real owner/actor/key fixtures created via
 //! the already-implemented, already-tested repository functions from
 //! sibling modules (never mocks).
@@ -31,7 +31,7 @@ use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
 use crate::domain::Id;
 use crate::error::ErrorKind;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// Creates a real owner fixture.
 async fn create_owner_fixture(pool: &sqlx::PgPool, owner_id: Id, now: OffsetDateTime) {
@@ -106,37 +106,37 @@ async fn insert_active_key_fixture(
 /// owner's actors (not a different owner's), projected as `ActorSummary`.
 #[tokio::test]
 async fn list_actors_for_owner_returns_only_that_owners_actors() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let now = app.runtime.clock.now();
-    let owner_a = app.runtime.ids.next_id();
-    let owner_b = app.runtime.ids.next_id();
-    create_owner_fixture(&app.pool, owner_a, now).await;
-    create_owner_fixture(&app.pool, owner_b, now).await;
+    let now = db.runtime.clock.now();
+    let owner_a = db.runtime.ids.next_id();
+    let owner_b = db.runtime.ids.next_id();
+    create_owner_fixture(&db.pool, owner_a, now).await;
+    create_owner_fixture(&db.pool, owner_b, now).await;
 
     let a1 = insert_actor_fixture(
-        &app.pool,
+        &db.pool,
         owner_a,
-        app.runtime.ids.next_id(),
+        db.runtime.ids.next_id(),
         "a_one",
         ActorState::Active,
         now,
     )
     .await;
     let a2 = insert_actor_fixture(
-        &app.pool,
+        &db.pool,
         owner_a,
-        app.runtime.ids.next_id(),
+        db.runtime.ids.next_id(),
         "a_two",
         ActorState::Active,
         now,
     )
     .await;
     let b1 = insert_actor_fixture(
-        &app.pool,
+        &db.pool,
         owner_b,
-        app.runtime.ids.next_id(),
+        db.runtime.ids.next_id(),
         "b_one",
         ActorState::Active,
         now,
@@ -177,19 +177,19 @@ async fn list_actors_for_owner_returns_only_that_owners_actors() {
     assert_eq!(owner_b_summaries.len(), 1);
     assert_eq!(owner_b_summaries[0].id, b1.id);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `list_actors_for_owner` returns an empty `Vec` (not an error) for an
 /// owner that owns no actors.
 #[tokio::test]
 async fn list_actors_for_owner_returns_empty_for_an_owner_with_no_actors() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let owner_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
 
     let summaries = directory
         .list_actors_for_owner(owner_id)
@@ -197,22 +197,22 @@ async fn list_actors_for_owner_returns_empty_for_an_owner_with_no_actors() {
         .expect("list_actors_for_owner must succeed even with no actors");
     assert!(summaries.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 3.1, 3.2, 8.2: `resolve_actor_by_handle` returns the
 /// matching actor's data projected into the owner-free `ResolvedActor` shape.
 #[tokio::test]
 async fn resolve_actor_by_handle_returns_resolved_actor_for_a_known_handle() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
     let actor = insert_actor_fixture(
-        &app.pool,
+        &db.pool,
         owner_id,
         actor_id,
         "alice",
@@ -234,15 +234,15 @@ async fn resolve_actor_by_handle_returns_resolved_actor_for_a_known_handle() {
     assert_eq!(resolved.summary, actor.summary);
     assert_eq!(resolved.state, actor.state);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.2: `resolve_actor_by_handle` returns `Ok(None)` (not an
 /// error) for a handle nothing was ever created under.
 #[tokio::test]
 async fn resolve_actor_by_handle_returns_none_for_an_unknown_handle() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
     let unknown_handle = Handle::new("nobody_here").expect("valid handle");
     let resolved = directory
@@ -251,7 +251,7 @@ async fn resolve_actor_by_handle_returns_none_for_an_unknown_handle() {
         .expect("resolve_actor_by_handle must succeed even when nothing matches");
     assert!(resolved.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 7.4-adjacent: a deactivated actor is still resolvable by
@@ -260,15 +260,15 @@ async fn resolve_actor_by_handle_returns_none_for_an_unknown_handle() {
 /// deactivated, even though owner information stays hidden).
 #[tokio::test]
 async fn resolve_actor_by_handle_reports_deactivated_state() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
     let actor = insert_actor_fixture(
-        &app.pool,
+        &db.pool,
         owner_id,
         actor_id,
         "deactivated_alice",
@@ -284,7 +284,7 @@ async fn resolve_actor_by_handle_reports_deactivated_state() {
         .expect("a deactivated actor must still be resolvable by handle");
     assert_eq!(resolved.state, ActorState::Deactivated);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 3.1, 3.2 (federation-core task 4.3's narrow addition, see
@@ -294,15 +294,15 @@ async fn resolve_actor_by_handle_reports_deactivated_state() {
 /// `Id`.
 #[tokio::test]
 async fn resolve_actor_by_id_returns_resolved_actor_for_a_known_id() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
     let actor = insert_actor_fixture(
-        &app.pool,
+        &db.pool,
         owner_id,
         actor_id,
         "id_lookup_alice",
@@ -324,7 +324,7 @@ async fn resolve_actor_by_id_returns_resolved_actor_for_a_known_id() {
     assert_eq!(resolved.summary, actor.summary);
     assert_eq!(resolved.state, actor.state);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `resolve_actor_by_id` returns `Ok(None)` (not an error) for an `Id`
@@ -332,17 +332,17 @@ async fn resolve_actor_by_id_returns_resolved_actor_for_a_known_id() {
 /// `resolve_actor_by_handle_returns_none_for_an_unknown_handle`.
 #[tokio::test]
 async fn resolve_actor_by_id_returns_none_for_an_unknown_id() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let unknown_id = app.runtime.ids.next_id();
+    let unknown_id = db.runtime.ids.next_id();
     let resolved = directory
         .resolve_actor_by_id(unknown_id)
         .await
         .expect("resolve_actor_by_id must succeed even when nothing matches");
     assert!(resolved.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 3.1, 8.3: `actor_public_key` returns the actor's active
@@ -350,15 +350,15 @@ async fn resolve_actor_by_id_returns_none_for_an_unknown_id() {
 /// `ActorPublicKey` shape.
 #[tokio::test]
 async fn actor_public_key_returns_active_public_key_when_present() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
     insert_actor_fixture(
-        &app.pool,
+        &db.pool,
         owner_id,
         actor_id,
         "keyed_bob",
@@ -367,8 +367,8 @@ async fn actor_public_key_returns_active_public_key_when_present() {
     )
     .await;
 
-    let key_id = app.runtime.ids.next_id();
-    let key = insert_active_key_fixture(&app.pool, key_id, actor_id, now).await;
+    let key_id = db.runtime.ids.next_id();
+    let key = insert_active_key_fixture(&db.pool, key_id, actor_id, now).await;
 
     let public_key = directory
         .actor_public_key(actor_id)
@@ -380,22 +380,22 @@ async fn actor_public_key_returns_active_public_key_when_present() {
     assert_eq!(public_key.key_id, key.id);
     assert_eq!(public_key.public_key_pem, key.public_key_pem);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.3: `actor_public_key` returns `Ok(None)` (not an error) for
 /// an actor that has no active signing key.
 #[tokio::test]
 async fn actor_public_key_returns_none_for_an_actor_with_no_active_key() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
     insert_actor_fixture(
-        &app.pool,
+        &db.pool,
         owner_id,
         actor_id,
         "keyless_carol",
@@ -410,7 +410,7 @@ async fn actor_public_key_returns_none_for_an_actor_with_no_active_key() {
         .expect("actor_public_key must succeed even with no active key");
     assert!(public_key.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- sole_owner (api-foundation task 4.1's upstream addition to this
@@ -423,12 +423,12 @@ async fn actor_public_key_returns_none_for_an_actor_with_no_active_key() {
 /// returns it.
 #[tokio::test]
 async fn sole_owner_returns_the_single_existing_owner() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let owner_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
 
     let owner = directory
         .sole_owner()
@@ -437,7 +437,7 @@ async fn sole_owner_returns_the_single_existing_owner() {
     assert_eq!(owner.id, owner_id);
     assert_eq!(owner.created_at, now);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Zero `owners` rows (an un-bootstrapped instance) violates the
@@ -447,8 +447,8 @@ async fn sole_owner_returns_the_single_existing_owner() {
 /// one", not an absence-tolerant lookup like `resolve_actor_by_handle`.
 #[tokio::test]
 async fn sole_owner_reports_a_server_error_when_no_owner_exists() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
     let err = directory
         .sole_owner()
@@ -457,7 +457,7 @@ async fn sole_owner_reports_a_server_error_when_no_owner_exists() {
     assert_eq!(err.kind, ErrorKind::Server);
     assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// More than one `owners` row (data corruption / a defect that let a second
@@ -465,12 +465,12 @@ async fn sole_owner_reports_a_server_error_when_no_owner_exists() {
 /// `Server` (5xx) `AppError`, not silently pick one via `.first()`.
 #[tokio::test]
 async fn sole_owner_reports_a_server_error_when_more_than_one_owner_exists() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, app.runtime.ids.next_id(), now).await;
-    create_owner_fixture(&app.pool, app.runtime.ids.next_id(), now).await;
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, db.runtime.ids.next_id(), now).await;
+    create_owner_fixture(&db.pool, db.runtime.ids.next_id(), now).await;
 
     let err = directory
         .sole_owner()
@@ -479,5 +479,5 @@ async fn sole_owner_reports_a_server_error_when_more_than_one_owner_exists() {
     assert_eq!(err.kind, ErrorKind::Server);
     assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

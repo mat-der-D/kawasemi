@@ -6,7 +6,7 @@
 //! 確認できる".
 //!
 //! Mirrors `src/media/job_queue/tests.rs`/`src/media/service/tests.rs`'s
-//! established convention: `crate::test_harness::spawn_test_app` for an
+//! established convention: `crate::test_harness::db_fixture::spawn_test_db` for an
 //! isolated, already-migrated schema, a real owner + local actor row, and a
 //! real `LocalFsStore` under a throwaway temp directory (not a fake --
 //! `MediaService`'s own test module already established the precedent of
@@ -18,12 +18,12 @@
 //! Two tests ([`transient_store_failure_retries_with_backoff_then_fails_after_exhausting_attempts`],
 //! [`worker_reclaims_a_job_whose_lease_expired_after_a_simulated_crash`])
 //! need `now` to advance across multiple `ProcessingWorker::run_once` calls
-//! (backoff/lease windows), which `spawn_test_app`'s default `FixedClock`
+//! (backoff/lease windows), which `spawn_test_db`'s default `FixedClock`
 //! cannot do (it always returns the same constructed instant) -- both build
 //! a scripted [`SteppingClock`] (a local duplicate of
 //! `src/api/ratelimit/tests.rs::SteppingClock`'s identical "advance to the
 //! next preset value on each call" shape) and a `RuntimeContext` that reuses
-//! `app.runtime`'s `ids`/`rng`/`keys` but substitutes that clock.
+//! `db.runtime`'s `ids`/`rng`/`keys` but substitutes that clock.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -44,20 +44,20 @@ use crate::media::model::{Focus, Media, MediaState, MediaType};
 use crate::media::store::{MediaStore, ObjectKey};
 use crate::media::worker::{ProcessingWorker, WorkerOutcome};
 use crate::runtime::{Clock, RuntimeContext};
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 // ---- shared test fixtures ----
 
 /// Creates a real owner + local actor row, returning the actor's `Id`
 /// (same helper shape as `job_queue/tests.rs::create_test_actor`).
-async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+async fn create_test_actor(db: &TestDb, handle: &str) -> Id {
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
     let actor = LocalActor {
         id: actor_id,
         owner_id,
@@ -69,7 +69,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
         created_at: now,
         updated_at: now,
     };
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -146,13 +146,13 @@ fn default_test_config() -> MediaConfig {
 /// boundary to invoke, so this helper does the equivalent setup directly,
 /// same as `job_queue/tests.rs::create_test_media`'s identical rationale).
 async fn create_test_media(
-    app: &TestApp,
+    db: &TestDb,
     store: &LocalFsStore,
     actor_id: Id,
     now: time::OffsetDateTime,
     original_bytes: &[u8],
 ) -> Id {
-    let media_id = app.runtime.ids.next_id();
+    let media_id = db.runtime.ids.next_id();
     let media = Media {
         id: media_id,
         actor_id,
@@ -165,7 +165,7 @@ async fn create_test_media(
         created_at: now,
     };
     let object_key = ObjectKey::original(media_id);
-    insert_media(&app.pool, &media, object_key.as_str(), "image/png")
+    insert_media(&db.pool, &media, object_key.as_str(), "image/png")
         .await
         .expect("insert_media must succeed");
     store
@@ -206,15 +206,15 @@ impl Clock for SteppingClock {
     }
 }
 
-/// Builds a `RuntimeContext` identical to `app.runtime` except for its
-/// `clock`, which is replaced with `clock` (reuses `app.runtime`'s
+/// Builds a `RuntimeContext` identical to `db.runtime` except for its
+/// `clock`, which is replaced with `clock` (reuses `db.runtime`'s
 /// `ids`/`rng`/`keys` `Arc`s unchanged).
-fn runtime_with_clock(app: &TestApp, clock: impl Clock + 'static) -> RuntimeContext {
+fn runtime_with_clock(db: &TestDb, clock: impl Clock + 'static) -> RuntimeContext {
     RuntimeContext {
         clock: Arc::new(clock),
-        ids: app.runtime.ids.clone(),
-        rng: app.runtime.rng.clone(),
-        keys: app.runtime.keys.clone(),
+        ids: db.runtime.ids.clone(),
+        rng: db.runtime.rng.clone(),
+        keys: db.runtime.keys.clone(),
     }
 }
 
@@ -226,20 +226,20 @@ fn runtime_with_clock(app: &TestApp, clock: impl Clock + 'static) -> RuntimeCont
 /// key (not a stub).
 #[tokio::test]
 async fn queued_job_processes_to_ready_media_with_derivatives_stored() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "alice").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "alice").await;
     let (store, _guard) = test_store("happy_path");
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     let original = sample_png(80, 40);
-    let media_id = create_test_media(&app, &store, actor_id, now, &original).await;
+    let media_id = create_test_media(&db, &store, actor_id, now, &original).await;
 
-    job_queue::enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, now)
+    job_queue::enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, now)
         .await
         .expect("enqueue must succeed");
 
     let worker = ProcessingWorker::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         default_test_config(),
         store.clone(),
         PureRustImageProcessor::new(),
@@ -252,7 +252,7 @@ async fn queued_job_processes_to_ready_media_with_derivatives_stored() {
         .expect("a due job must be claimed and resolved");
     assert_eq!(outcome, WorkerOutcome::Completed);
 
-    let media = find_by_id(&app.pool, media_id)
+    let media = find_by_id(&db.pool, media_id)
         .await
         .expect("find_by_id must succeed")
         .expect("media must still exist");
@@ -283,23 +283,23 @@ async fn queued_job_processes_to_ready_media_with_derivatives_stored() {
     let remaining: Option<(i64,)> =
         sqlx::query_as("SELECT id FROM media_processing_jobs WHERE media_id = $1")
             .bind(media_id.as_i64())
-            .fetch_optional(&app.pool)
+            .fetch_optional(&db.pool)
             .await
             .expect("query must succeed");
     assert!(remaining.is_none(), "a completed job must be retired");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `run_once` returns `Ok(None)` when nothing is due (no job enqueued at
 /// all) -- the "sleep then loop again" branch's own precondition.
 #[tokio::test]
 async fn run_once_returns_none_when_nothing_is_due() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let (store, _guard) = test_store("nothing_due");
     let worker = ProcessingWorker::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         default_test_config(),
         store,
         PureRustImageProcessor::new(),
@@ -308,7 +308,7 @@ async fn run_once_returns_none_when_nothing_is_due() {
     let outcome = worker.run_once().await.expect("run_once must succeed");
     assert!(outcome.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // ---- (b) transient failure retries with backoff, then terminally fails ----
@@ -322,16 +322,16 @@ async fn run_once_returns_none_when_nothing_is_due() {
 /// job and the media failed, with a diagnostic persisted to `last_error`.
 #[tokio::test]
 async fn transient_store_failure_retries_with_backoff_then_fails_after_exhausting_attempts() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "bob").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "bob").await;
     let (store, _guard) = test_store("transient_then_failed");
-    let t0 = app.runtime.clock.now();
+    let t0 = db.runtime.clock.now();
 
     // Insert the media row but deliberately never `put` its original
     // object -- every `store.get(&ObjectKey::original(media_id))` call
     // therefore fails with a real (not panicking) 404-shaped `AppError`,
     // reliably reproducing the same transient failure on every attempt.
-    let media_id = app.runtime.ids.next_id();
+    let media_id = db.runtime.ids.next_id();
     let media = Media {
         id: media_id,
         actor_id,
@@ -344,14 +344,14 @@ async fn transient_store_failure_retries_with_backoff_then_fails_after_exhaustin
         created_at: t0,
     };
     insert_media(
-        &app.pool,
+        &db.pool,
         &media,
         ObjectKey::original(media_id).as_str(),
         "image/png",
     )
     .await
     .expect("insert_media must succeed");
-    job_queue::enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, t0)
+    job_queue::enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, t0)
         .await
         .expect("enqueue must succeed");
 
@@ -359,12 +359,12 @@ async fn transient_store_failure_retries_with_backoff_then_fails_after_exhaustin
     // must run after that backoff window elapses.
     let t1 = t0 + time::Duration::seconds(20);
     let clock = SteppingClock::new(vec![t0, t1]);
-    let runtime = runtime_with_clock(&app, clock);
+    let runtime = runtime_with_clock(&db, clock);
 
     let mut config = default_test_config();
     config.max_retry_attempts = 2;
     let worker = ProcessingWorker::new(
-        app.pool.clone(),
+        db.pool.clone(),
         runtime,
         config,
         store,
@@ -389,7 +389,7 @@ async fn transient_store_failure_retries_with_backoff_then_fails_after_exhaustin
              WHERE media_id = $1",
     )
     .bind(media_id.as_i64())
-    .fetch_one(&app.pool)
+    .fetch_one(&db.pool)
     .await
     .expect("job row must still exist after a retry");
     assert_eq!(state1, "queued");
@@ -403,7 +403,7 @@ async fn transient_store_failure_retries_with_backoff_then_fails_after_exhaustin
         "Requirement 4.5: a retried job must also have a diagnostic persisted to last_error"
     );
 
-    let media_after_retry = find_by_id(&app.pool, media_id)
+    let media_after_retry = find_by_id(&db.pool, media_id)
         .await
         .expect("find_by_id must succeed")
         .expect("media must still exist");
@@ -426,7 +426,7 @@ async fn transient_store_failure_retries_with_backoff_then_fails_after_exhaustin
         "SELECT state, attempts, last_error FROM media_processing_jobs WHERE media_id = $1",
     )
     .bind(media_id.as_i64())
-    .fetch_one(&app.pool)
+    .fetch_one(&db.pool)
     .await
     .expect("job row must still exist after terminal failure");
     assert_eq!(state2, "failed");
@@ -436,13 +436,13 @@ async fn transient_store_failure_retries_with_backoff_then_fails_after_exhaustin
         "Requirement 4.5: a terminally-failed job must have a diagnostic persisted to last_error"
     );
 
-    let media_after_failure = find_by_id(&app.pool, media_id)
+    let media_after_failure = find_by_id(&db.pool, media_id)
         .await
         .expect("find_by_id must succeed")
         .expect("media must still exist");
     assert_eq!(media_after_failure.state, MediaState::Failed);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // ---- (c) crash + lease-expiry reclaim ----
@@ -456,14 +456,14 @@ async fn transient_store_failure_retries_with_backoff_then_fails_after_exhaustin
 /// processed to completion by that second worker.
 #[tokio::test]
 async fn worker_reclaims_a_job_whose_lease_expired_after_a_simulated_crash() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "carol").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "carol").await;
     let (store, _guard) = test_store("reclaim");
-    let t0 = app.runtime.clock.now();
+    let t0 = db.runtime.clock.now();
     let original = sample_png(50, 50);
-    let media_id = create_test_media(&app, &store, actor_id, t0, &original).await;
+    let media_id = create_test_media(&db, &store, actor_id, t0, &original).await;
 
-    job_queue::enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, t0)
+    job_queue::enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, t0)
         .await
         .expect("enqueue must succeed");
 
@@ -473,7 +473,7 @@ async fn worker_reclaims_a_job_whose_lease_expired_after_a_simulated_crash() {
     // (locking it, never calling `complete`/`fail_or_retry`) -- a direct
     // `claim_due` call stands in for that crashed worker's own claim, per
     // this task's own instructions ("one worker + a simulated stale lock").
-    let stale_claim = job_queue::claim_due(&app.pool, t0, lease)
+    let stale_claim = job_queue::claim_due(&db.pool, t0, lease)
         .await
         .expect("claim_due must succeed")
         .expect("the freshly-enqueued job must be claimable");
@@ -486,12 +486,12 @@ async fn worker_reclaims_a_job_whose_lease_expired_after_a_simulated_crash() {
     // reclaims and fully processes the job via its own `run_once`.
     let t1 = t0 + lease + time::Duration::seconds(1);
     let clock = SteppingClock::new(vec![t1]);
-    let runtime = runtime_with_clock(&app, clock);
+    let runtime = runtime_with_clock(&db, clock);
 
     let mut config = default_test_config();
     config.lease_duration = StdDuration::from_secs(2);
     let worker = ProcessingWorker::new(
-        app.pool.clone(),
+        db.pool.clone(),
         runtime,
         config,
         store.clone(),
@@ -505,7 +505,7 @@ async fn worker_reclaims_a_job_whose_lease_expired_after_a_simulated_crash() {
         .expect("the lease-expired job must be reclaimed and resolved");
     assert_eq!(outcome, WorkerOutcome::Completed);
 
-    let media = find_by_id(&app.pool, media_id)
+    let media = find_by_id(&db.pool, media_id)
         .await
         .expect("find_by_id must succeed")
         .expect("media must still exist");
@@ -523,12 +523,12 @@ async fn worker_reclaims_a_job_whose_lease_expired_after_a_simulated_crash() {
     let remaining: Option<(i64,)> =
         sqlx::query_as("SELECT id FROM media_processing_jobs WHERE media_id = $1")
             .bind(media_id.as_i64())
-            .fetch_optional(&app.pool)
+            .fetch_optional(&db.pool)
             .await
             .expect("query must succeed");
     assert!(remaining.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // ---- (d) idempotency: re-running a job for already-Ready media ----
@@ -539,22 +539,22 @@ async fn worker_reclaims_a_job_whose_lease_expired_after_a_simulated_crash() {
 /// bump `updated_at` a second time.
 #[tokio::test]
 async fn rerunning_a_job_for_already_ready_media_completes_idempotently_without_reprocessing() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "dave").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "dave").await;
     let (store, _guard) = test_store("idempotent");
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     let original = sample_png(30, 30);
-    let media_id = create_test_media(&app, &store, actor_id, now, &original).await;
+    let media_id = create_test_media(&db, &store, actor_id, now, &original).await;
 
     let worker = ProcessingWorker::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         default_test_config(),
         store.clone(),
         PureRustImageProcessor::new(),
     );
 
-    job_queue::enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, now)
+    job_queue::enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, now)
         .await
         .expect("enqueue must succeed");
     let first = worker
@@ -564,7 +564,7 @@ async fn rerunning_a_job_for_already_ready_media_completes_idempotently_without_
         .expect("the first job must be claimed");
     assert_eq!(first, WorkerOutcome::Completed);
 
-    let ready_media = find_by_id(&app.pool, media_id)
+    let ready_media = find_by_id(&db.pool, media_id)
         .await
         .expect("find_by_id must succeed")
         .expect("media must exist");
@@ -572,7 +572,7 @@ async fn rerunning_a_job_for_already_ready_media_completes_idempotently_without_
     let (updated_at_after_first,): (time::OffsetDateTime,) =
         sqlx::query_as("SELECT updated_at FROM media WHERE id = $1")
             .bind(media_id.as_i64())
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("query must succeed");
     let thumb_after_first = store
@@ -583,7 +583,7 @@ async fn rerunning_a_job_for_already_ready_media_completes_idempotently_without_
     // Re-enqueue a second job for the same, already-`Ready` media, as a
     // duplicate/redundant reclaim race would (design.md's own documented
     // accepted tradeoff).
-    job_queue::enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, now)
+    job_queue::enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, now)
         .await
         .expect("enqueue must succeed");
     let second = worker
@@ -600,7 +600,7 @@ async fn rerunning_a_job_for_already_ready_media_completes_idempotently_without_
     let (updated_at_after_second,): (time::OffsetDateTime,) =
         sqlx::query_as("SELECT updated_at FROM media WHERE id = $1")
             .bind(media_id.as_i64())
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("query must succeed");
     assert_eq!(
@@ -616,7 +616,7 @@ async fn rerunning_a_job_for_already_ready_media_completes_idempotently_without_
         "an idempotent re-run must not overwrite the derivative with different bytes"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // ---- (e) decode failure: immediate terminal failure, not retried ----
@@ -628,12 +628,12 @@ async fn rerunning_a_job_for_already_ready_media_completes_idempotently_without_
 /// path's two-call retry-then-fail sequence).
 #[tokio::test]
 async fn decode_failure_fails_the_job_and_media_immediately_without_retrying() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "erin").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "erin").await;
     let (store, _guard) = test_store("decode_failure");
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     let garbage = vec![0xDEu8, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    let media_id = create_test_media(&app, &store, actor_id, now, &garbage).await;
+    let media_id = create_test_media(&db, &store, actor_id, now, &garbage).await;
 
     // A generous retry budget: if the worker mistakenly treated this as
     // transient, it would come back `Retried`, not `Failed`, on the very
@@ -641,12 +641,12 @@ async fn decode_failure_fails_the_job_and_media_immediately_without_retrying() {
     let mut config = default_test_config();
     config.max_retry_attempts = 10;
 
-    job_queue::enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, now)
+    job_queue::enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, now)
         .await
         .expect("enqueue must succeed");
     let worker = ProcessingWorker::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         config,
         store,
         PureRustImageProcessor::new(),
@@ -667,7 +667,7 @@ async fn decode_failure_fails_the_job_and_media_immediately_without_retrying() {
         "SELECT state, attempts, last_error FROM media_processing_jobs WHERE media_id = $1",
     )
     .bind(media_id.as_i64())
-    .fetch_one(&app.pool)
+    .fetch_one(&db.pool)
     .await
     .expect("job row must still exist");
     assert_eq!(state, "failed");
@@ -680,13 +680,13 @@ async fn decode_failure_fails_the_job_and_media_immediately_without_retrying() {
         "the diagnostic must be specific enough to identify a decode failure (Requirement 4.5)"
     );
 
-    let media = find_by_id(&app.pool, media_id)
+    let media = find_by_id(&db.pool, media_id)
         .await
         .expect("find_by_id must succeed")
         .expect("media must still exist");
     assert_eq!(media.state, MediaState::Failed);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // ---- `run`: resident loop + graceful shutdown ----
@@ -697,11 +697,11 @@ async fn decode_failure_fails_the_job_and_media_immediately_without_retrying() {
 /// stands in for the signal future).
 #[tokio::test]
 async fn run_stops_promptly_once_the_shutdown_signal_resolves() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let (store, _guard) = test_store("run_shutdown");
     let worker = Arc::new(ProcessingWorker::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         default_test_config(),
         store,
         PureRustImageProcessor::new(),
@@ -731,5 +731,5 @@ async fn run_stops_promptly_once_the_shutdown_signal_resolves() {
         )
         .expect("the spawned run task must not panic");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

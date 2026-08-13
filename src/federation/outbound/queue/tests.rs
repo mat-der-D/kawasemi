@@ -5,7 +5,7 @@
 //! 通る".
 //!
 //! Mirrors `src/federation/inbound/dedup/tests.rs`'s established
-//! convention: `spawn_test_app` for an isolated, already-migrated schema
+//! convention: `spawn_test_db` for an isolated, already-migrated schema
 //! (so this exercises the real `delivery_jobs` table, not a stand-in), and
 //! fixed `OffsetDateTime` values (via `time::macros::datetime`) passed
 //! explicitly as `claim_due`'s `now`/`reschedule`'s `next_attempt_at`,
@@ -18,7 +18,7 @@ use time::Duration;
 use time::macros::datetime;
 
 use super::*;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 const SENDER_ACTOR_ID: i64 = 1;
 
@@ -63,8 +63,8 @@ async fn read_row(pool: &sqlx::PgPool, job_id: i64) -> DeliveryJob {
 
 #[tokio::test]
 async fn enqueue_then_claim_due_returns_the_job_and_marks_it_in_progress_in_the_db() {
-    let app = spawn_test_app().await;
-    let queue = DbDeliveryQueue::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let queue = DbDeliveryQueue::new(db.pool.clone());
     let now = base_time();
 
     queue
@@ -85,22 +85,22 @@ async fn enqueue_then_claim_due_returns_the_job_and_marks_it_in_progress_in_the_
     assert_eq!(claimed[0].id, Id::from_i64(1));
     assert_eq!(claimed[0].status, DeliveryJobStatus::InProgress);
 
-    let row = read_row(&app.pool, 1).await;
+    let row = read_row(&db.pool, 1).await;
     assert_eq!(
         row.status,
         DeliveryJobStatus::InProgress,
         "the row's status in the DB (not just the returned Vec) must be 'in_progress'"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- 2: a job whose next_attempt_at is in the future is NOT returned. ---
 
 #[tokio::test]
 async fn claim_due_does_not_return_a_job_whose_next_attempt_at_is_in_the_future() {
-    let app = spawn_test_app().await;
-    let queue = DbDeliveryQueue::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let queue = DbDeliveryQueue::new(db.pool.clone());
     let now = base_time();
     let future = now + Duration::hours(1);
 
@@ -123,22 +123,22 @@ async fn claim_due_does_not_return_a_job_whose_next_attempt_at_is_in_the_future(
         "a job due only in the future must not be claimed by a now before it"
     );
 
-    let row = read_row(&app.pool, 2).await;
+    let row = read_row(&db.pool, 2).await;
     assert_eq!(
         row.status,
         DeliveryJobStatus::Pending,
         "an unclaimed job's status must remain 'pending'"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- 3: claim_due respects limit. ---
 
 #[tokio::test]
 async fn claim_due_respects_limit_when_more_jobs_are_due_than_the_limit() {
-    let app = spawn_test_app().await;
-    let queue = DbDeliveryQueue::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let queue = DbDeliveryQueue::new(db.pool.clone());
     let now = base_time();
 
     for i in 10..15 {
@@ -163,15 +163,15 @@ async fn claim_due_respects_limit_when_more_jobs_are_due_than_the_limit() {
         "claim_due must return at most `limit` jobs even when more are due"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- 4: mark_done transitions a job to 'done'. ---
 
 #[tokio::test]
 async fn mark_done_transitions_the_job_to_done() {
-    let app = spawn_test_app().await;
-    let queue = DbDeliveryQueue::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let queue = DbDeliveryQueue::new(db.pool.clone());
     let now = base_time();
 
     queue
@@ -193,10 +193,10 @@ async fn mark_done_transitions_the_job_to_done() {
         .await
         .expect("mark_done must succeed");
 
-    let row = read_row(&app.pool, 20).await;
+    let row = read_row(&db.pool, 20).await;
     assert_eq!(row.status, DeliveryJobStatus::Done);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- 5: reschedule updates next_attempt_at (pushed later) and attempts,
@@ -206,8 +206,8 @@ async fn mark_done_transitions_the_job_to_done() {
 #[tokio::test]
 async fn reschedule_pushes_next_attempt_at_later_and_increments_attempts_and_is_reclaimable_only_after_it()
  {
-    let app = spawn_test_app().await;
-    let queue = DbDeliveryQueue::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let queue = DbDeliveryQueue::new(db.pool.clone());
     let now = base_time();
 
     queue
@@ -230,7 +230,7 @@ async fn reschedule_pushes_next_attempt_at_later_and_increments_attempts_and_is_
         .await
         .expect("reschedule must succeed");
 
-    let row = read_row(&app.pool, 30).await;
+    let row = read_row(&db.pool, 30).await;
     assert_eq!(row.status, DeliveryJobStatus::Pending);
     assert_eq!(row.attempts, 1);
     assert_eq!(row.next_attempt_at, rescheduled_next_attempt_at);
@@ -257,7 +257,7 @@ async fn reschedule_pushes_next_attempt_at_later_and_increments_attempts_and_is_
     );
     assert_eq!(claimed[0].attempts, 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- 6: exponential backoff — increasing attempts produce increasing
@@ -305,8 +305,8 @@ fn backoff_delay_clamps_a_negative_attempts_to_the_base_delay() {
 
 #[tokio::test]
 async fn simulated_retry_lifecycle_ends_in_failed_after_reschedules_exhaust_via_mark_failed() {
-    let app = spawn_test_app().await;
-    let queue = DbDeliveryQueue::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let queue = DbDeliveryQueue::new(db.pool.clone());
     let now = base_time();
     let job_id = Id::from_i64(40);
 
@@ -345,7 +345,7 @@ async fn simulated_retry_lifecycle_ends_in_failed_after_reschedules_exhaust_via_
             .expect("reschedule must succeed");
     }
 
-    let after_retries = read_row(&app.pool, 40).await;
+    let after_retries = read_row(&db.pool, 40).await;
     assert_eq!(after_retries.attempts, DEFAULT_MAX_DELIVERY_ATTEMPTS);
     assert_eq!(after_retries.status, DeliveryJobStatus::Pending);
 
@@ -355,7 +355,7 @@ async fn simulated_retry_lifecycle_ends_in_failed_after_reschedules_exhaust_via_
         .await
         .expect("mark_failed must succeed");
 
-    let row = read_row(&app.pool, 40).await;
+    let row = read_row(&db.pool, 40).await;
     assert_eq!(
         row.status,
         DeliveryJobStatus::Failed,
@@ -366,7 +366,7 @@ async fn simulated_retry_lifecycle_ends_in_failed_after_reschedules_exhaust_via_
         "mark_failed must not itself alter the attempts count"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // --- 8: dedup index sanity — enqueueing two jobs with the same
@@ -375,8 +375,8 @@ async fn simulated_retry_lifecycle_ends_in_failed_after_reschedules_exhaust_via_
 
 #[tokio::test]
 async fn enqueue_on_dedup_conflict_returns_a_conflict_app_error_not_a_panic() {
-    let app = spawn_test_app().await;
-    let queue = DbDeliveryQueue::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let queue = DbDeliveryQueue::new(db.pool.clone());
     let now = base_time();
     let target_inbox = "https://remote.example/shared-inbox";
     let activity_id = "https://remote.example/activities/dup";
@@ -409,7 +409,7 @@ async fn enqueue_on_dedup_conflict_returns_a_conflict_app_error_not_a_panic() {
     )
     .bind(target_inbox)
     .bind(activity_id)
-    .fetch_one(&app.pool)
+    .fetch_one(&db.pool)
     .await
     .expect("counting delivery_jobs must succeed");
     assert_eq!(
@@ -417,7 +417,7 @@ async fn enqueue_on_dedup_conflict_returns_a_conflict_app_error_not_a_panic() {
         "the conflicting insert must not have created a second row"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[test]

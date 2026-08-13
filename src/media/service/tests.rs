@@ -10,7 +10,7 @@
 //!   implementation existed (`cargo check` failed to resolve `super::*`'s
 //!   names), then GREEN once `service.rs` was implemented;
 //! - integration tests against a real, isolated-schema Postgres instance
-//!   (`crate::test_harness::spawn_test_app`, mirroring
+//!   (`crate::test_harness::db_fixture::spawn_test_db`, mirroring
 //!   `media_repository/tests.rs`'s/`job_queue/tests.rs`'s established
 //!   convention) exercising `MediaService::accept_upload`/`show_media`/
 //!   `update_metadata` end to end through a real `LocalFsStore` (task 2.2,
@@ -24,7 +24,7 @@ use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
 use crate::media::job_queue::claim_due;
 use crate::media::local_fs::LocalFsStore;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 // ---- pure unit tests: validate_format / validate_size / validate_focus /
 // media_type_for_content_type ----
@@ -102,14 +102,14 @@ fn media_type_for_content_type_maps_non_image_types_to_unknown() {
 
 /// Creates a real owner + local actor row, returning the actor's `Id` (same
 /// helper shape as `media_repository/tests.rs::create_test_actor`).
-async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+async fn create_test_actor(db: &TestDb, handle: &str) -> Id {
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
     let actor = LocalActor {
         id: actor_id,
         owner_id,
@@ -121,7 +121,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
         created_at: now,
         updated_at: now,
     };
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -176,13 +176,13 @@ fn test_media_config() -> MediaConfig {
     }
 }
 
-fn test_service(app: &TestApp, label: &str) -> (MediaService<LocalFsStore>, TempDirGuard) {
+fn test_service(db: &TestDb, label: &str) -> (MediaService<LocalFsStore>, TempDirGuard) {
     let root = unique_temp_root(label);
     let guard = TempDirGuard(root.clone());
     let store = LocalFsStore::new(root);
     let service = MediaService::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         test_media_config(),
         store,
     );
@@ -213,9 +213,9 @@ async fn count_media_rows_for_actor(pool: &sqlx::PgPool, actor_id: Id) -> i64 {
 /// description/focus recorded, and a processing job is enqueued for it.
 #[tokio::test]
 async fn accept_upload_with_valid_input_creates_processing_media_and_enqueues_job() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "alice").await;
-    let (service, _guard) = test_service(&app, "accept_upload_valid");
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "alice").await;
+    let (service, _guard) = test_service(&db, "accept_upload_valid");
 
     let media = service
         .accept_upload(actor_id, sample_upload(Some((0.25, -0.25))))
@@ -240,9 +240,9 @@ async fn accept_upload_with_valid_input_creates_processing_media_and_enqueues_jo
 
     // A processing job was enqueued for this media id (Requirement 1.6):
     // claim it and confirm it targets the just-created media.
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     let job = claim_due(
-        &app.pool,
+        &db.pool,
         now,
         time::Duration::try_from(test_media_config().lease_duration).unwrap(),
     )
@@ -257,11 +257,11 @@ async fn accept_upload_with_valid_input_creates_processing_media_and_enqueues_jo
 /// is created.
 #[tokio::test]
 async fn accept_upload_rejects_an_unsupported_format_and_creates_nothing() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "bob").await;
-    let (service, _guard) = test_service(&app, "accept_upload_bad_format");
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "bob").await;
+    let (service, _guard) = test_service(&db, "accept_upload_bad_format");
 
-    let before = count_media_rows_for_actor(&app.pool, actor_id).await;
+    let before = count_media_rows_for_actor(&db.pool, actor_id).await;
 
     let mut input = sample_upload(None);
     input.content_type = "video/mp4".to_string();
@@ -271,7 +271,7 @@ async fn accept_upload_rejects_an_unsupported_format_and_creates_nothing() {
         .expect_err("an unsupported format must be rejected");
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let after = count_media_rows_for_actor(&app.pool, actor_id).await;
+    let after = count_media_rows_for_actor(&db.pool, actor_id).await;
     assert_eq!(
         before, after,
         "a rejected upload must not create a media row"
@@ -282,11 +282,11 @@ async fn accept_upload_rejects_an_unsupported_format_and_creates_nothing() {
 /// created.
 #[tokio::test]
 async fn accept_upload_rejects_an_oversized_upload_and_creates_nothing() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "carol").await;
-    let (service, _guard) = test_service(&app, "accept_upload_too_big");
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "carol").await;
+    let (service, _guard) = test_service(&db, "accept_upload_too_big");
 
-    let before = count_media_rows_for_actor(&app.pool, actor_id).await;
+    let before = count_media_rows_for_actor(&db.pool, actor_id).await;
 
     let mut input = sample_upload(None);
     input.bytes = vec![0u8; 2048]; // over test_media_config()'s 1024-byte limit
@@ -296,7 +296,7 @@ async fn accept_upload_rejects_an_oversized_upload_and_creates_nothing() {
         .expect_err("an oversized upload must be rejected");
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let after = count_media_rows_for_actor(&app.pool, actor_id).await;
+    let after = count_media_rows_for_actor(&db.pool, actor_id).await;
     assert_eq!(
         before, after,
         "a rejected upload must not create a media row"
@@ -307,11 +307,11 @@ async fn accept_upload_rejects_an_oversized_upload_and_creates_nothing() {
 /// rejected before any media row is created (not silently clamped/ignored).
 #[tokio::test]
 async fn accept_upload_rejects_an_out_of_range_focus_and_creates_nothing() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "dave").await;
-    let (service, _guard) = test_service(&app, "accept_upload_bad_focus");
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "dave").await;
+    let (service, _guard) = test_service(&db, "accept_upload_bad_focus");
 
-    let before = count_media_rows_for_actor(&app.pool, actor_id).await;
+    let before = count_media_rows_for_actor(&db.pool, actor_id).await;
 
     let err = service
         .accept_upload(actor_id, sample_upload(Some((1.5, 0.0))))
@@ -319,7 +319,7 @@ async fn accept_upload_rejects_an_out_of_range_focus_and_creates_nothing() {
         .expect_err("an out-of-range focus must be rejected");
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let after = count_media_rows_for_actor(&app.pool, actor_id).await;
+    let after = count_media_rows_for_actor(&db.pool, actor_id).await;
     assert_eq!(
         before, after,
         "a rejected upload must not create a media row"
@@ -331,10 +331,10 @@ async fn accept_upload_rejects_an_out_of_range_focus_and_creates_nothing() {
 /// the owner.
 #[tokio::test]
 async fn show_media_is_owner_scoped() {
-    let app = spawn_test_app().await;
-    let owner = create_test_actor(&app, "erin").await;
-    let other = create_test_actor(&app, "frank").await;
-    let (service, _guard) = test_service(&app, "show_media_scope");
+    let db = spawn_test_db().await;
+    let owner = create_test_actor(&db, "erin").await;
+    let other = create_test_actor(&db, "frank").await;
+    let (service, _guard) = test_service(&db, "show_media_scope");
 
     let media = service
         .accept_upload(owner, sample_upload(None))
@@ -369,9 +369,9 @@ async fn show_media_is_owner_scoped() {
 /// still `Processing`, and the update is reflected.
 #[tokio::test]
 async fn update_metadata_updates_description_and_focus_while_processing() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "grace").await;
-    let (service, _guard) = test_service(&app, "update_metadata_ok");
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "grace").await;
+    let (service, _guard) = test_service(&db, "update_metadata_ok");
 
     let media = service
         .accept_upload(actor_id, sample_upload(None))
@@ -401,9 +401,9 @@ async fn update_metadata_updates_description_and_focus_while_processing() {
 /// rejected and the stored metadata is left unchanged.
 #[tokio::test]
 async fn update_metadata_rejects_an_out_of_range_focus_without_writing() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "heidi").await;
-    let (service, _guard) = test_service(&app, "update_metadata_bad_focus");
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "heidi").await;
+    let (service, _guard) = test_service(&db, "update_metadata_bad_focus");
 
     let media = service
         .accept_upload(actor_id, sample_upload(Some((0.1, 0.1))))
@@ -437,10 +437,10 @@ async fn update_metadata_rejects_an_out_of_range_focus_without_writing() {
 /// contract), not applied.
 #[tokio::test]
 async fn update_metadata_returns_none_for_media_owned_by_another_actor() {
-    let app = spawn_test_app().await;
-    let owner = create_test_actor(&app, "ivan").await;
-    let other = create_test_actor(&app, "judy").await;
-    let (service, _guard) = test_service(&app, "update_metadata_not_owned");
+    let db = spawn_test_db().await;
+    let owner = create_test_actor(&db, "ivan").await;
+    let other = create_test_actor(&db, "judy").await;
+    let (service, _guard) = test_service(&db, "update_metadata_not_owned");
 
     let media = service
         .accept_upload(owner, sample_upload(None))

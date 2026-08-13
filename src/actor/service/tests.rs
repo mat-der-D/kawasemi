@@ -5,7 +5,7 @@
 //! 遷移する".
 //!
 //! Mirrors `src/actor/keys/service/tests.rs`'s established convention:
-//! `spawn_test_app` for an isolated, already-migrated schema and a
+//! `spawn_test_db` for an isolated, already-migrated schema and a
 //! deterministic `RuntimeContext`; a fresh `ChaCha20Poly1305KeyCipher` under
 //! a fixed test KEK backs the `SigningKeyService` this `ActorService` is
 //! built on top of.
@@ -32,7 +32,7 @@ use crate::config::Secret;
 use crate::domain::Id;
 use crate::error::ErrorKind;
 use crate::runtime::RuntimeContext;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// Builds an `ActorService` sharing `pool`/`runtime` with a fresh
 /// `SigningKeyService` (its own `ChaCha20Poly1305KeyCipher` under a fixed
@@ -64,12 +64,12 @@ fn sample_new_actor(owner_id: Id, handle: &str) -> NewActor {
 /// exactly one active signing key for it.
 #[tokio::test]
 async fn create_actor_persists_an_active_actor_and_exactly_one_active_key() {
-    let app = spawn_test_app().await;
-    let service = service_under_test(app.pool.clone(), app.runtime.clone());
+    let db = spawn_test_db().await;
+    let service = service_under_test(db.pool.clone(), db.runtime.clone());
 
-    let owner_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner(&app.pool, owner_id, now)
+    let owner_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
@@ -84,14 +84,14 @@ async fn create_actor_persists_an_active_actor_and_exactly_one_active_key() {
     assert_eq!(created.created_at, created.updated_at);
 
     // Persisted row matches what create_actor returned.
-    let by_id = crate::actor::repository::find_by_id(&app.pool, created.id)
+    let by_id = crate::actor::repository::find_by_id(&db.pool, created.id)
         .await
         .expect("find_by_id must succeed")
         .expect("the just-created actor must be persisted");
     assert_eq!(by_id, created);
 
     // Exactly one active signing key exists for the new actor.
-    let public_key = find_active_public_key(&app.pool, created.id)
+    let public_key = find_active_public_key(&db.pool, created.id)
         .await
         .expect("find_active_public_key must succeed")
         .expect("create_actor must have provisioned an active signing key");
@@ -102,7 +102,7 @@ async fn create_actor_persists_an_active_actor_and_exactly_one_active_key() {
             .starts_with("-----BEGIN PUBLIC KEY-----")
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 2.3: creating an actor against a nonexistent owner is
@@ -110,10 +110,10 @@ async fn create_actor_persists_an_active_actor_and_exactly_one_active_key() {
 /// nor a signing key.
 #[tokio::test]
 async fn create_actor_rejects_a_nonexistent_owner() {
-    let app = spawn_test_app().await;
-    let service = service_under_test(app.pool.clone(), app.runtime.clone());
+    let db = spawn_test_db().await;
+    let service = service_under_test(db.pool.clone(), db.runtime.clone());
 
-    let nonexistent_owner = app.runtime.ids.next_id();
+    let nonexistent_owner = db.runtime.ids.next_id();
 
     let err = service
         .create_actor(sample_new_actor(nonexistent_owner, "orphan"))
@@ -123,7 +123,7 @@ async fn create_actor_rejects_a_nonexistent_owner() {
     assert!(err.status.is_client_error());
 
     let found = crate::actor::repository::find_by_handle(
-        &app.pool,
+        &db.pool,
         &Handle::new("orphan").expect("valid handle"),
     )
     .await
@@ -133,7 +133,7 @@ async fn create_actor_rejects_a_nonexistent_owner() {
         "no actor row must be persisted when owner resolution fails"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.3: creating a second actor with a handle that already
@@ -141,12 +141,12 @@ async fn create_actor_rejects_a_nonexistent_owner() {
 /// original actor/its key are left untouched.
 #[tokio::test]
 async fn create_actor_rejects_a_duplicate_handle() {
-    let app = spawn_test_app().await;
-    let service = service_under_test(app.pool.clone(), app.runtime.clone());
+    let db = spawn_test_db().await;
+    let service = service_under_test(db.pool.clone(), db.runtime.clone());
 
-    let owner_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner(&app.pool, owner_id, now)
+    let owner_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
@@ -164,7 +164,7 @@ async fn create_actor_rejects_a_duplicate_handle() {
 
     // The original actor and its key are untouched.
     let by_handle = crate::actor::repository::find_by_handle(
-        &app.pool,
+        &db.pool,
         &Handle::new("bob").expect("valid handle"),
     )
     .await
@@ -172,13 +172,13 @@ async fn create_actor_rejects_a_duplicate_handle() {
     .expect("the original actor must still be found");
     assert_eq!(by_handle, first);
 
-    let public_key = find_active_public_key(&app.pool, first.id)
+    let public_key = find_active_public_key(&db.pool, first.id)
         .await
         .expect("find_active_public_key must succeed")
         .expect("the original actor's key must still be active");
     assert_eq!(public_key.actor_id, first.id);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 7.3, 7.5: `deactivate_actor` transitions a persisted actor's
@@ -186,12 +186,12 @@ async fn create_actor_rejects_a_duplicate_handle() {
 /// reflecting the new state.
 #[tokio::test]
 async fn deactivate_actor_transitions_state_and_returns_the_updated_actor() {
-    let app = spawn_test_app().await;
-    let service = service_under_test(app.pool.clone(), app.runtime.clone());
+    let db = spawn_test_db().await;
+    let service = service_under_test(db.pool.clone(), db.runtime.clone());
 
-    let owner_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner(&app.pool, owner_id, now)
+    let owner_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
@@ -213,21 +213,21 @@ async fn deactivate_actor_transitions_state_and_returns_the_updated_actor() {
         "updated_at must not move backwards on deactivation"
     );
 
-    let by_id = crate::actor::repository::find_by_id(&app.pool, created.id)
+    let by_id = crate::actor::repository::find_by_id(&db.pool, created.id)
         .await
         .expect("find_by_id must succeed")
         .expect("the actor must still be found after deactivation");
     assert_eq!(by_id, deactivated);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `deactivate_actor` for an id nothing was ever created under is rejected
 /// with a caller-facing error, not a generic 5xx.
 #[tokio::test]
 async fn deactivate_actor_rejects_a_nonexistent_actor() {
-    let app = spawn_test_app().await;
-    let service = service_under_test(app.pool.clone(), app.runtime.clone());
+    let db = spawn_test_db().await;
+    let service = service_under_test(db.pool.clone(), db.runtime.clone());
 
     let unknown_id = Id::from_i64(i64::MAX - 1);
 
@@ -238,5 +238,5 @@ async fn deactivate_actor_rejects_a_nonexistent_actor() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert!(err.status.is_client_error());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

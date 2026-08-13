@@ -3,7 +3,7 @@
 //! patch 外の項目を変更しないことを検証する統合テストが green".
 //!
 //! Mirrors `src/media/media_repository/tests.rs`'s established convention:
-//! reuses `crate::test_harness::spawn_test_app` for an isolated,
+//! reuses `crate::test_harness::db_fixture::spawn_test_db` for an isolated,
 //! already-migrated schema and a deterministic `RuntimeContext`, and creates
 //! a real owner + local actor row first (`account_profiles.actor_id` is a
 //! logical reference to `local_actors.id`; nothing enforces a hard FK, but
@@ -16,18 +16,18 @@ use crate::actor::model::{ActorState, ActorType, Handle, LocalActor};
 use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
 use crate::domain::{Id, Visibility};
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// Creates a real owner + local actor row, returning the actor's `Id`, so
 /// tests have a genuine local actor to bind a profile to.
-async fn create_test_actor(app: &crate::test_harness::TestApp, handle: &str) -> Id {
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+async fn create_test_actor(db: &crate::test_harness::db_fixture::TestDb, handle: &str) -> Id {
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
     let actor = LocalActor {
         id: actor_id,
         owner_id,
@@ -39,7 +39,7 @@ async fn create_test_actor(app: &crate::test_harness::TestApp, handle: &str) -> 
         created_at: now,
         updated_at: now,
     };
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -58,15 +58,15 @@ async fn create_test_actor(app: &crate::test_harness::TestApp, handle: &str) -> 
 /// something `find_profile` performs itself.
 #[tokio::test]
 async fn find_profile_returns_none_for_an_actor_with_no_profile_row_yet() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "alice").await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "alice").await;
 
-    let found = find_profile(&app.pool, actor_id)
+    let found = find_profile(&db.pool, actor_id)
         .await
         .expect("find_profile must succeed even when no row exists");
     assert!(found.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `AccountProfile::default_for` (this task's reconciliation of the task
@@ -101,9 +101,9 @@ fn account_profile_default_for_is_the_safe_default_shape() {
 /// `DEFAULT`s).
 #[tokio::test]
 async fn upsert_profile_creates_a_row_with_only_patched_items_set() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "bob").await;
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "bob").await;
+    let now = db.runtime.clock.now();
 
     let patch = ProfilePatch {
         display_name: Some("Bob".to_string()),
@@ -111,7 +111,7 @@ async fn upsert_profile_creates_a_row_with_only_patched_items_set() {
         ..ProfilePatch::default()
     };
 
-    let profile = upsert_profile(&app.pool, actor_id, patch, now)
+    let profile = upsert_profile(&db.pool, actor_id, patch, now)
         .await
         .expect("upsert_profile must succeed for a fresh actor");
 
@@ -129,13 +129,13 @@ async fn upsert_profile_creates_a_row_with_only_patched_items_set() {
     assert!(!profile.source.sensitive);
     assert!(profile.source.language.is_none());
 
-    let reloaded = find_profile(&app.pool, actor_id)
+    let reloaded = find_profile(&db.pool, actor_id)
         .await
         .expect("find_profile must succeed")
         .expect("the row created by upsert_profile must now be findable");
     assert_eq!(reloaded, profile);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The crux of task 2.1's own observable completion condition: applying a
@@ -144,9 +144,9 @@ async fn upsert_profile_creates_a_row_with_only_patched_items_set() {
 /// several different columns.
 #[tokio::test]
 async fn upsert_profile_does_not_change_items_outside_the_patch() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "carol").await;
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "carol").await;
+    let now = db.runtime.clock.now();
     let avatar_id = Id::from_i64(9001);
     let header_id = Id::from_i64(9002);
 
@@ -167,7 +167,7 @@ async fn upsert_profile_does_not_change_items_outside_the_patch() {
         source_sensitive: Some(true),
         source_language: Some(Some("en".to_string())),
     };
-    let after_initial = upsert_profile(&app.pool, actor_id, initial_patch, now)
+    let after_initial = upsert_profile(&db.pool, actor_id, initial_patch, now)
         .await
         .expect("initial upsert_profile must succeed");
     assert_eq!(after_initial.display_name, "Carol");
@@ -182,12 +182,12 @@ async fn upsert_profile_does_not_change_items_outside_the_patch() {
 
     // Second patch touches only `note` — everything else must stay exactly
     // as the first upsert left it.
-    let later = app.runtime.clock.now();
+    let later = db.runtime.clock.now();
     let narrow_patch = ProfilePatch {
         note: Some("Updated bio.".to_string()),
         ..ProfilePatch::default()
     };
-    let after_narrow = upsert_profile(&app.pool, actor_id, narrow_patch, later)
+    let after_narrow = upsert_profile(&db.pool, actor_id, narrow_patch, later)
         .await
         .expect("narrow upsert_profile must succeed");
 
@@ -204,13 +204,13 @@ async fn upsert_profile_does_not_change_items_outside_the_patch() {
     assert!(after_narrow.source.sensitive);
     assert_eq!(after_narrow.source.language.as_deref(), Some("en"));
 
-    let reloaded = find_profile(&app.pool, actor_id)
+    let reloaded = find_profile(&db.pool, actor_id)
         .await
         .expect("find_profile must succeed")
         .expect("row must still exist");
     assert_eq!(reloaded, after_narrow);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The doubled `Option<Option<Id>>` fields' "leave unchanged" (outer `None`)
@@ -220,23 +220,23 @@ async fn upsert_profile_does_not_change_items_outside_the_patch() {
 /// it to `None`, and the two must not be conflated.
 #[tokio::test]
 async fn upsert_profile_distinguishes_leaving_avatar_unchanged_from_clearing_it() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "dave").await;
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "dave").await;
+    let now = db.runtime.clock.now();
     let avatar_id = Id::from_i64(7001);
 
     let set_patch = ProfilePatch {
         avatar_media: Some(Some(avatar_id)),
         ..ProfilePatch::default()
     };
-    let after_set = upsert_profile(&app.pool, actor_id, set_patch, now)
+    let after_set = upsert_profile(&db.pool, actor_id, set_patch, now)
         .await
         .expect("setting the avatar must succeed");
     assert_eq!(after_set.avatar_media, Some(avatar_id));
 
     // Leave unchanged: outer `None`.
     let leave_unchanged = ProfilePatch::default();
-    let after_leave = upsert_profile(&app.pool, actor_id, leave_unchanged, now)
+    let after_leave = upsert_profile(&db.pool, actor_id, leave_unchanged, now)
         .await
         .expect("a no-op patch must still succeed");
     assert_eq!(after_leave.avatar_media, Some(avatar_id));
@@ -246,12 +246,12 @@ async fn upsert_profile_distinguishes_leaving_avatar_unchanged_from_clearing_it(
         avatar_media: Some(None),
         ..ProfilePatch::default()
     };
-    let after_clear = upsert_profile(&app.pool, actor_id, clear_patch, now)
+    let after_clear = upsert_profile(&db.pool, actor_id, clear_patch, now)
         .await
         .expect("clearing the avatar must succeed");
     assert!(after_clear.avatar_media.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 2.2: `fields` (a `ProfileField[]`, including a `verified_at`
@@ -259,9 +259,9 @@ async fn upsert_profile_distinguishes_leaving_avatar_unchanged_from_clearing_it(
 /// upsert -> find_profile round trip.
 #[tokio::test]
 async fn upsert_profile_round_trips_fields_including_verified_at() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "erin").await;
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "erin").await;
+    let now = db.runtime.clock.now();
 
     let patch = ProfilePatch {
         fields: Some(vec![
@@ -278,7 +278,7 @@ async fn upsert_profile_round_trips_fields_including_verified_at() {
         ]),
         ..ProfilePatch::default()
     };
-    let profile = upsert_profile(&app.pool, actor_id, patch, now)
+    let profile = upsert_profile(&db.pool, actor_id, patch, now)
         .await
         .expect("upsert_profile must succeed");
 
@@ -299,13 +299,13 @@ async fn upsert_profile_round_trips_fields_including_verified_at() {
     );
     assert_eq!(profile.source.fields, profile.fields);
 
-    let reloaded = find_profile(&app.pool, actor_id)
+    let reloaded = find_profile(&db.pool, actor_id)
         .await
         .expect("find_profile must succeed")
         .expect("row must exist");
     assert_eq!(reloaded.fields, profile.fields);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `upsert_profile`'s `ON CONFLICT` path is a genuine upsert, not an
@@ -314,12 +314,12 @@ async fn upsert_profile_round_trips_fields_including_verified_at() {
 /// `find_profile`.
 #[tokio::test]
 async fn upsert_profile_does_not_create_duplicate_rows_for_the_same_actor() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "frank").await;
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "frank").await;
+    let now = db.runtime.clock.now();
 
     upsert_profile(
-        &app.pool,
+        &db.pool,
         actor_id,
         ProfilePatch {
             display_name: Some("Frank".to_string()),
@@ -331,7 +331,7 @@ async fn upsert_profile_does_not_create_duplicate_rows_for_the_same_actor() {
     .expect("first upsert must succeed");
 
     upsert_profile(
-        &app.pool,
+        &db.pool,
         actor_id,
         ProfilePatch {
             note: Some("Second write.".to_string()),
@@ -345,10 +345,10 @@ async fn upsert_profile_does_not_create_duplicate_rows_for_the_same_actor() {
     let row_count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM account_profiles WHERE actor_id = $1")
             .bind(actor_id.as_i64())
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("counting rows must succeed");
     assert_eq!(row_count.0, 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

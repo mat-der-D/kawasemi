@@ -4,25 +4,25 @@
 //!
 //! Mirrors `src/accounts/profile_repository/tests.rs`/`src/accounts/
 //! remote_repository/tests.rs`'s established convention: reuses
-//! `crate::test_harness::spawn_test_app` for an isolated, already-migrated
+//! `crate::test_harness::db_fixture::spawn_test_db` for an isolated, already-migrated
 //! schema and a deterministic `RuntimeContext`. `custom_emojis` has no write
 //! API in this crate (Requirement 9.3 — this repository is read-only), so
 //! these tests seed rows with a raw `sqlx::query` `INSERT` directly, not
 //! through any function `emoji_repository.rs` exposes.
 
 use super::{list_visible_emojis, resolve_emojis};
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// Seeds one `custom_emojis` row via a raw `INSERT` (this repository exposes
 /// no write API of its own — Requirement 9.3).
 async fn seed_emoji(
-    app: &crate::test_harness::TestApp,
+    db: &crate::test_harness::db_fixture::TestDb,
     shortcode: &str,
     domain: &str,
     visible_in_picker: bool,
     category: Option<&str>,
 ) {
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     let url = format!("https://example.test/emoji/{shortcode}.png");
     sqlx::query(
         "INSERT INTO custom_emojis \
@@ -35,7 +35,7 @@ async fn seed_emoji(
     .bind(visible_in_picker)
     .bind(category)
     .bind(now)
-    .execute(&app.pool)
+    .execute(&db.pool)
     .await
     .expect("seeding a custom_emojis row must succeed");
 }
@@ -46,13 +46,13 @@ async fn seed_emoji(
 /// `visible_in_picker = FALSE` row.
 #[tokio::test]
 async fn list_visible_emojis_returns_only_picker_visible_rows_with_correct_fields() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    seed_emoji(&app, "blobcat", "", true, Some("cats")).await;
-    seed_emoji(&app, "hidden_emoji", "", false, None).await;
-    seed_emoji(&app, "remote_cat", "remote.example", true, Some("cats")).await;
+    seed_emoji(&db, "blobcat", "", true, Some("cats")).await;
+    seed_emoji(&db, "hidden_emoji", "", false, None).await;
+    seed_emoji(&db, "remote_cat", "remote.example", true, Some("cats")).await;
 
-    let visible = list_visible_emojis(&app.pool)
+    let visible = list_visible_emojis(&db.pool)
         .await
         .expect("list_visible_emojis must succeed");
 
@@ -73,18 +73,18 @@ async fn list_visible_emojis_returns_only_picker_visible_rows_with_correct_field
     assert!(blobcat.visible_in_picker);
     assert_eq!(blobcat.category.as_deref(), Some("cats"));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 9.1: a `custom_emojis` row with no `category` maps to
 /// `CustomEmojiView.category == None`, not an empty string.
 #[tokio::test]
 async fn list_visible_emojis_maps_a_missing_category_to_none() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    seed_emoji(&app, "no_category", "", true, None).await;
+    seed_emoji(&db, "no_category", "", true, None).await;
 
-    let visible = list_visible_emojis(&app.pool)
+    let visible = list_visible_emojis(&db.pool)
         .await
         .expect("list_visible_emojis must succeed");
     let found = visible
@@ -93,7 +93,7 @@ async fn list_visible_emojis_maps_a_missing_category_to_none() {
         .expect("no_category must be present");
     assert!(found.category.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.4/9.1/9.4: `resolve_emojis` given a set of shortcodes
@@ -104,15 +104,15 @@ async fn list_visible_emojis_maps_a_missing_category_to_none() {
 /// not exist at all (in any domain) is silently skipped without erroring.
 #[tokio::test]
 async fn resolve_emojis_returns_exactly_the_matching_emojis_across_any_domain() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    seed_emoji(&app, "blobcat", "", true, Some("cats")).await;
-    seed_emoji(&app, "parrot", "", true, None).await;
+    seed_emoji(&db, "blobcat", "", true, Some("cats")).await;
+    seed_emoji(&db, "parrot", "", true, None).await;
     // Registered under a remote domain — must now resolve, symmetric with
     // list_visible_emojis's no-domain-filter behavior (Requirement 9.4).
-    seed_emoji(&app, "remote_only", "remote.example", true, None).await;
+    seed_emoji(&db, "remote_only", "remote.example", true, None).await;
     // A local row that is not requested — must not leak into the result.
-    seed_emoji(&app, "unrequested", "", true, None).await;
+    seed_emoji(&db, "unrequested", "", true, None).await;
 
     let requested = vec![
         "blobcat".to_string(),
@@ -120,7 +120,7 @@ async fn resolve_emojis_returns_exactly_the_matching_emojis_across_any_domain() 
         "remote_only".to_string(),
         "does_not_exist".to_string(),
     ];
-    let resolved = resolve_emojis(&app.pool, &requested)
+    let resolved = resolve_emojis(&db.pool, &requested)
         .await
         .expect("resolve_emojis must succeed even with unmatched shortcodes");
 
@@ -142,7 +142,7 @@ async fn resolve_emojis_returns_exactly_the_matching_emojis_across_any_domain() 
         "a shortcode that does not exist in any domain must still be skipped"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.4: `resolve_emojis` does not filter on `visible_in_picker` —
@@ -150,11 +150,11 @@ async fn resolve_emojis_returns_exactly_the_matching_emojis_across_any_domain() 
 /// has been hidden from the picker.
 #[tokio::test]
 async fn resolve_emojis_resolves_regardless_of_visible_in_picker() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    seed_emoji(&app, "hidden_but_referenceable", "", false, None).await;
+    seed_emoji(&db, "hidden_but_referenceable", "", false, None).await;
 
-    let resolved = resolve_emojis(&app.pool, &["hidden_but_referenceable".to_string()])
+    let resolved = resolve_emojis(&db.pool, &["hidden_but_referenceable".to_string()])
         .await
         .expect("resolve_emojis must succeed");
 
@@ -162,20 +162,20 @@ async fn resolve_emojis_resolves_regardless_of_visible_in_picker() {
     assert_eq!(resolved[0].shortcode, "hidden_but_referenceable");
     assert!(!resolved[0].visible_in_picker);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// An empty `shortcodes` slice resolves to an empty result, not an error.
 #[tokio::test]
 async fn resolve_emojis_with_no_requested_shortcodes_returns_empty() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    seed_emoji(&app, "blobcat", "", true, None).await;
+    seed_emoji(&db, "blobcat", "", true, None).await;
 
-    let resolved = resolve_emojis(&app.pool, &[])
+    let resolved = resolve_emojis(&db.pool, &[])
         .await
         .expect("resolve_emojis with an empty request must succeed");
     assert!(resolved.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

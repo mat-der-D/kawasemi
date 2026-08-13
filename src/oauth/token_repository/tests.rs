@@ -4,7 +4,7 @@
 //! できる".
 //!
 //! Mirrors `src/oauth/code_repository/tests.rs`'s established convention:
-//! reuses `crate::test_harness::spawn_test_app` for an isolated,
+//! reuses `crate::test_harness::db_fixture::spawn_test_db` for an isolated,
 //! already-migrated schema and a deterministic `RuntimeContext`, and
 //! registers a real `oauth_applications` row via
 //! `crate::oauth::app_repository::register_app` first (an access token's
@@ -17,7 +17,7 @@ use crate::domain::Id;
 use crate::oauth::app_repository::{self, NewApp};
 use crate::oauth::hash::TokenHashKey;
 use crate::oauth::model::ScopeSet;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// A fixed, non-production token-hashing key for this test module only —
 /// mirrors `app_repository/tests.rs::test_token_hash_key`'s own reasoning.
@@ -55,16 +55,16 @@ async fn register_test_app(pool: &sqlx::PgPool, runtime: &crate::runtime::Runtim
 /// actor/app/scopes it was bound to at issuance.
 #[tokio::test]
 async fn issue_token_then_resolve_returns_the_bound_actor_app_and_scopes() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let issued = issue_token(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         NewAccessToken {
@@ -81,7 +81,7 @@ async fn issue_token_then_resolve_returns_the_bound_actor_app_and_scopes() {
     assert_eq!(issued.token.actor_id, actor_id);
     assert!(!issued.token.revoked);
 
-    let resolved = resolve_token(&app.pool, &key, issued.plaintext.expose_secret())
+    let resolved = resolve_token(&db.pool, &key, issued.plaintext.expose_secret())
         .await
         .expect("resolve_token must succeed")
         .expect("a freshly issued token must resolve");
@@ -95,38 +95,38 @@ async fn issue_token_then_resolve_returns_the_bound_actor_app_and_scopes() {
     );
     assert!(!resolved.revoked);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A garbage/unrelated token value (no matching `token_hash`) must not
 /// resolve.
 #[tokio::test]
 async fn resolving_a_wrong_or_garbage_token_returns_none() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
 
-    let resolved = resolve_token(&app.pool, &key, "no-such-token-was-ever-issued")
+    let resolved = resolve_token(&db.pool, &key, "no-such-token-was-ever-issued")
         .await
         .expect("resolve_token must succeed");
     assert!(resolved.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 5.1: resolving must also fail if hashed under the wrong
 /// `token_hash_key`, proving the hash is genuinely keyed.
 #[tokio::test]
 async fn resolving_the_correct_token_hashed_under_the_wrong_key_returns_none() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let registration_key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let issued = issue_token(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &registration_key,
         now,
         NewAccessToken {
@@ -139,7 +139,7 @@ async fn resolving_the_correct_token_hashed_under_the_wrong_key_returns_none() {
     .expect("issue_token must succeed");
 
     let resolved = resolve_token(
-        &app.pool,
+        &db.pool,
         &other_token_hash_key(),
         issued.plaintext.expose_secret(),
     )
@@ -150,7 +150,7 @@ async fn resolving_the_correct_token_hashed_under_the_wrong_key_returns_none() {
         "the correct token hashed under the wrong token_hash_key must not resolve"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 3.4, 5.1, 5.2 (the core acceptance criterion): a revoked
@@ -158,16 +158,16 @@ async fn resolving_the_correct_token_hashed_under_the_wrong_key_returns_none() {
 /// not deleted).
 #[tokio::test]
 async fn resolving_a_revoked_token_returns_none_even_though_the_row_still_exists() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let issued = issue_token(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         NewAccessToken {
@@ -181,18 +181,18 @@ async fn resolving_a_revoked_token_returns_none_even_though_the_row_still_exists
 
     // Sanity: resolves fine before revocation.
     assert!(
-        resolve_token(&app.pool, &key, issued.plaintext.expose_secret())
+        resolve_token(&db.pool, &key, issued.plaintext.expose_secret())
             .await
             .expect("resolve_token must succeed")
             .is_some()
     );
 
-    let revoked = revoke_token(&app.pool, &key, issued.plaintext.expose_secret())
+    let revoked = revoke_token(&db.pool, &key, issued.plaintext.expose_secret())
         .await
         .expect("revoke_token must succeed");
     assert!(revoked, "revoking an active token must report true");
 
-    let resolved_after_revoke = resolve_token(&app.pool, &key, issued.plaintext.expose_secret())
+    let resolved_after_revoke = resolve_token(&db.pool, &key, issued.plaintext.expose_secret())
         .await
         .expect("resolve_token must succeed");
     assert!(
@@ -203,7 +203,7 @@ async fn resolving_a_revoked_token_returns_none_even_though_the_row_still_exists
     let (row_revoked,): (bool,) =
         sqlx::query_as("SELECT revoked FROM oauth_access_tokens WHERE id = $1")
             .bind(issued.token.id.as_i64())
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("the token row must still exist after revocation");
     assert!(
@@ -211,38 +211,38 @@ async fn resolving_a_revoked_token_returns_none_even_though_the_row_still_exists
         "the row must still exist with revoked = TRUE, not be deleted"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Revoking a token value that was never issued must be reported as `false`,
 /// not an error.
 #[tokio::test]
 async fn revoking_an_unknown_token_returns_false() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
 
-    let revoked = revoke_token(&app.pool, &key, "no-such-token-was-ever-issued")
+    let revoked = revoke_token(&db.pool, &key, "no-such-token-was-ever-issued")
         .await
         .expect("revoke_token must succeed (as a call)");
     assert!(!revoked);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Revoking an already-revoked token a second time must return `false` (this
 /// module's documented judgment call), not an error and not `true` again.
 #[tokio::test]
 async fn revoking_an_already_revoked_token_a_second_time_returns_false() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let issued = issue_token(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         NewAccessToken {
@@ -254,12 +254,12 @@ async fn revoking_an_already_revoked_token_a_second_time_returns_false() {
     .await
     .expect("issue_token must succeed");
 
-    let first = revoke_token(&app.pool, &key, issued.plaintext.expose_secret())
+    let first = revoke_token(&db.pool, &key, issued.plaintext.expose_secret())
         .await
         .expect("first revoke_token call must succeed");
     assert!(first, "the first revocation must succeed");
 
-    let second = revoke_token(&app.pool, &key, issued.plaintext.expose_secret())
+    let second = revoke_token(&db.pool, &key, issued.plaintext.expose_secret())
         .await
         .expect("second revoke_token call must succeed (as a call)");
     assert!(
@@ -267,7 +267,7 @@ async fn revoking_an_already_revoked_token_a_second_time_returns_false() {
         "revoking an already-revoked token again must return false"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.6 (the core acceptance criterion): the persisted
@@ -275,16 +275,16 @@ async fn revoking_an_already_revoked_token_a_second_time_returns_false() {
 /// plaintext never appears verbatim inside the stored digest.
 #[tokio::test]
 async fn persisted_token_hash_column_never_holds_the_plaintext() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let issued = issue_token(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         NewAccessToken {
@@ -299,7 +299,7 @@ async fn persisted_token_hash_column_never_holds_the_plaintext() {
     let (stored_hash,): (Vec<u8>,) =
         sqlx::query_as("SELECT token_hash FROM oauth_access_tokens WHERE id = $1")
             .bind(issued.token.id.as_i64())
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("selecting the stored token_hash column must succeed");
 
@@ -312,24 +312,24 @@ async fn persisted_token_hash_column_never_holds_the_plaintext() {
         "stored token_hash column leaked the plaintext token verbatim"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Two tokens issued for different actors are independently issued and
 /// resolved — resolving one never returns the other's data.
 #[tokio::test]
 async fn multiple_tokens_are_independently_issued_and_resolved() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_a = app.runtime.ids.next_id();
-    let actor_b = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_a = db.runtime.ids.next_id();
+    let actor_b = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let issued_a = issue_token(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         NewAccessToken {
@@ -342,9 +342,9 @@ async fn multiple_tokens_are_independently_issued_and_resolved() {
     .expect("issuing the first token must succeed");
 
     let issued_b = issue_token(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         NewAccessToken {
@@ -362,7 +362,7 @@ async fn multiple_tokens_are_independently_issued_and_resolved() {
         issued_b.plaintext.expose_secret()
     );
 
-    let resolved_b = resolve_token(&app.pool, &key, issued_b.plaintext.expose_secret())
+    let resolved_b = resolve_token(&db.pool, &key, issued_b.plaintext.expose_secret())
         .await
         .expect("resolve_token must succeed")
         .expect("the second token must resolve");
@@ -373,13 +373,13 @@ async fn multiple_tokens_are_independently_issued_and_resolved() {
     );
 
     // Revoking the first token must not affect the second.
-    let revoked_a = revoke_token(&app.pool, &key, issued_a.plaintext.expose_secret())
+    let revoked_a = revoke_token(&db.pool, &key, issued_a.plaintext.expose_secret())
         .await
         .expect("revoke_token must succeed");
     assert!(revoked_a);
 
     let resolved_b_after_a_revoked =
-        resolve_token(&app.pool, &key, issued_b.plaintext.expose_secret())
+        resolve_token(&db.pool, &key, issued_b.plaintext.expose_secret())
             .await
             .expect("resolve_token must succeed");
     assert!(
@@ -387,7 +387,7 @@ async fn multiple_tokens_are_independently_issued_and_resolved() {
         "revoking token a must not affect token b"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.4 (atomicity, mirroring `consume_code`'s analogous
@@ -396,16 +396,16 @@ async fn multiple_tokens_are_independently_issued_and_resolved() {
 /// other `false` — never both `true` and never both `false`.
 #[tokio::test]
 async fn concurrent_revocation_of_the_same_token_lets_exactly_one_caller_win() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let issued = issue_token(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         NewAccessToken {
@@ -417,8 +417,8 @@ async fn concurrent_revocation_of_the_same_token_lets_exactly_one_caller_win() {
     .await
     .expect("issue_token must succeed");
 
-    let pool_a = app.pool.clone();
-    let pool_b = app.pool.clone();
+    let pool_a = db.pool.clone();
+    let pool_b = db.pool.clone();
     let key_a = key.clone();
     let key_b = key.clone();
     let raw_a = issued.plaintext.expose_secret().to_string();
@@ -446,5 +446,5 @@ async fn concurrent_revocation_of_the_same_token_lets_exactly_one_caller_win() {
         "exactly one concurrent revocation attempt must win, never zero or both"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

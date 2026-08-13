@@ -4,7 +4,7 @@
 //! 遷移し、一括ロードが全有効鍵を返す".
 //!
 //! Mirrors `src/actor/repository/tests.rs`'s established convention:
-//! `spawn_test_app` for an isolated, already-migrated schema and a
+//! `spawn_test_db` for an isolated, already-migrated schema and a
 //! deterministic `RuntimeContext`; a real owner (`create_owner`) and a real
 //! actor (`insert_actor`, inside a self-opened-and-committed transaction)
 //! are created first as fixtures, since `actor_signing_keys.actor_id` is a
@@ -27,7 +27,7 @@ use crate::actor::model::{ActorState, ActorType, Handle, LocalActor};
 use crate::actor::owner::create_owner;
 use crate::actor::repository::insert_actor;
 use crate::domain::Id;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// Creates a real active actor fixture under an *already-existing* owner
 /// (see [`create_owner_fixture`]), returning nothing (callers already have
@@ -96,18 +96,18 @@ fn sample_key(id: Id, actor_id: Id, now: OffsetDateTime) -> StoredSigningKey {
 /// private bytes, which `ActorPublicKey` has no field for at all).
 #[tokio::test]
 async fn insert_active_key_persists_and_is_findable_via_public_key_lookup() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_id, "alice", now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    insert_actor_fixture(&db.pool, owner_id, actor_id, "alice", now).await;
 
-    let key_id = app.runtime.ids.next_id();
+    let key_id = db.runtime.ids.next_id();
     let key = sample_key(key_id, actor_id, now);
 
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -119,7 +119,7 @@ async fn insert_active_key_persists_and_is_findable_via_public_key_lookup() {
         .await
         .expect("committing the transaction must succeed");
 
-    let public_key = find_active_public_key(&app.pool, actor_id)
+    let public_key = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("find_active_public_key must succeed")
         .expect("the just-inserted active key must be found");
@@ -127,27 +127,27 @@ async fn insert_active_key_persists_and_is_findable_via_public_key_lookup() {
     assert_eq!(public_key.key_id, key_id);
     assert_eq!(public_key.public_key_pem, key.public_key_pem);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `find_active_public_key` returns `Ok(None)` (not an error) for an actor
 /// that has never had a key inserted.
 #[tokio::test]
 async fn find_active_public_key_returns_none_for_an_actor_with_no_keys() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_id, "bob", now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    insert_actor_fixture(&db.pool, owner_id, actor_id, "bob", now).await;
 
-    let found = find_active_public_key(&app.pool, actor_id)
+    let found = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("find_active_public_key must succeed even with no keys");
     assert!(found.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 5.2, 5.3, 5.4: retiring the active key transitions its
@@ -157,17 +157,17 @@ async fn find_active_public_key_returns_none_for_an_actor_with_no_keys() {
 /// longer blocks a new active key once the old one is retired).
 #[tokio::test]
 async fn retire_active_key_transitions_status_and_allows_a_new_active_key() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_id, "carol", now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    insert_actor_fixture(&db.pool, owner_id, actor_id, "carol", now).await;
 
-    let old_key_id = app.runtime.ids.next_id();
+    let old_key_id = db.runtime.ids.next_id();
     let old_key = sample_key(old_key_id, actor_id, now);
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -178,7 +178,7 @@ async fn retire_active_key_transitions_status_and_allows_a_new_active_key() {
     tx.commit().await.expect("committing must succeed");
 
     let later = now + time::Duration::seconds(60);
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -191,7 +191,7 @@ async fn retire_active_key_transitions_status_and_allows_a_new_active_key() {
         .expect("committing the retirement must succeed");
 
     // The retired key must no longer be returned as the active public key.
-    let after_retire = find_active_public_key(&app.pool, actor_id)
+    let after_retire = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("find_active_public_key must succeed");
     assert!(
@@ -202,9 +202,9 @@ async fn retire_active_key_transitions_status_and_allows_a_new_active_key() {
     // Requirement 5.3: with the old key retired, a fresh active key for the
     // same actor must be insertable (the partial unique index only blocks a
     // *second simultaneously-active* key).
-    let new_key_id = app.runtime.ids.next_id();
+    let new_key_id = db.runtime.ids.next_id();
     let new_key = sample_key(new_key_id, actor_id, later);
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -214,7 +214,7 @@ async fn retire_active_key_transitions_status_and_allows_a_new_active_key() {
         .expect("inserting a new active key after retirement must succeed");
     tx.commit().await.expect("committing must succeed");
 
-    let public_key = find_active_public_key(&app.pool, actor_id)
+    let public_key = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("find_active_public_key must succeed")
         .expect("the new active key must now be found");
@@ -224,7 +224,7 @@ async fn retire_active_key_transitions_status_and_allows_a_new_active_key() {
     // `load_all_active` must return only the new active key, not the
     // retired one, proving retirement is tracked per-row rather than by
     // deletion.
-    let active_keys = load_all_active(&app.pool)
+    let active_keys = load_all_active(&db.pool)
         .await
         .expect("load_all_active must succeed");
     let ids: Vec<Id> = active_keys.iter().map(|k| k.id).collect();
@@ -234,7 +234,7 @@ async fn retire_active_key_transitions_status_and_allows_a_new_active_key() {
         "load_all_active must not include a retired key"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A second `insert_active_key` for an actor that already has an active key
@@ -243,17 +243,17 @@ async fn retire_active_key_transitions_status_and_allows_a_new_active_key() {
 /// the original active key.
 #[tokio::test]
 async fn insert_active_key_rejects_a_second_simultaneous_active_key_for_the_same_actor() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_id, "dave", now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    insert_actor_fixture(&db.pool, owner_id, actor_id, "dave", now).await;
 
-    let first_key_id = app.runtime.ids.next_id();
+    let first_key_id = db.runtime.ids.next_id();
     let first_key = sample_key(first_key_id, actor_id, now);
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -263,9 +263,9 @@ async fn insert_active_key_rejects_a_second_simultaneous_active_key_for_the_same
         .expect("inserting the first active key must succeed");
     tx.commit().await.expect("committing must succeed");
 
-    let second_key_id = app.runtime.ids.next_id();
+    let second_key_id = db.runtime.ids.next_id();
     let second_key = sample_key(second_key_id, actor_id, now);
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -282,13 +282,13 @@ async fn insert_active_key_rejects_a_second_simultaneous_active_key_for_the_same
     let _ = tx.rollback().await;
 
     // The original active key must be untouched.
-    let public_key = find_active_public_key(&app.pool, actor_id)
+    let public_key = find_active_public_key(&db.pool, actor_id)
         .await
         .expect("find_active_public_key must succeed")
         .expect("the original active key must still be found");
     assert_eq!(public_key.key_id, first_key_id);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Retiring an actor that has no active key at all is a no-op success, not
@@ -296,15 +296,15 @@ async fn insert_active_key_rejects_a_second_simultaneous_active_key_for_the_same
 /// bool/count return).
 #[tokio::test]
 async fn retire_active_key_is_a_no_op_success_for_an_actor_with_no_active_key() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let owner_id = app.runtime.ids.next_id();
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_id, "erin", now).await;
+    let owner_id = db.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    insert_actor_fixture(&db.pool, owner_id, actor_id, "erin", now).await;
 
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -314,7 +314,7 @@ async fn retire_active_key_is_a_no_op_success_for_an_actor_with_no_active_key() 
         .expect("retire_active_key must succeed even when there is no active key to retire");
     tx.commit().await.expect("committing must succeed");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 6.2 (startup bulk load): `load_all_active` returns every
@@ -323,21 +323,21 @@ async fn retire_active_key_is_a_no_op_success_for_an_actor_with_no_active_key() 
 /// the actors' retired keys.
 #[tokio::test]
 async fn load_all_active_returns_every_active_key_across_actors() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let owner_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
-    let actor_a = app.runtime.ids.next_id();
-    let actor_b = app.runtime.ids.next_id();
-    create_owner_fixture(&app.pool, owner_id, now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_a, "frank", now).await;
-    insert_actor_fixture(&app.pool, owner_id, actor_b, "grace", now).await;
+    let actor_a = db.runtime.ids.next_id();
+    let actor_b = db.runtime.ids.next_id();
+    create_owner_fixture(&db.pool, owner_id, now).await;
+    insert_actor_fixture(&db.pool, owner_id, actor_a, "frank", now).await;
+    insert_actor_fixture(&db.pool, owner_id, actor_b, "grace", now).await;
 
-    let key_a = sample_key(app.runtime.ids.next_id(), actor_a, now);
-    let key_b = sample_key(app.runtime.ids.next_id(), actor_b, now);
+    let key_a = sample_key(db.runtime.ids.next_id(), actor_a, now);
+    let key_b = sample_key(db.runtime.ids.next_id(), actor_b, now);
     for key in [&key_a, &key_b] {
-        let mut tx = app
+        let mut tx = db
             .pool
             .begin()
             .await
@@ -348,7 +348,7 @@ async fn load_all_active_returns_every_active_key_across_actors() {
         tx.commit().await.expect("committing must succeed");
     }
 
-    let mut active_keys = load_all_active(&app.pool)
+    let mut active_keys = load_all_active(&db.pool)
         .await
         .expect("load_all_active must succeed");
     active_keys.sort_by_key(|k| k.id);
@@ -366,20 +366,20 @@ async fn load_all_active_returns_every_active_key_across_actors() {
         "load_all_active must include the sealed private key bytes, not strip them"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `load_all_active` returns an empty `Vec` (not an error) when no key has
 /// ever been inserted at all.
 #[tokio::test]
 async fn load_all_active_returns_empty_when_no_key_exists() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
     // No fixtures inserted at all in this isolated schema.
-    let active_keys = load_all_active(&app.pool)
+    let active_keys = load_all_active(&db.pool)
         .await
         .expect("load_all_active must succeed even with no keys");
     assert!(active_keys.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

@@ -3,7 +3,7 @@
 //! は期限切れコードは交換に使えないことを統合テストで確認できる".
 //!
 //! Mirrors `src/oauth/app_repository/tests.rs`'s established convention:
-//! reuses `crate::test_harness::spawn_test_app` for an isolated,
+//! reuses `crate::test_harness::db_fixture::spawn_test_db` for an isolated,
 //! already-migrated schema and a deterministic `RuntimeContext`, and
 //! registers a real `oauth_applications` row via
 //! `crate::oauth::app_repository::register_app` first (an authorization
@@ -17,7 +17,7 @@ use crate::domain::Id;
 use crate::oauth::app_repository::{self, NewApp};
 use crate::oauth::hash::TokenHashKey;
 use crate::oauth::model::{AuthorizationCode, PkceChallenge, ScopeSet};
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 use time::{Duration, OffsetDateTime};
 
 /// A fixed, non-production token-hashing key for this test module only —
@@ -75,11 +75,11 @@ fn sample_code(
 /// (selected actor, approved scopes, redirect URI).
 #[tokio::test]
 async fn insert_code_then_consume_it_once_succeeds_and_returns_the_codes_data() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let code = sample_code(
         app_id,
@@ -89,11 +89,11 @@ async fn insert_code_then_consume_it_once_succeeds_and_returns_the_codes_data() 
         Duration::minutes(10),
         None,
     );
-    insert_code(&app.pool, &key, &code)
+    insert_code(&db.pool, &key, &code)
         .await
         .expect("insert_code must succeed");
 
-    let consumed = consume_code(&app.pool, &key, "raw-authorization-code-value", now)
+    let consumed = consume_code(&db.pool, &key, "raw-authorization-code-value", now)
         .await
         .expect("consume_code must succeed")
         .expect("an unconsumed, unexpired code must be consumable");
@@ -108,17 +108,17 @@ async fn insert_code_then_consume_it_once_succeeds_and_returns_the_codes_data() 
     assert!(consumed.pkce.is_none());
     assert!(consumed.consumed);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 2.6: a code carrying a PKCE challenge round-trips it exactly.
 #[tokio::test]
 async fn a_code_with_a_pkce_challenge_round_trips_the_challenge_value() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let code = sample_code(
         app_id,
@@ -128,11 +128,11 @@ async fn a_code_with_a_pkce_challenge_round_trips_the_challenge_value() {
         Duration::minutes(10),
         Some(PkceChallenge::new("s256-challenge-value")),
     );
-    insert_code(&app.pool, &key, &code)
+    insert_code(&db.pool, &key, &code)
         .await
         .expect("insert_code must succeed");
 
-    let consumed = consume_code(&app.pool, &key, "raw-code-with-pkce", now)
+    let consumed = consume_code(&db.pool, &key, "raw-code-with-pkce", now)
         .await
         .expect("consume_code must succeed")
         .expect("the code must be consumable");
@@ -140,7 +140,7 @@ async fn a_code_with_a_pkce_challenge_round_trips_the_challenge_value() {
     let pkce = consumed.pkce.expect("the PKCE challenge must round-trip");
     assert_eq!(pkce.as_str(), "s256-challenge-value");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 2.5, 3.1, 3.2 (the core acceptance criterion): a code that
@@ -150,11 +150,11 @@ async fn a_code_with_a_pkce_challenge_round_trips_the_challenge_value() {
 /// nobody checks.
 #[tokio::test]
 async fn consuming_an_already_consumed_code_a_second_time_returns_none() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let code = sample_code(
         app_id,
@@ -164,16 +164,16 @@ async fn consuming_an_already_consumed_code_a_second_time_returns_none() {
         Duration::minutes(10),
         None,
     );
-    insert_code(&app.pool, &key, &code)
+    insert_code(&db.pool, &key, &code)
         .await
         .expect("insert_code must succeed");
 
-    let first = consume_code(&app.pool, &key, "raw-code-double-spend-attempt", now)
+    let first = consume_code(&db.pool, &key, "raw-code-double-spend-attempt", now)
         .await
         .expect("consume_code must succeed");
     assert!(first.is_some(), "the first consumption must succeed");
 
-    let second = consume_code(&app.pool, &key, "raw-code-double-spend-attempt", now)
+    let second = consume_code(&db.pool, &key, "raw-code-double-spend-attempt", now)
         .await
         .expect("consume_code must succeed (as a call), even though it rejects the code");
     assert!(
@@ -181,18 +181,18 @@ async fn consuming_an_already_consumed_code_a_second_time_returns_none() {
         "a second consumption of an already-consumed code must be rejected"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 2.5, 3.2: an expired (but never-consumed) code cannot be
 /// consumed.
 #[tokio::test]
 async fn consuming_an_expired_code_returns_none() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     // Expired one second before "now".
     let code = sample_code(
@@ -203,11 +203,11 @@ async fn consuming_an_expired_code_returns_none() {
         Duration::seconds(-1),
         None,
     );
-    insert_code(&app.pool, &key, &code)
+    insert_code(&db.pool, &key, &code)
         .await
         .expect("insert_code must succeed");
 
-    let consumed = consume_code(&app.pool, &key, "raw-code-already-expired", now)
+    let consumed = consume_code(&db.pool, &key, "raw-code-already-expired", now)
         .await
         .expect("consume_code must succeed (as a call)");
     assert!(
@@ -215,23 +215,23 @@ async fn consuming_an_expired_code_returns_none() {
         "an expired code must not be consumable, even though it was never consumed"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A code presented with the wrong raw value (no matching `code_hash`) must
 /// not be consumable.
 #[tokio::test]
 async fn consuming_an_unknown_code_returns_none() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
 
-    let consumed = consume_code(&app.pool, &key, "no-such-code-was-ever-inserted", now)
+    let consumed = consume_code(&db.pool, &key, "no-such-code-was-ever-inserted", now)
         .await
         .expect("consume_code must succeed (as a call)");
     assert!(consumed.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.6 (mirrored for authorization codes): the persisted
@@ -239,11 +239,11 @@ async fn consuming_an_unknown_code_returns_none() {
 /// plaintext never appears verbatim inside the stored digest.
 #[tokio::test]
 async fn persisted_code_hash_column_never_holds_the_plaintext() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let plaintext = "raw-authorization-code-for-plaintext-check";
     let code = sample_code(
@@ -254,7 +254,7 @@ async fn persisted_code_hash_column_never_holds_the_plaintext() {
         Duration::minutes(10),
         None,
     );
-    insert_code(&app.pool, &key, &code)
+    insert_code(&db.pool, &key, &code)
         .await
         .expect("insert_code must succeed");
 
@@ -263,7 +263,7 @@ async fn persisted_code_hash_column_never_holds_the_plaintext() {
     )
     .bind(app_id.as_i64())
     .bind(actor_id.as_i64())
-    .fetch_one(&app.pool)
+    .fetch_one(&db.pool)
     .await
     .expect("selecting the stored code_hash column must succeed");
 
@@ -276,7 +276,7 @@ async fn persisted_code_hash_column_never_holds_the_plaintext() {
         "stored code_hash column leaked the plaintext code verbatim"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.2 (atomicity, the core acceptance criterion): when two
@@ -285,11 +285,11 @@ async fn persisted_code_hash_column_never_holds_the_plaintext() {
 /// succeeding (a double-spend) and never both failing.
 #[tokio::test]
 async fn concurrent_consumption_of_the_same_code_lets_exactly_one_caller_win() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let app_id = register_test_app(&app.pool, &app.runtime).await;
-    let actor_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let app_id = register_test_app(&db.pool, &db.runtime).await;
+    let actor_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let code = sample_code(
         app_id,
@@ -299,12 +299,12 @@ async fn concurrent_consumption_of_the_same_code_lets_exactly_one_caller_win() {
         Duration::minutes(10),
         None,
     );
-    insert_code(&app.pool, &key, &code)
+    insert_code(&db.pool, &key, &code)
         .await
         .expect("insert_code must succeed");
 
-    let pool_a = app.pool.clone();
-    let pool_b = app.pool.clone();
+    let pool_a = db.pool.clone();
+    let pool_b = db.pool.clone();
     let key_a = key.clone();
     let key_b = key.clone();
 
@@ -334,5 +334,5 @@ async fn concurrent_consumption_of_the_same_code_lets_exactly_one_caller_win() {
         "exactly one concurrent consumption attempt must win, never zero or both"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

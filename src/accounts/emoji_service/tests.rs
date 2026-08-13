@@ -3,7 +3,7 @@
 //! 返すサービステストが green".
 //!
 //! Mirrors `src/accounts/emoji_repository/tests.rs`'s established
-//! convention: `spawn_test_app` for an isolated, already-migrated schema,
+//! convention: `spawn_test_db` for an isolated, already-migrated schema,
 //! seeding `custom_emojis` directly with a raw `sqlx::query` `INSERT` (this
 //! crate never seeds that table through any function it exposes — see
 //! `emoji_repository.rs`'s own doc comment, Requirement 9.3's "read only"
@@ -12,7 +12,7 @@
 
 use super::CustomEmojiService;
 use crate::accounts::custom_emoji_serializer::CustomEmojiSerializer;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 fn service(pool: sqlx::PgPool) -> CustomEmojiService {
     CustomEmojiService::new(pool, CustomEmojiSerializer::new())
@@ -22,13 +22,13 @@ fn service(pool: sqlx::PgPool) -> CustomEmojiService {
 /// `emoji_repository/tests.rs::seed_emoji` exactly — this crate exposes no
 /// write API for this table, Requirement 9.3).
 async fn seed_emoji(
-    app: &TestApp,
+    db: &TestDb,
     shortcode: &str,
     domain: &str,
     visible_in_picker: bool,
     category: Option<&str>,
 ) {
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     let url = format!("https://example.test/emoji/{shortcode}.png");
     sqlx::query(
         "INSERT INTO custom_emojis \
@@ -41,7 +41,7 @@ async fn seed_emoji(
     .bind(visible_in_picker)
     .bind(category)
     .bind(now)
-    .execute(&app.pool)
+    .execute(&db.pool)
     .await
     .expect("seeding a custom_emojis row must succeed");
 }
@@ -51,12 +51,12 @@ async fn seed_emoji(
 /// a `visible_in_picker = FALSE` row must be excluded from the result.
 #[tokio::test]
 async fn list_custom_emojis_returns_only_visible_emojis() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    seed_emoji(&app, "blobcat", "", true, Some("cats")).await;
-    seed_emoji(&app, "hidden_emoji", "", false, None).await;
+    seed_emoji(&db, "blobcat", "", true, Some("cats")).await;
+    seed_emoji(&db, "hidden_emoji", "", false, None).await;
 
-    let svc = service(app.pool.clone());
+    let svc = service(db.pool.clone());
     let json = svc
         .list_custom_emojis()
         .await
@@ -77,7 +77,7 @@ async fn list_custom_emojis_returns_only_visible_emojis() {
         "a visible_in_picker = FALSE row must not appear in the service result"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 9.2: each returned CustomEmoji JSON entry carries the
@@ -86,11 +86,11 @@ async fn list_custom_emojis_returns_only_visible_emojis() {
 /// isolation, task 3.4's own tests already cover that unit).
 #[tokio::test]
 async fn list_custom_emojis_entries_have_the_expected_shape() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    seed_emoji(&app, "blobcat", "", true, Some("cats")).await;
+    seed_emoji(&db, "blobcat", "", true, Some("cats")).await;
 
-    let svc = service(app.pool.clone());
+    let svc = service(db.pool.clone());
     let json = svc
         .list_custom_emojis()
         .await
@@ -113,17 +113,17 @@ async fn list_custom_emojis_entries_have_the_expected_shape() {
     assert_eq!(blobcat["visible_in_picker"], serde_json::json!(true));
     assert_eq!(blobcat["category"], serde_json::json!("cats"));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// With zero `custom_emojis` rows in the database, `list_custom_emojis` must
 /// still succeed and return an empty JSON array, never an error.
 #[tokio::test]
 async fn list_custom_emojis_with_no_rows_returns_an_empty_array() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
     let row_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM custom_emojis")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting rows must succeed");
     assert_eq!(
@@ -131,7 +131,7 @@ async fn list_custom_emojis_with_no_rows_returns_an_empty_array() {
         "the test database must start with no custom_emojis row"
     );
 
-    let svc = service(app.pool.clone());
+    let svc = service(db.pool.clone());
     let json = svc
         .list_custom_emojis()
         .await
@@ -139,5 +139,5 @@ async fn list_custom_emojis_with_no_rows_returns_an_empty_array() {
 
     assert_eq!(json, serde_json::json!([]));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

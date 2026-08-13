@@ -4,7 +4,7 @@
 //! テストが green".
 //!
 //! Mirrors `src/accounts/profile_repository/tests.rs`'s established
-//! convention: reuses `crate::test_harness::spawn_test_app` for an
+//! convention: reuses `crate::test_harness::db_fixture::spawn_test_db` for an
 //! isolated, already-migrated schema. Unlike the profile/remote/emoji
 //! repository tests, this module never calls any write function of its
 //! own (there is none — see `settings_repository.rs`'s doc comment,
@@ -14,7 +14,7 @@
 
 use super::load_instance_settings;
 use crate::domain::Id;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// The task's own named observable completion condition: against a
 /// freshly-migrated database where the `instance_settings` singleton row
@@ -24,10 +24,10 @@ use crate::test_harness::spawn_test_app;
 /// `languages: vec![]` (Requirement 8.1).
 #[tokio::test]
 async fn load_instance_settings_returns_all_defaults_when_no_row_exists() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
     let row_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM instance_settings")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting rows must succeed");
     assert_eq!(
@@ -35,7 +35,7 @@ async fn load_instance_settings_returns_all_defaults_when_no_row_exists() {
         "the test database must start with no instance_settings row"
     );
 
-    let settings = load_instance_settings(&app.pool)
+    let settings = load_instance_settings(&db.pool)
         .await
         .expect("load_instance_settings must succeed even when no row exists");
 
@@ -50,7 +50,7 @@ async fn load_instance_settings_returns_all_defaults_when_no_row_exists() {
     assert!(settings.thumbnail.is_none());
     assert!(settings.languages.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.2/8.3: with a row present that sets only *some* fields
@@ -61,8 +61,8 @@ async fn load_instance_settings_returns_all_defaults_when_no_row_exists() {
 /// behavior, not just "row exists vs. doesn't".
 #[tokio::test]
 async fn load_instance_settings_returns_set_values_and_defaults_for_the_rest() {
-    let app = spawn_test_app().await;
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let now = db.runtime.clock.now();
 
     sqlx::query(
         "INSERT INTO instance_settings (id, title, registrations_enabled, updated_at) \
@@ -71,11 +71,11 @@ async fn load_instance_settings_returns_set_values_and_defaults_for_the_rest() {
     .bind("Kawasemi Test Instance")
     .bind(true)
     .bind(now)
-    .execute(&app.pool)
+    .execute(&db.pool)
     .await
     .expect("seeding a partial instance_settings row must succeed");
 
-    let settings = load_instance_settings(&app.pool)
+    let settings = load_instance_settings(&db.pool)
         .await
         .expect("load_instance_settings must succeed");
 
@@ -93,7 +93,7 @@ async fn load_instance_settings_returns_set_values_and_defaults_for_the_rest() {
     assert!(settings.thumbnail.is_none());
     assert!(settings.languages.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.1, 8.2: `rules`/`languages` (both `JSONB` arrays of
@@ -103,8 +103,8 @@ async fn load_instance_settings_returns_set_values_and_defaults_for_the_rest() {
 /// is reported verbatim.
 #[tokio::test]
 async fn load_instance_settings_round_trips_rules_languages_and_nullable_fields() {
-    let app = spawn_test_app().await;
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let now = db.runtime.clock.now();
     let contact_account_id = Id::from_i64(4242);
 
     sqlx::query(
@@ -130,11 +130,11 @@ async fn load_instance_settings_round_trips_rules_languages_and_nullable_fields(
     .bind("https://kawasemi.example/thumbnail.png")
     .bind(serde_json::json!(["en", "ja"]))
     .bind(now)
-    .execute(&app.pool)
+    .execute(&db.pool)
     .await
     .expect("seeding a full instance_settings row must succeed");
 
-    let settings = load_instance_settings(&app.pool)
+    let settings = load_instance_settings(&db.pool)
         .await
         .expect("load_instance_settings must succeed");
 
@@ -161,7 +161,7 @@ async fn load_instance_settings_round_trips_rules_languages_and_nullable_fields(
     );
     assert_eq!(settings.languages, vec!["en".to_string(), "ja".to_string()]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The `instance_settings_singleton` `CHECK (id = 1)` constraint means a
@@ -170,13 +170,13 @@ async fn load_instance_settings_round_trips_rules_languages_and_nullable_fields(
 /// across rows.
 #[tokio::test]
 async fn load_instance_settings_reads_the_singleton_row_by_id() {
-    let app = spawn_test_app().await;
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let now = db.runtime.clock.now();
 
     sqlx::query("INSERT INTO instance_settings (id, title, updated_at) VALUES (1, $1, $2)")
         .bind("Singleton Title")
         .bind(now)
-        .execute(&app.pool)
+        .execute(&db.pool)
         .await
         .expect("seeding must succeed");
 
@@ -184,17 +184,17 @@ async fn load_instance_settings_reads_the_singleton_row_by_id() {
         sqlx::query("INSERT INTO instance_settings (id, title, updated_at) VALUES (2, $1, $2)")
             .bind("Should Never Exist")
             .bind(now)
-            .execute(&app.pool)
+            .execute(&db.pool)
             .await;
     assert!(
         attempt_second_row.is_err(),
         "the instance_settings_singleton CHECK (id = 1) constraint must reject a second row"
     );
 
-    let settings = load_instance_settings(&app.pool)
+    let settings = load_instance_settings(&db.pool)
         .await
         .expect("load_instance_settings must succeed");
     assert_eq!(settings.title, "Singleton Title");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

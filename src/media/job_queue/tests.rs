@@ -5,7 +5,7 @@
 //! て試行回数が加算されることを統合テストで確認できる".
 //!
 //! Mirrors `src/media/media_repository/tests.rs`'s established convention:
-//! reuses `crate::test_harness::spawn_test_app` for an isolated,
+//! reuses `crate::test_harness::db_fixture::spawn_test_db` for an isolated,
 //! already-migrated schema and a deterministic `RuntimeContext`, and inserts
 //! a real owner + local actor + `media` row first (`media_processing_jobs.
 //! media_id REFERENCES media(id)` is a real FK, unlike `media.actor_id`'s
@@ -21,18 +21,18 @@ use crate::actor::repository::insert_actor;
 use crate::domain::Id;
 use crate::media::media_repository::insert_media;
 use crate::media::model::{Focus, JobState, Media, MediaState, MediaType};
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 /// Creates a real owner + local actor row, returning the actor's `Id` (same
 /// helper shape as `media_repository/tests.rs::create_test_actor`).
-async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+async fn create_test_actor(db: &TestDb, handle: &str) -> Id {
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
     let actor = LocalActor {
         id: actor_id,
         owner_id,
@@ -44,7 +44,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
         created_at: now,
         updated_at: now,
     };
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -61,8 +61,8 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
 /// `Id`. The exact `Media` field values (beyond `id`/`actor_id`) are
 /// irrelevant to this module's own behavior — only the FK target's
 /// existence matters here.
-async fn create_test_media(app: &TestApp, actor_id: Id, now: time::OffsetDateTime) -> Id {
-    let media_id = app.runtime.ids.next_id();
+async fn create_test_media(db: &TestDb, actor_id: Id, now: time::OffsetDateTime) -> Id {
+    let media_id = db.runtime.ids.next_id();
     let media = Media {
         id: media_id,
         actor_id,
@@ -75,7 +75,7 @@ async fn create_test_media(app: &TestApp, actor_id: Id, now: time::OffsetDateTim
         created_at: now,
     };
     insert_media(
-        &app.pool,
+        &db.pool,
         &media,
         &format!("{}/original", media_id.as_i64()),
         "image/png",
@@ -123,16 +123,16 @@ async fn read_last_error(pool: &sqlx::PgPool, job_id: Id) -> Option<String> {
 /// 0` that `claim_due` can immediately pick up when `run_at <= now`.
 #[tokio::test]
 async fn enqueue_inserts_a_queued_job_claimable_immediately() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "alice").await;
-    let now = app.runtime.clock.now();
-    let media_id = create_test_media(&app, actor_id, now).await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "alice").await;
+    let now = db.runtime.clock.now();
+    let media_id = create_test_media(&db, actor_id, now).await;
 
-    enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, now)
+    enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, now)
         .await
         .expect("enqueue must succeed");
 
-    let claimed = claim_due(&app.pool, now, Duration::minutes(5))
+    let claimed = claim_due(&db.pool, now, Duration::minutes(5))
         .await
         .expect("claim_due must succeed")
         .expect("the just-enqueued job must be immediately claimable");
@@ -144,24 +144,24 @@ async fn enqueue_inserts_a_queued_job_claimable_immediately() {
     assert_eq!(claimed.state, JobState::Processing);
     assert_eq!(claimed.locked_at, Some(now));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `claim_due` returns `None` when nothing is due yet (`run_at` in the
 /// future, no lease-expired `processing` job either).
 #[tokio::test]
 async fn claim_due_returns_none_when_nothing_is_due() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "bob").await;
-    let now = app.runtime.clock.now();
-    let media_id = create_test_media(&app, actor_id, now).await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "bob").await;
+    let now = db.runtime.clock.now();
+    let media_id = create_test_media(&db, actor_id, now).await;
 
     let future_run_at = now + Duration::minutes(10);
-    enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, future_run_at)
+    enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, future_run_at)
         .await
         .expect("enqueue must succeed");
 
-    let claimed = claim_due(&app.pool, now, Duration::minutes(5))
+    let claimed = claim_due(&db.pool, now, Duration::minutes(5))
         .await
         .expect("claim_due must succeed even with nothing due");
     assert!(
@@ -169,7 +169,7 @@ async fn claim_due_returns_none_when_nothing_is_due() {
         "a job whose run_at is still in the future must not be claimed"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 4.2 (this task's core concurrency claim): two concurrent
@@ -181,17 +181,17 @@ async fn claim_due_returns_none_when_nothing_is_due() {
 /// `'queued'`) and returns `None`.
 #[tokio::test]
 async fn two_concurrent_claim_due_calls_never_both_claim_the_same_job() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "carol").await;
-    let now = app.runtime.clock.now();
-    let media_id = create_test_media(&app, actor_id, now).await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "carol").await;
+    let now = db.runtime.clock.now();
+    let media_id = create_test_media(&db, actor_id, now).await;
 
-    enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, now)
+    enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, now)
         .await
         .expect("enqueue must succeed");
 
-    let pool_a = app.pool.clone();
-    let pool_b = app.pool.clone();
+    let pool_a = db.pool.clone();
+    let pool_b = db.pool.clone();
     let lease = Duration::minutes(5);
     let (result_a, result_b) = tokio::join!(
         claim_due(&pool_a, now, lease),
@@ -211,7 +211,7 @@ async fn two_concurrent_claim_due_calls_never_both_claim_the_same_job() {
     );
     assert_eq!(winners[0].media_id, media_id);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 4.4: `fail_or_retry` below `max_attempts` returns `Retried`
@@ -219,25 +219,25 @@ async fn two_concurrent_claim_due_calls_never_both_claim_the_same_job() {
 /// (proving the backoff is actually exponential, not fixed).
 #[tokio::test]
 async fn fail_or_retry_below_max_attempts_retries_with_growing_backoff() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "dave").await;
-    let now = app.runtime.clock.now();
-    let media_id = create_test_media(&app, actor_id, now).await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "dave").await;
+    let now = db.runtime.clock.now();
+    let media_id = create_test_media(&db, actor_id, now).await;
 
-    enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, now)
+    enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, now)
         .await
         .expect("enqueue must succeed");
-    let job = claim_due(&app.pool, now, Duration::minutes(5))
+    let job = claim_due(&db.pool, now, Duration::minutes(5))
         .await
         .expect("claim_due must succeed")
         .expect("job must be claimable");
     let original_run_at = job.run_at;
 
-    let outcome1 = fail_or_retry(&app.pool, &job, 10, now, "simulated transient failure #1")
+    let outcome1 = fail_or_retry(&db.pool, &job, 10, now, "simulated transient failure #1")
         .await
         .expect("fail_or_retry must succeed");
     assert_eq!(outcome1, JobOutcome::Retried);
-    let (state1, attempts1, run_at1, locked_at1) = read_job_row(&app.pool, job.id).await;
+    let (state1, attempts1, run_at1, locked_at1) = read_job_row(&db.pool, job.id).await;
     assert_eq!(state1, "queued");
     assert_eq!(attempts1, 1);
     assert!(
@@ -249,14 +249,14 @@ async fn fail_or_retry_below_max_attempts_retries_with_growing_backoff() {
         "a retried job must have its lock cleared"
     );
     assert_eq!(
-        read_last_error(&app.pool, job.id).await.as_deref(),
+        read_last_error(&db.pool, job.id).await.as_deref(),
         Some("simulated transient failure #1"),
         "a retried job must also have its diagnostic message persisted (Requirement 4.5)"
     );
 
     // Claim it again (it's due again once we advance `now` to its new
     // run_at) and fail it a second time; the backoff must grow further.
-    let job2 = claim_due(&app.pool, run_at1, Duration::minutes(5))
+    let job2 = claim_due(&db.pool, run_at1, Duration::minutes(5))
         .await
         .expect("claim_due must succeed")
         .expect("the retried job must be claimable once its new run_at arrives");
@@ -266,7 +266,7 @@ async fn fail_or_retry_below_max_attempts_retries_with_growing_backoff() {
     );
 
     let outcome2 = fail_or_retry(
-        &app.pool,
+        &db.pool,
         &job2,
         10,
         run_at1,
@@ -275,7 +275,7 @@ async fn fail_or_retry_below_max_attempts_retries_with_growing_backoff() {
     .await
     .expect("fail_or_retry must succeed");
     assert_eq!(outcome2, JobOutcome::Retried);
-    let (state2, attempts2, run_at2, _locked_at2) = read_job_row(&app.pool, job.id).await;
+    let (state2, attempts2, run_at2, _locked_at2) = read_job_row(&db.pool, job.id).await;
     assert_eq!(state2, "queued");
     assert_eq!(attempts2, 2);
     assert!(
@@ -286,33 +286,33 @@ async fn fail_or_retry_below_max_attempts_retries_with_growing_backoff() {
         run_at1 - original_run_at
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 4.5: `fail_or_retry` at/above `max_attempts` returns `Failed`
 /// and the row's terminal state is reflected as `'failed'` in the DB.
 #[tokio::test]
 async fn fail_or_retry_at_max_attempts_fails_the_job() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "erin").await;
-    let now = app.runtime.clock.now();
-    let media_id = create_test_media(&app, actor_id, now).await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "erin").await;
+    let now = db.runtime.clock.now();
+    let media_id = create_test_media(&db, actor_id, now).await;
 
-    enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, now)
+    enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, now)
         .await
         .expect("enqueue must succeed");
-    let job = claim_due(&app.pool, now, Duration::minutes(5))
+    let job = claim_due(&db.pool, now, Duration::minutes(5))
         .await
         .expect("claim_due must succeed")
         .expect("job must be claimable");
 
     // max_attempts = 1: the very first failure already reaches the limit.
-    let outcome = fail_or_retry(&app.pool, &job, 1, now, "simulated terminal failure")
+    let outcome = fail_or_retry(&db.pool, &job, 1, now, "simulated terminal failure")
         .await
         .expect("fail_or_retry must succeed");
     assert_eq!(outcome, JobOutcome::Failed);
 
-    let (state, attempts, _run_at, locked_at) = read_job_row(&app.pool, job.id).await;
+    let (state, attempts, _run_at, locked_at) = read_job_row(&db.pool, job.id).await;
     assert_eq!(state, "failed");
     assert_eq!(attempts, 1);
     assert!(
@@ -320,14 +320,14 @@ async fn fail_or_retry_at_max_attempts_fails_the_job() {
         "a failed job must have its lock cleared"
     );
     assert_eq!(
-        read_last_error(&app.pool, job.id).await.as_deref(),
+        read_last_error(&db.pool, job.id).await.as_deref(),
         Some("simulated terminal failure"),
         "a terminally failed job must also have its diagnostic message persisted \
          (Requirement 4.5's \"原因特定に十分な診断情報を出力する\")"
     );
 
     // A failed job must never be claimable again.
-    let reclaimed = claim_due(&app.pool, now + Duration::hours(1), Duration::minutes(5))
+    let reclaimed = claim_due(&db.pool, now + Duration::hours(1), Duration::minutes(5))
         .await
         .expect("claim_due must succeed");
     assert!(
@@ -335,7 +335,7 @@ async fn fail_or_retry_at_max_attempts_fails_the_job() {
         "a terminally failed job must never be returned by claim_due again"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 4.2, 4.4: a `processing` job whose `locked_at` is older
@@ -344,16 +344,16 @@ async fn fail_or_retry_at_max_attempts_fails_the_job() {
 /// `processing` job still within its lease is NOT reclaimed.
 #[tokio::test]
 async fn claim_due_reclaims_lease_expired_processing_jobs_and_increments_attempts() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "frank").await;
-    let now = app.runtime.clock.now();
-    let media_id = create_test_media(&app, actor_id, now).await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "frank").await;
+    let now = db.runtime.clock.now();
+    let media_id = create_test_media(&db, actor_id, now).await;
     let lease = Duration::minutes(5);
 
-    enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, now)
+    enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, now)
         .await
         .expect("enqueue must succeed");
-    let job = claim_due(&app.pool, now, lease)
+    let job = claim_due(&db.pool, now, lease)
         .await
         .expect("claim_due must succeed")
         .expect("job must be claimable");
@@ -362,7 +362,7 @@ async fn claim_due_reclaims_lease_expired_processing_jobs_and_increments_attempt
     // Still within the lease: claim_due (from a different, later "now"
     // still inside the lease window) must not reclaim it.
     let still_within_lease = now + Duration::minutes(2);
-    let not_reclaimed = claim_due(&app.pool, still_within_lease, lease)
+    let not_reclaimed = claim_due(&db.pool, still_within_lease, lease)
         .await
         .expect("claim_due must succeed");
     assert!(
@@ -373,7 +373,7 @@ async fn claim_due_reclaims_lease_expired_processing_jobs_and_increments_attempt
     // Past the lease: claim_due must now reclaim it, with attempts
     // incremented versus the pre-reclaim value (0 -> 1).
     let past_lease = now + lease + Duration::seconds(1);
-    let reclaimed = claim_due(&app.pool, past_lease, lease)
+    let reclaimed = claim_due(&db.pool, past_lease, lease)
         .await
         .expect("claim_due must succeed")
         .expect("a lease-expired processing job must be reclaimed");
@@ -386,12 +386,12 @@ async fn claim_due_reclaims_lease_expired_processing_jobs_and_increments_attempt
     assert_eq!(reclaimed.state, JobState::Processing);
     assert_eq!(reclaimed.locked_at, Some(past_lease));
 
-    let (state, attempts, _run_at, locked_at) = read_job_row(&app.pool, job.id).await;
+    let (state, attempts, _run_at, locked_at) = read_job_row(&db.pool, job.id).await;
     assert_eq!(state, "processing");
     assert_eq!(attempts, 1);
     assert_eq!(locked_at, Some(past_lease));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A second reclaim (still no `complete`/`fail_or_retry` in between) keeps
@@ -401,16 +401,16 @@ async fn claim_due_reclaims_lease_expired_processing_jobs_and_increments_attempt
 /// counter and one `max_attempts` budget).
 #[tokio::test]
 async fn repeated_reclaims_accumulate_into_fail_or_retry_s_own_attempts_accounting() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "grace").await;
-    let now = app.runtime.clock.now();
-    let media_id = create_test_media(&app, actor_id, now).await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "grace").await;
+    let now = db.runtime.clock.now();
+    let media_id = create_test_media(&db, actor_id, now).await;
     let lease = Duration::minutes(5);
 
-    enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, now)
+    enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, now)
         .await
         .expect("enqueue must succeed");
-    let job = claim_due(&app.pool, now, lease)
+    let job = claim_due(&db.pool, now, lease)
         .await
         .expect("claim_due must succeed")
         .expect("job must be claimable");
@@ -418,7 +418,7 @@ async fn repeated_reclaims_accumulate_into_fail_or_retry_s_own_attempts_accounti
 
     // First reclaim: 0 -> 1.
     let t1 = now + lease + Duration::seconds(1);
-    let reclaim1 = claim_due(&app.pool, t1, lease)
+    let reclaim1 = claim_due(&db.pool, t1, lease)
         .await
         .expect("claim_due must succeed")
         .expect("must reclaim");
@@ -426,7 +426,7 @@ async fn repeated_reclaims_accumulate_into_fail_or_retry_s_own_attempts_accounti
 
     // Second reclaim (still crashed, lease expires again): 1 -> 2.
     let t2 = t1 + lease + Duration::seconds(1);
-    let reclaim2 = claim_due(&app.pool, t2, lease)
+    let reclaim2 = claim_due(&db.pool, t2, lease)
         .await
         .expect("claim_due must succeed")
         .expect("must reclaim again");
@@ -434,7 +434,7 @@ async fn repeated_reclaims_accumulate_into_fail_or_retry_s_own_attempts_accounti
 
     // A worker finally observes a real transient failure: max_attempts = 3
     // means this third increment (2 -> 3) hits the cap and fails the job.
-    let outcome = fail_or_retry(&app.pool, &reclaim2, 3, t2, "simulated third failure")
+    let outcome = fail_or_retry(&db.pool, &reclaim2, 3, t2, "simulated third failure")
         .await
         .expect("fail_or_retry must succeed");
     assert_eq!(
@@ -442,38 +442,38 @@ async fn repeated_reclaims_accumulate_into_fail_or_retry_s_own_attempts_accounti
         JobOutcome::Failed,
         "reclaim increments must count toward the same max_attempts budget fail_or_retry checks"
     );
-    let (state, attempts, _run_at, _locked_at) = read_job_row(&app.pool, job.id).await;
+    let (state, attempts, _run_at, _locked_at) = read_job_row(&db.pool, job.id).await;
     assert_eq!(state, "failed");
     assert_eq!(attempts, 3);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 4.3 (referenced by this component's own design.md
 /// Requirements list via `complete`): `complete` deletes the job row.
 #[tokio::test]
 async fn complete_deletes_the_job_row() {
-    let app = spawn_test_app().await;
-    let actor_id = create_test_actor(&app, "heidi").await;
-    let now = app.runtime.clock.now();
-    let media_id = create_test_media(&app, actor_id, now).await;
+    let db = spawn_test_db().await;
+    let actor_id = create_test_actor(&db, "heidi").await;
+    let now = db.runtime.clock.now();
+    let media_id = create_test_media(&db, actor_id, now).await;
 
-    enqueue(&app.pool, app.runtime.ids.as_ref(), media_id, now)
+    enqueue(&db.pool, db.runtime.ids.as_ref(), media_id, now)
         .await
         .expect("enqueue must succeed");
-    let job = claim_due(&app.pool, now, Duration::minutes(5))
+    let job = claim_due(&db.pool, now, Duration::minutes(5))
         .await
         .expect("claim_due must succeed")
         .expect("job must be claimable");
 
-    complete(&app.pool, job.id)
+    complete(&db.pool, job.id)
         .await
         .expect("complete must succeed");
 
     let remaining: Option<(i64,)> =
         sqlx::query_as("SELECT id FROM media_processing_jobs WHERE id = $1")
             .bind(job.id.as_i64())
-            .fetch_optional(&app.pool)
+            .fetch_optional(&db.pool)
             .await
             .expect("query must succeed");
     assert!(
@@ -482,12 +482,12 @@ async fn complete_deletes_the_job_row() {
     );
 
     // A completed job must never resurface via claim_due either.
-    let reclaimed = claim_due(&app.pool, now + Duration::hours(1), Duration::minutes(5))
+    let reclaimed = claim_due(&db.pool, now + Duration::hours(1), Duration::minutes(5))
         .await
         .expect("claim_due must succeed");
     assert!(reclaimed.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `backoff_delay` grows monotonically with `attempts` and saturates at the

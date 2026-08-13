@@ -77,7 +77,7 @@
   - _Depends: 3.2_
   - _Boundary: social_graph, notifications, search_
 
-- [ ] 3.5 (P) 認証・アカウント・メディア・連合モジュールのテストを移行する
+- [x] 3.5 (P) 認証・アカウント・メディア・連合モジュールのテストを移行する
   - 完了状態: 当該モジュールのテスト件数と成否が移行前と一致し、実インスタンス起動件数が
     分類結果のぶん減っている
   - _Requirements: 4.1, 4.4_
@@ -153,6 +153,17 @@
   Non-Goals はそれを明示的に対象外にしている。**タスク 6.2 の前にこの矛盾の扱いを決める必要がある。**
   ただし 891 秒のベースラインには `PoolTimedOut` で 5 秒待って落ちる 256 件が含まれており、
   リーク解消だけで一括実行時間が下がる可能性は別途ある（6.1 / 6.2 で実測して判断する）。
+- 3.5: `runtime.keys` の静かな乖離経路は**閉じたことを独立に確認済み**。`ProcessingWorker`
+  （`src/media/worker.rs`）は `runtime` を保持するが読むのは `clock` のみ、`OauthService`
+  （`src/oauth/service.rs`）も `clock`/`ids`/`rng` しか触らない。`FixedSigningKeyProvider` への
+  差し替えは両経路で実際に無害。実鍵に依存する 3 ファイルは据え置きのまま無変更。
+- 3.5: バックグラウンドループ不在は、キュー系テストを**空虚にするのではなく強くしていた**。
+  `claim_due_does_not_return_a_job_whose_next_attempt_at_is_in_the_future` は `TestApp` では
+  実配送ポーラーが行を奪って「別の理由で空」になり得たが、`TestDb` では `status == Pending` の
+  再読み込みと合わせて「誰も奪っていない」ことを証明する。lease 再取得テストも同様。
+- 3.5 の残タスク候補（本 spec の範囲外）: `src/media/job_queue/tests.rs:178` のコメントが
+  `max_connections = 5` と書いているが実値は 2（`2703704` で 5→2 にした際に取り残された）。
+  テストの前提自体は成立しているので害はない。
 - **3.4 で見つかった既存のリーク（6.1 の入力）**: `social_graph` のテストを 1 回走らせるごとに
   ハーネススキーマが 1 個残留する（サフィックス `_131` で安定＝プロセス内 `AtomicU64` の位置が
   決定的）。移行前のツリーでも同一に再現するので**本 spec の変更が原因ではない**。`notifications`

@@ -4,7 +4,7 @@
 //! - Pure unit tests (no DB) for the constant-time credential comparison
 //!   and the cookie signing/verification primitives — both are plain
 //!   functions over in-memory values.
-//! - `spawn_test_app`-backed integration tests for [`authenticate_owner`]
+//! - `spawn_test_db`-backed integration tests for [`authenticate_owner`]
 //!   itself, since it needs a real [`ActorDirectory`] (backed by a real
 //!   Postgres pool) to resolve `sole_owner()`.
 
@@ -16,7 +16,7 @@ use crate::actor::owner::create_owner;
 use crate::config::Secret;
 use crate::error::ErrorKind;
 use crate::oauth::hash::TokenHashKey;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 fn credential(password: &str) -> OwnerCredential {
     OwnerCredential {
@@ -167,12 +167,12 @@ fn decode_session_cookie_never_panics_on_malformed_input() {
 
 #[tokio::test]
 async fn authenticate_owner_succeeds_and_resolves_the_sole_owner() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner fixture must succeed");
 
@@ -185,18 +185,18 @@ async fn authenticate_owner_succeeds_and_resolves_the_sole_owner() {
     assert_eq!(session.owner_id, owner_id);
     assert_eq!(session.expires_at, now + OWNER_SESSION_TTL);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[tokio::test]
 async fn authenticate_owner_rejects_the_wrong_password_without_querying_the_directory() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
     // Deliberately no owner fixture created: if this rejection path ever
     // regressed into calling `directory.sole_owner()` before checking the
     // password, it would surface as the *sole_owner* 5xx error below
     // instead of the expected 401 — making that regression visible here.
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
 
     let cfg = credential("the-real-owner-passphrase");
     let presented = login("a-completely-wrong-passphrase");
@@ -207,15 +207,15 @@ async fn authenticate_owner_rejects_the_wrong_password_without_querying_the_dire
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, axum::http::StatusCode::UNAUTHORIZED);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[tokio::test]
 async fn authenticate_owner_propagates_sole_owner_invariant_violations_as_server_errors() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
     // No owner fixture created: a fresh schema has zero `owners` rows.
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
 
     let cfg = credential("the-real-owner-passphrase");
     let presented = login("the-real-owner-passphrase");
@@ -230,7 +230,7 @@ async fn authenticate_owner_propagates_sole_owner_invariant_violations_as_server
     );
     assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// End-to-end within this task's boundary: correct credentials yield a
@@ -240,12 +240,12 @@ async fn authenticate_owner_propagates_sole_owner_invariant_violations_as_server
 /// Cookie が発行され...ることを単体テストで確認できる").
 #[tokio::test]
 async fn correct_credentials_yield_a_session_that_encodes_into_a_verifiable_signed_cookie() {
-    let app = spawn_test_app().await;
-    let directory = ActorDirectory::new(app.pool.clone());
+    let db = spawn_test_db().await;
+    let directory = ActorDirectory::new(db.pool.clone());
 
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner fixture must succeed");
 
@@ -262,5 +262,5 @@ async fn correct_credentials_yield_a_session_that_encodes_into_a_verifiable_sign
     assert_eq!(decoded, session);
     assert_eq!(decoded.owner_id, owner_id);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

@@ -3,7 +3,7 @@
 //! 取得でき、正しい資格情報のみ検証を通過し、誤ったシークレットが拒否される".
 //!
 //! Mirrors `src/actor/repository/tests.rs`'s established convention: reuses
-//! `crate::test_harness::spawn_test_app` for an isolated, already-migrated
+//! `crate::test_harness::db_fixture::spawn_test_db` for an isolated, already-migrated
 //! schema and a deterministic `RuntimeContext` (`ids`/`rng` for
 //! `register_app`).
 
@@ -14,7 +14,7 @@ use super::{
 use crate::config::Secret;
 use crate::oauth::hash::TokenHashKey;
 use crate::oauth::model::ScopeSet;
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// A fixed, non-production token-hashing key for this test module only —
 /// mirrors `test_harness::TEST_TOKEN_HASH_KEY`'s own "why fixed" reasoning,
@@ -44,14 +44,14 @@ fn sample_new_app(name: &str) -> NewApp {
 /// URIs and requested scopes, retrievable unchanged by `client_id`.
 #[tokio::test]
 async fn register_app_then_find_by_client_id_returns_the_registered_app() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
 
     let registered = register_app(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         sample_new_app("Test Client"),
@@ -70,7 +70,7 @@ async fn register_app_then_find_by_client_id_returns_the_registered_app() {
     assert!(!registered.client_id.is_empty());
     assert!(!registered.client_secret.expose_secret().is_empty());
 
-    let found = find_app_by_client_id(&app.pool, &registered.client_id)
+    let found = find_app_by_client_id(&db.pool, &registered.client_id)
         .await
         .expect("find_app_by_client_id must succeed")
         .expect("the just-registered app must be found");
@@ -84,7 +84,7 @@ async fn register_app_then_find_by_client_id_returns_the_registered_app() {
         registered.scopes.as_strs().collect::<Vec<_>>()
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.5: `find_app_by_client_id` never fabricates a plausible
@@ -92,14 +92,14 @@ async fn register_app_then_find_by_client_id_returns_the_registered_app() {
 /// value `register_app` actually generated.
 #[tokio::test]
 async fn find_app_by_client_id_does_not_expose_a_real_client_secret() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
 
     let registered = register_app(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         sample_new_app("Sentinel Client"),
@@ -107,7 +107,7 @@ async fn find_app_by_client_id_does_not_expose_a_real_client_secret() {
     .await
     .expect("register_app must succeed");
 
-    let found = find_app_by_client_id(&app.pool, &registered.client_id)
+    let found = find_app_by_client_id(&db.pool, &registered.client_id)
         .await
         .expect("find_app_by_client_id must succeed")
         .expect("the just-registered app must be found");
@@ -121,21 +121,21 @@ async fn find_app_by_client_id_does_not_expose_a_real_client_secret() {
         registered.client_secret.expose_secret()
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.5: the correct client_id/client_secret pair passes
 /// verification, and the returned app matches what was registered.
 #[tokio::test]
 async fn verify_app_credentials_accepts_the_correct_secret() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
 
     let registered = register_app(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         sample_new_app("Verified Client"),
@@ -144,7 +144,7 @@ async fn verify_app_credentials_accepts_the_correct_secret() {
     .expect("register_app must succeed");
 
     let verified = verify_app_credentials(
-        &app.pool,
+        &db.pool,
         &key,
         &registered.client_id,
         registered.client_secret.expose_secret(),
@@ -156,21 +156,21 @@ async fn verify_app_credentials_accepts_the_correct_secret() {
     assert_eq!(verified.id, registered.id);
     assert_eq!(verified.client_id, registered.client_id);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.5: a wrong secret for a real client_id must be rejected
 /// (`None`, not an error).
 #[tokio::test]
 async fn verify_app_credentials_rejects_the_wrong_secret() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
 
     let registered = register_app(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         sample_new_app("Rejected Client"),
@@ -179,7 +179,7 @@ async fn verify_app_credentials_rejects_the_wrong_secret() {
     .expect("register_app must succeed");
 
     let verified = verify_app_credentials(
-        &app.pool,
+        &db.pool,
         &key,
         &registered.client_id,
         "definitely-the-wrong-secret",
@@ -189,7 +189,7 @@ async fn verify_app_credentials_rejects_the_wrong_secret() {
 
     assert!(verified.is_none(), "a wrong client_secret must not verify");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.5: verification must also fail if hashed under the wrong
@@ -197,14 +197,14 @@ async fn verify_app_credentials_rejects_the_wrong_secret() {
 /// unkeyed digest an attacker could recompute without the deployment's key).
 #[tokio::test]
 async fn verify_app_credentials_rejects_the_correct_secret_hashed_under_the_wrong_key() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let registration_key = test_token_hash_key();
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
 
     let registered = register_app(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &registration_key,
         now,
         sample_new_app("Wrong Key Client"),
@@ -213,7 +213,7 @@ async fn verify_app_credentials_rejects_the_correct_secret_hashed_under_the_wron
     .expect("register_app must succeed");
 
     let verified = verify_app_credentials(
-        &app.pool,
+        &db.pool,
         &other_token_hash_key(),
         &registered.client_id,
         registered.client_secret.expose_secret(),
@@ -226,26 +226,26 @@ async fn verify_app_credentials_rejects_the_correct_secret_hashed_under_the_wron
         "the correct secret verified under the wrong token_hash_key must not pass"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// An unknown `client_id` must not verify and must not be found.
 #[tokio::test]
 async fn unknown_client_id_is_neither_found_nor_verified() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
 
-    let found = find_app_by_client_id(&app.pool, "no-such-client-id")
+    let found = find_app_by_client_id(&db.pool, "no-such-client-id")
         .await
         .expect("find_app_by_client_id must succeed");
     assert!(found.is_none());
 
-    let verified = verify_app_credentials(&app.pool, &key, "no-such-client-id", "any-secret")
+    let verified = verify_app_credentials(&db.pool, &key, "no-such-client-id", "any-secret")
         .await
         .expect("verify_app_credentials must succeed");
     assert!(verified.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.5 / 3.6: the persisted `client_secret_hash` column is never
@@ -254,14 +254,14 @@ async fn unknown_client_id_is_neither_found_nor_verified() {
 /// match.
 #[tokio::test]
 async fn persisted_client_secret_hash_column_never_holds_the_plaintext() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
 
     let registered = register_app(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         sample_new_app("Hash Column Client"),
@@ -272,7 +272,7 @@ async fn persisted_client_secret_hash_column_never_holds_the_plaintext() {
     let (stored_hash,): (Vec<u8>,) =
         sqlx::query_as("SELECT client_secret_hash FROM oauth_applications WHERE client_id = $1")
             .bind(&registered.client_id)
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("selecting the stored hash column must succeed");
 
@@ -285,7 +285,7 @@ async fn persisted_client_secret_hash_column_never_holds_the_plaintext() {
         "stored client_secret_hash column leaked the plaintext secret verbatim"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A registered app with multiple scopes round-trips them all, and a
@@ -293,14 +293,14 @@ async fn persisted_client_secret_hash_column_never_holds_the_plaintext() {
 /// the first's row.
 #[tokio::test]
 async fn multiple_apps_are_independently_registered_and_retrievable() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let key = test_token_hash_key();
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
 
     let first = register_app(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         sample_new_app("First Client"),
@@ -312,9 +312,9 @@ async fn multiple_apps_are_independently_registered_and_retrievable() {
     second_input.scopes = ScopeSet::new(["follow", "push"]);
     second_input.redirect_uris = vec!["https://other.example/cb".to_string()];
     let second = register_app(
-        &app.pool,
-        app.runtime.ids.as_ref(),
-        app.runtime.rng.as_ref(),
+        &db.pool,
+        db.runtime.ids.as_ref(),
+        db.runtime.rng.as_ref(),
         &key,
         now,
         second_input,
@@ -329,7 +329,7 @@ async fn multiple_apps_are_independently_registered_and_retrievable() {
         second.client_secret.expose_secret()
     );
 
-    let second_found = find_app_by_client_id(&app.pool, &second.client_id)
+    let second_found = find_app_by_client_id(&db.pool, &second.client_id)
         .await
         .expect("find_app_by_client_id must succeed")
         .expect("the second app must be found");
@@ -342,5 +342,5 @@ async fn multiple_apps_are_independently_registered_and_retrievable() {
         vec!["follow", "push"]
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
