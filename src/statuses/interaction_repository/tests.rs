@@ -612,10 +612,10 @@ async fn find_reblog_is_scoped_to_the_requesting_actor() {
     app.cleanup().await;
 }
 
-// -- batched interaction state (task 4.3) -----------------------------------
+// -- batched interaction state ---------------------------------------------
 
-/// The fixture shape shared by all four of task 4.3's "singular N times ==
-/// batched once" comparisons. Every one of the four batched functions is
+/// The fixture shape shared by all four "singular N times == batched once"
+/// comparisons. Every one of the four batched functions is
 /// viewer-scoped, so each fixture deliberately contains a status that a
 /// *different* actor interacted with: without it, a batched query that
 /// dropped its `actor_id` predicate entirely would still agree with the
@@ -679,9 +679,9 @@ fn assert_batch_membership(batched: &HashSet<Id>, fixture: &BatchFixture, what: 
     assert_eq!(batched.len(), 1, "{what}: nothing else may be present");
 }
 
-/// Requirement 5.5, task 4.3's own completion condition ("個別存在チェックを
-/// N 回した結果と一括取得 1 回の結果が一致する"): `favourited_status_ids`
-/// agrees with N calls to [`exists_favourite`], including its viewer scoping.
+/// N individual existence checks and one batched call must agree:
+/// `favourited_status_ids` agrees with N calls to [`exists_favourite`],
+/// including its viewer scoping.
 #[tokio::test]
 async fn favourited_status_ids_matches_calling_the_singular_version_per_status() {
     let app = spawn_test_app().await;
@@ -717,7 +717,7 @@ async fn favourited_status_ids_matches_calling_the_singular_version_per_status()
     app.cleanup().await;
 }
 
-/// Requirement 5.5 / task 4.3, for bookmarks: `bookmarked_status_ids` agrees
+/// The same agreement, for bookmarks: `bookmarked_status_ids` agrees
 /// with N calls to [`exists_bookmark`], including its viewer scoping.
 #[tokio::test]
 async fn bookmarked_status_ids_matches_calling_the_singular_version_per_status() {
@@ -768,7 +768,7 @@ async fn bookmarked_status_ids_matches_calling_the_singular_version_per_status()
     app.cleanup().await;
 }
 
-/// Requirement 5.5 / task 4.3, for pins: `pinned_status_ids` agrees with N
+/// The same agreement, for pins: `pinned_status_ids` agrees with N
 /// calls to [`exists_pin`]. A pin is conventionally an author's pin of their
 /// own post, but the `pins` table is keyed `(actor_id, status_id)` exactly
 /// like `favourites`/`bookmarks`, and [`exists_pin`] scopes by `actor_id`
@@ -809,7 +809,7 @@ async fn pinned_status_ids_matches_calling_the_singular_version_per_status() {
     app.cleanup().await;
 }
 
-/// Requirement 5.5 / task 4.3, for boosts: `reblogged_status_ids` agrees with
+/// The same agreement, for boosts: `reblogged_status_ids` agrees with
 /// N calls to [`find_reblog`]. The reblog relation lives in `statuses` itself
 /// (a boost is a row with `reblog_of_id` set), so the batched form keys its
 /// result on `reblog_of_id` — the *boosted* status's id, which is what the
@@ -855,8 +855,8 @@ async fn reblogged_status_ids_matches_calling_the_singular_version_per_status() 
     app.cleanup().await;
 }
 
-/// Task 4.3's precondition, for all four functions at once: an empty
-/// `status_ids` returns an empty set *without issuing a query*. Closing the
+/// For all four functions at once: an empty `status_ids` returns an empty
+/// set *without issuing a query*. Closing the
 /// pool first is what makes that second half observable — every statement
 /// against a closed `PgPool` fails with `sqlx::Error::PoolClosed`, so an `Ok`
 /// here can only mean the function short-circuited before touching the
@@ -897,12 +897,12 @@ async fn batched_interaction_state_returns_empty_for_an_empty_slice_without_quer
     app.cleanup().await;
 }
 
-// -- executor genericity (task 5.1) ----------------------------------------
+// -- executor genericity ---------------------------------------------------
 
-/// Task 5.1 / Requirement 6.3: [`add_favourite`] accepts an open transaction,
-/// and rolling that transaction back leaves no `favourites` row behind — the
-/// property `InteractionService::favourite` (task 5.3) needs so a favourite
-/// row and its counter can never diverge.
+/// [`add_favourite`] accepts an open transaction, and rolling that
+/// transaction back leaves no `favourites` row behind — the property
+/// `InteractionService::favourite` needs so a favourite row and its counter
+/// can never diverge.
 #[tokio::test]
 async fn add_favourite_accepts_a_transaction_and_rolls_back() {
     let app = spawn_test_app().await;
@@ -924,9 +924,8 @@ async fn add_favourite_accepts_a_transaction_and_rolls_back() {
     app.cleanup().await;
 }
 
-/// Task 5.1 / Requirement 6.3, the deletion half: [`remove_favourite`] accepts
-/// an open transaction, and rolling that transaction back restores the row it
-/// deleted.
+/// The deletion half: [`remove_favourite`] accepts an open transaction, and
+/// rolling that transaction back restores the row it deleted.
 #[tokio::test]
 async fn remove_favourite_accepts_a_transaction_and_rolls_back() {
     let app = spawn_test_app().await;

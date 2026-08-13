@@ -6,46 +6,49 @@
 //! delivery-result equivalence.
 //!
 //! ## Scope
-//! This module owns exactly [`spawn_federation_pair`] and [`FederationPair`]
-//! (design.md's pinned Service Interface). It deliberately reassembles the
-//! same startup steps `crate::test_harness::spawn_test_app` itself
-//! reassembles ([`crate::db::establish_pool`], [`crate::migrate::apply_migrations`],
-//! [`crate::runtime::RuntimeContext::deterministic`], [`crate::actor::build_actor_module`],
-//! [`crate::bootstrap::wiring::compose_modules`], [`crate::state::AppState::new`],
-//! [`crate::server::build_router`]) rather than calling `spawn_test_app`
-//! itself, for the one reason this module's doc comment below explains in
-//! full ("Why not `spawn_test_app`"). It reuses [`crate::test_harness::TestApp`]
-//! unchanged as each paired instance's own type (same `cleanup()`/`Drop`
-//! lifecycle, same isolated-schema/deterministic-runtime guarantees) via
-//! `TestApp`'s `pub(crate)` `from_parts` constructor — it does not duplicate
-//! `TestApp`'s own struct fields or release logic.
+//! This module owns exactly [`spawn_federation_pair`] and [`FederationPair`].
+//! It deliberately reassembles the same startup steps
+//! `crate::test_harness::spawn_test_app` itself reassembles
+//! ([`crate::db::establish_pool`], [`crate::migrate::apply_migrations`],
+//! [`crate::runtime::RuntimeContext::deterministic`],
+//! [`crate::actor::build_actor_module`],
+//! [`crate::bootstrap::wiring::compose_modules`],
+//! [`crate::state::AppState::new`], [`crate::server::build_router`]) rather
+//! than calling `spawn_test_app` itself, for the one reason this module's doc
+//! comment below explains in full ("Why not `spawn_test_app`"). It reuses
+//! [`crate::test_harness::TestApp`] unchanged as each paired instance's own
+//! type (same `cleanup()`/`Drop` lifecycle, same
+//! isolated-schema/deterministic-runtime guarantees) via `TestApp`'s
+//! `pub(crate)` `from_parts` constructor — it does not duplicate `TestApp`'s
+//! own struct fields or release logic.
 //!
-//! ## Module wiring lives elsewhere (structural-refactor task 6.4)
-//! The 11-stage feature-module wiring sequence itself is **not** here: since
-//! structural-refactor task 6.4 this module calls
-//! [`crate::bootstrap::wiring::compose_modules`] — the single implementation
-//! production startup and `spawn_test_app` also run (Requirements 7.1, 7.5).
-//! What remains below is only the genuinely per-startup-path work: the
-//! isolated schema/pool/migrations, the deterministic [`RuntimeContext`] and
+//! ## Module wiring lives elsewhere
+//! The 11-stage feature-module wiring sequence itself is **not** here: this
+//! module calls [`crate::bootstrap::wiring::compose_modules`] — the single
+//! implementation production startup and `spawn_test_app` also run. What
+//! remains below is only the genuinely per-startup-path work: the isolated
+//! schema/pool/migrations, the deterministic [`RuntimeContext`] and
 //! actor-model wiring, the synthesized [`AppConfig`], the ephemeral listener
-//! bind, and the shutdown signal. That migration also *fixed* a pre-existing
-//! divergence (Requirement 7.7): this module's own open-coded sequence never
-//! called `crate::statuses::register_account_ports`, so a paired instance
-//! served Account representations built from `build_accounts_module`'s
-//! built-in `EmptyStatusesProvider`/`ZeroCountsProvider` defaults instead of
-//! statuses-core's real implementations. Observably that meant an empty
-//! `GET /accounts/:id/statuses` page on both instances; the Account JSON's
-//! own `statuses_count`/`last_status_at` happened to survive anyway, because
+//! bind, and the shutdown signal. Going through `compose_modules` also
+//! *fixed* a pre-existing divergence: this module's own open-coded sequence
+//! never called `crate::statuses::register_account_ports`, so a paired
+//! instance served Account representations built from
+//! `build_accounts_module`'s built-in
+//! `EmptyStatusesProvider`/`ZeroCountsProvider` defaults instead of
+//! statuses-core's real implementations. Observably that meant an empty `GET
+//! /accounts/:id/statuses` page on both instances; the Account JSON's own
+//! `statuses_count`/`last_status_at` happened to survive anyway, because
 //! `social_graph::CombinedAccountCountsProvider` (wiring stage 8, which this
 //! module did run) constructs its own `AccountCountsContribution` rather than
 //! reading back whatever stage 7 installed. It now matches production in both
 //! respects.
 //!
-//! ## Why not `spawn_test_app` (the one real design problem this task solves)
+//! ## Why not `spawn_test_app`
 //! [`crate::federation::urls::ActorUrls`] hardcodes `https://{domain}/...`
 //! for every URL it builds (actor/inbox/object URLs) — not configurable
-//! per-request. [`crate::federation::signatures::ReqwestFederationHttpClient`]
-//! (the production [`crate::federation::signatures::FederationHttpClient`]
+//! per-request.
+//! [`crate::federation::signatures::ReqwestFederationHttpClient`] (the
+//! production [`crate::federation::signatures::FederationHttpClient`]
 //! implementation both public-key resolution and outbound signed delivery
 //! use) performs a real TLS handshake for any `https://` URL.
 //! `crate::test_harness::spawn_test_app` serves its instance over plain HTTP
@@ -363,18 +366,17 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
         },
     };
 
-    // structural-refactor task 6.4 (Requirements 1.4, 1.6, 7.1, 7.5, 7.7):
-    // the entire 11-stage module-wiring sequence this function used to
-    // open-code now lives in exactly one place
+    // The entire 11-stage module-wiring sequence this function used to
+    // open-code lives in exactly one place
     // (`crate::bootstrap::wiring::compose_modules`), shared verbatim with
     // production startup and `crate::test_harness::spawn_test_app`. What
-    // stays here is only what is genuinely specific to a paired instance
-    // (Requirement 7.5): the isolated schema/pool/migrations, the
+    // stays here is only what is genuinely specific to a paired instance:
+    // the isolated schema/pool/migrations, the
     // deterministic `RuntimeContext` and actor-model wiring, the synthesized
     // `AppConfig` whose `domain` is this instance's own bound address, the
     // ephemeral listener bind, and the shutdown-signal handling.
     //
-    // Requirement 13.1 / 7.7: `http_client` is still the caller-supplied
+    // `http_client` is still the caller-supplied
     // `ReqwestFederationHttpClient::insecure_loopback()` instance (see
     // `spawn_federation_pair`) — `compose_modules` shares that one instance
     // with every consumer it wires (federation module, accounts module, and
@@ -383,16 +385,16 @@ async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) ->
     // signed deliveries and remote-actor/-account fetches all still reach
     // the OTHER paired instance's plain-HTTP listener.
     //
-    // Requirement 7.7 (behavior change, deliberate): this function
-    // previously never called `statuses::register_account_ports` — the one
-    // stage of the sequence it had silently dropped — so each paired
-    // instance served Account representations built from
-    // `build_accounts_module`'s built-in `EmptyStatusesProvider`/
-    // `ZeroCountsProvider` defaults rather than statuses-core's real
-    // implementations. Going through `compose_modules` restores that stage
-    // in its correct position (statuses module -> `register_account_ports`
-    // -> social-graph module), so a paired instance's Account representation
-    // now matches production. `tests/federation_pair_it.rs`'s own
+    // Behavior change, deliberate: this function previously never called
+    // `statuses::register_account_ports` — the one stage of the sequence it
+    // had silently dropped — so each paired instance served Account
+    // representations built from `build_accounts_module`'s built-in
+    // `EmptyStatusesProvider`/`ZeroCountsProvider` defaults rather than
+    // statuses-core's real implementations. Going through `compose_modules`
+    // restores that stage in its correct position (statuses module ->
+    // `register_account_ports` -> social-graph module), so a paired
+    // instance's Account representation now matches production.
+    // `tests/federation_pair_it.rs`'s own
     // `federation_pair_instances_wire_statuses_account_ports_like_production`
     // pins that corrected behavior; see this module's own doc comment
     // ("Module wiring lives elsewhere") for exactly which fields were

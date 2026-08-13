@@ -1,6 +1,5 @@
 //! Tests for this module's [`super::RequiredPolls`] — the [`PollResolver`]
-//! `AccountStatusesProviderImpl` hands the assembler (Requirement 5.1; task
-//! 4.5) — and for what one whole
+//! `AccountStatusesProviderImpl` hands the assembler — and for what one whole
 //! [`AccountStatusesProviderImpl::list_statuses`] page renders.
 //!
 //! The resolver tests are scoped to the resolver rather than to
@@ -14,8 +13,8 @@
 //! exists for the opposite reason: it is a *characterization* of the whole
 //! method's output, captured against the implementation that rendered its
 //! page one status at a time, so that converting that loop into a single
-//! batched assembly (Requirement 5.1) can be shown not to have moved
-//! anything the caller can see (Requirements 1.1, 5.7).
+//! batched assembly can be shown not to have moved anything the caller can
+//! see.
 //!
 //! DB-backed against `crate::test_harness::spawn_test_app`, mirroring
 //! `statuses/poll_repository/tests.rs`'s fixture convention: a poll needs a
@@ -110,8 +109,8 @@ fn option_titles(tally: &PollTally) -> Vec<&str> {
 /// silently poll-less status. Asserted on the exact status *and* message
 /// because `notifications::service`'s equally strict resolver raises a
 /// differently worded 404 for the same condition ("poll not found"), and the
-/// two are deliberately not unified — design.md's `PollResolver` section,
-/// Risks: "統一しない（統一すれば振る舞いが変わる）".
+/// two are deliberately not unified: unifying them would change observable
+/// behavior on one of the two surfaces.
 ///
 /// Checked with the dangling id in both positions: the resolver must raise
 /// whether or not a resolvable poll precedes it.
@@ -200,7 +199,7 @@ async fn resolve_many_reports_the_viewers_own_votes() {
     app.cleanup().await;
 }
 
-// -- `list_statuses` page characterization (Requirements 1.1, 5.1, 5.7) ----
+// -- `list_statuses` page characterization ---------------------------------
 
 /// Creates a real owner + local actor row, returning the actor's `Id` — the
 /// same helper `search/hydrator/tests.rs` and `render_assembler/tests.rs`
@@ -365,8 +364,7 @@ fn material_fingerprint(json: &Value) -> Value {
 ///
 /// Ordering is asserted separately from content: `list_by_actor` returns
 /// newest-id-first, and a page that renders the right five statuses in the
-/// wrong order violates Requirement 5.7 just as much as one that renders
-/// them wrong.
+/// wrong order is just as wrong as one that renders them wrong.
 #[tokio::test]
 async fn list_statuses_keeps_every_rendered_material_and_order() {
     let app = spawn_test_app().await;
@@ -603,19 +601,18 @@ async fn list_statuses_keeps_every_rendered_material_and_order() {
     app.cleanup().await;
 }
 
-// -- query counts (Requirement 5.1; task 4.6) ------------------------------
+// -- query counts ----------------------------------------------------------
 //
 // This section, together with `render_assembler/tests.rs`'s own query-count
-// test, is where this spec's query counts are *recorded* — measured rather
-// than written down. `tasks.md`'s prose tally of what one page costs drifted
-// twice while task 4.5 was in progress, so no number below is asserted
-// against a literal: each test compares one measured run against another.
+// test, is where a page's query counts are *recorded* — measured rather than
+// written down, because a prose tally of what one page costs goes stale
+// silently. No number below is asserted against a literal: each test
+// compares one measured run against another.
 //
 // `list_statuses` is measured rather than `assemble_many` alone because the
-// per-status loop task 4.5 removed lived *here*, at the caller
-// (`account_provider.rs:361` before the change), not inside the assembler.
-// A test that only measured the assembler would stay green with the loop put
-// back around it.
+// per-status loop this replaced lived *here*, at the caller, not inside the
+// assembler. A test that only measured the assembler would stay green with
+// the loop put back around it.
 
 /// Inserts a ready `media` row owned by `actor_id` and hands back its id.
 /// No bytes are stored: rendering an attachment derives its URLs from the id
@@ -643,8 +640,8 @@ async fn seed_media(app: &TestApp, actor_id: Id) -> Id {
     media_id
 }
 
-/// Seeds one status carrying **every** material Requirement 5.1 enumerates,
-/// so that a page of these exercises all five lookups at once: an
+/// Seeds one status carrying **every** batched per-status material, so that
+/// a page of these exercises all five lookups at once: an
 /// attachment (media), a hashtag (tags), two shortcodes in its content plus
 /// a third in a poll option title (emoji), a poll, and the viewer's own
 /// favourite/bookmark/pin (interaction state).
@@ -715,8 +712,8 @@ async fn seed_rich_status(app: &TestApp, author: Id, viewer: Id) -> Id {
     status_id
 }
 
-/// The kinds Requirement 5.1 enumerates — "メディア・タグ・絵文字・
-/// インタラクション状態・投票".
+/// The five per-status material kinds the assembler batches — media, tags,
+/// emoji, interaction state, polls.
 const ANCILLARY_KINDS: [QueryKind; 5] = [
     QueryKind::Media,
     QueryKind::Tags,
@@ -725,7 +722,7 @@ const ANCILLARY_KINDS: [QueryKind; 5] = [
     QueryKind::Poll,
 ];
 
-/// Requirement 5.1, measured: a twenty-status page issues exactly as many
+/// Measured: a twenty-status page issues exactly as many
 /// media / tag / emoji / interaction-state / poll queries as a one-status
 /// page.
 ///
@@ -781,8 +778,8 @@ async fn a_page_costs_the_same_ancillary_queries_at_one_status_and_at_twenty() {
     }
 
     // The author is the same on both pages, so their resolution must not
-    // have grown either (Requirement 5.2, measured end-to-end here and
-    // isolated in `render_assembler/tests.rs`).
+    // have grown either (measured end-to-end here and isolated in
+    // `render_assembler/tests.rs`).
     assert_eq!(
         one_log.count(QueryKind::AccountResolution),
         twenty_log.count(QueryKind::AccountResolution),
@@ -790,15 +787,13 @@ async fn a_page_costs_the_same_ancillary_queries_at_one_status_and_at_twenty() {
          times as one status by them does"
     );
 
-    // Not one of the materials Requirement 5.1 enumerates, but measured here
-    // rather than left unsaid: `visible_to` resolves the viewer's
-    // relationship to the author once per *candidate*, so this path's total
-    // query count does still grow with how many statuses the author has.
-    // design.md's `Status 一覧の組み立て` flow leaves that judgment with the
-    // caller ("ブースト先の解決と可視性判定は**呼び出し元に残る**"), and it
-    // decides which statuses reach the page rather than what a page's
-    // statuses are made of — so it is out of 5.1's scope but squarely inside
-    // Requirement 5's Objective. Pinned to the candidate count, not merely
+    // Not one of the per-status materials the assembler batches, but
+    // measured here rather than left unsaid: `visible_to` resolves the
+    // viewer's relationship to the author once per *candidate*, so this
+    // path's total query count does still grow with how many statuses the
+    // author has. Visibility judgment stays with the assembler's caller, and
+    // it decides which statuses reach the page rather than what a page's
+    // statuses are made of. Pinned to the candidate count, not merely
     // asserted to be "more than one", so that batching it later has to come
     // back here and strike the record.
     const RELATIONSHIP_LOOKUP: &str = "FROM mutes WHERE muter_kind";
@@ -819,9 +814,8 @@ async fn a_page_costs_the_same_ancillary_queries_at_one_status_and_at_twenty() {
 
 /// The accepted residual, pinned rather than papered over: `passes_filters`
 /// still issues **one query per candidate** when `only_media` or `pinned` is
-/// set, because task 4.5's boundary was "do not change the filter chain"
-/// (`tasks.md`, Implementation Notes: "`account_provider` のフィルタ鎖に
-/// Requirement 5.1 の未達分が残っている").
+/// set: batching the page's rendering deliberately stopped short of
+/// restructuring the filter chain, so this residual survives there.
 ///
 /// Asserted as an equality against the candidate count, not as an
 /// inequality, so that batching those two lookups later fails this test and

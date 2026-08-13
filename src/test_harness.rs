@@ -15,20 +15,19 @@
 //! [`crate::bootstrap::wiring::compose_modules`],
 //! [`crate::state::AppState::new`], and [`crate::server::build_router`] —
 //! rather than reimplementing any of them (design.md: "Outbound: Bootstrap
-//! 構成要素... を再利用"). In particular the nine-module wiring sequence is
-//! *not* spelled out here at all: `structural-refactor` task 6.3 replaced
-//! this module's former stage-by-stage copy of it with a single
-//! `compose_modules` call, so production, this harness, and
-//! [`crate::federation::test_harness`] all run one shared implementation
-//! (`structural-refactor` Requirements 7.1, 7.5). It does not reuse
+//! 構成要素... を再利用"). In particular the nine-module wiring sequence is *not*
+//! spelled out here at all: this module's former stage-by-stage copy of it
+//! was replaced with a single `compose_modules` call, so production, this
+//! harness, and [`crate::federation::test_harness`] all run one shared
+//! implementation. It does not reuse
 //! [`crate::bootstrap::bootstrap`]/[`crate::server::serve_with_shutdown_and_signal`]
-//! directly, because both bind a caller-supplied, fixed [`std::net::SocketAddr`]
-//! internally without handing the actually-bound address back — this module
-//! instead binds an ephemeral `127.0.0.1:0` listener itself so that many
-//! `#[tokio::test]` functions (which `cargo test` runs concurrently by
-//! default) can each get their own real, non-colliding port (Requirement
-//! 8.1), and so [`TestApp::address`] can report the real bound
-//! [`std::net::SocketAddr`] back to the caller.
+//! directly, because both bind a caller-supplied, fixed
+//! [`std::net::SocketAddr`] internally without handing the actually-bound
+//! address back — this module instead binds an ephemeral `127.0.0.1:0`
+//! listener itself so that many `#[tokio::test]` functions (which `cargo
+//! test` runs concurrently by default) can each get their own real,
+//! non-colliding port (Requirement 8.1), and so [`TestApp::address`] can
+//! report the real bound [`std::net::SocketAddr`] back to the caller.
 //!
 //! ## Isolation strategy (Requirement 8.4)
 //! Each call to [`spawn_test_app`] creates its own throwaway PostgreSQL
@@ -80,11 +79,10 @@
 #[cfg(test)]
 mod tests;
 
-/// SQL-statement counting for this crate's own unit tests
-/// (`structural-refactor` Requirements 5.1-5.3). `#[cfg(test)]` because it
-/// exists only to measure the lib's tests and must not reach the shipped
-/// library, unlike the rest of this module — which `tests/*.rs` integration
-/// binaries link against and so cannot be gated.
+/// SQL-statement counting for this crate's own unit tests. `#[cfg(test)]`
+/// because it exists only to measure the lib's tests and must not reach the
+/// shipped library, unlike the rest of this module — which `tests/*.rs`
+/// integration binaries link against and so cannot be gated.
 #[cfg(test)]
 pub(crate) mod query_log;
 
@@ -166,8 +164,7 @@ const TEST_TOKEN_HASH_KEY: [u8; 32] = [0x24; 32];
 /// not need to wait several seconds per assertion.
 const TEST_DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Every [`spawn_test_app`] call's delivery-worker batch size (task 5.4).
-/// Identical to
+/// Every [`spawn_test_app`] call's delivery-worker batch size. Identical to
 /// [`crate::federation::module::DEFAULT_DELIVERY_POLL_BATCH_SIZE`]'s
 /// production default — only the two *intervals* around it are shortened for
 /// tests. Named (rather than left as a literal inside the
@@ -629,8 +626,8 @@ pub async fn spawn_test_app() -> TestApp {
         },
     };
 
-    // Runs the module-wiring sequence (task 6.3, Requirements 1.6, 7.1,
-    // 7.5). Everything this function used to spell out here — the nine
+    // Runs the module-wiring sequence. Everything this function used to
+    // spell out here — the nine
     // module builders, `statuses::register_account_ports`, and the
     // load-bearing ordering between them (`build_statuses_module` ->
     // `register_account_ports` -> `build_social_graph_module`) — now lives
@@ -641,7 +638,7 @@ pub async fn spawn_test_app() -> TestApp {
     // sequence.
     //
     // What deliberately stays here is only what is genuinely specific to
-    // this startup path (Requirement 7.5): the isolated-schema `pool`, the
+    // this startup path: the isolated-schema `pool`, the
     // deterministic `runtime`, the ephemeral listener bound above, the
     // synthesized `config` above, and the never-resolving background-task
     // shutdown signal below.
@@ -685,8 +682,8 @@ pub async fn spawn_test_app() -> TestApp {
     .expect("composing this test instance's module wiring must succeed");
 
     // `compose_modules` returns both background handles unstarted so each
-    // startup path can spawn them against its own shutdown signal
-    // (Requirement 7.5). This harness starts them with a signal that never
+    // startup path can spawn them against its own shutdown signal. This
+    // harness starts them with a signal that never
     // resolves (`std::future::pending`): tests never explicitly stop these
     // background tasks; the per-test tokio runtime simply aborts them when
     // the test function returns (`FederationBackgroundTasks`'s own doc

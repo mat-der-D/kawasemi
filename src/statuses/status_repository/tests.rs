@@ -870,13 +870,13 @@ async fn last_created_at_for_actor_reflects_the_most_recent_post() {
     app.cleanup().await;
 }
 
-// -- media_ids_for_statuses (task 4.1) ---------------------------------
+// -- media_ids_for_statuses ------------------------------------------------
 
-/// Requirements 5.1/5.4, task 4.1's own completion condition ("単数版を N 回
-/// 呼んだ結果と複数版を 1 回呼んだ結果が一致する"): `media_ids_for_statuses`
-/// returns, for every id, exactly what `media_ids_for_status` returns for
-/// that same id on its own — same `WHERE` scoping, same attachment order,
-/// same treatment of a status with no attachments at all.
+/// Calling the singular form N times and the batched form once must agree:
+/// `media_ids_for_statuses` returns, for every id, exactly what
+/// `media_ids_for_status` returns for that same id on its own — same `WHERE`
+/// scoping, same attachment order, same treatment of a status with no
+/// attachments at all.
 #[tokio::test]
 async fn media_ids_for_statuses_matches_calling_the_singular_version_per_status() {
     let app = spawn_test_app().await;
@@ -941,11 +941,11 @@ async fn media_ids_for_statuses_matches_calling_the_singular_version_per_status(
     app.cleanup().await;
 }
 
-/// Task 4.1's precondition: an empty `status_ids` returns an empty map
-/// *without issuing a query*. Closing the pool first is what makes that
-/// second half observable — every statement against a closed `PgPool` fails
-/// with `sqlx::Error::PoolClosed`, so an `Ok` here can only mean the
-/// function short-circuited before touching the database.
+/// An empty `status_ids` returns an empty map *without issuing a query*.
+/// Closing the pool first is what makes that second half observable — every
+/// statement against a closed `PgPool` fails with `sqlx::Error::PoolClosed`,
+/// so an `Ok` here can only mean the function short-circuited before touching
+/// the database.
 #[tokio::test]
 async fn media_ids_for_statuses_returns_empty_for_an_empty_slice_without_querying() {
     let app = spawn_test_app().await;
@@ -959,14 +959,14 @@ async fn media_ids_for_statuses_returns_empty_for_an_empty_slice_without_queryin
     app.cleanup().await;
 }
 
-// -- executor genericity (task 5.1) ----------------------------------------
+// -- executor genericity ---------------------------------------------------
 
-/// Task 5.1 / Requirement 6.3: [`insert_status`], [`attach_media`] and
-/// [`adjust_counts`] accept an open transaction as their executor, and a
-/// rollback of that transaction leaves *none* of the three writes behind —
-/// the property `StatusService::create_status` (task 5.2) needs in order to
-/// make post creation atomic. The pool-taking call sites in the rest of this
-/// module are unchanged, which is the other half of the task's contract.
+/// [`insert_status`], [`attach_media`] and [`adjust_counts`] accept an open
+/// transaction as their executor, and a rollback of that transaction leaves
+/// *none* of the three writes behind — the property
+/// `StatusService::create_status` needs in order to make post creation
+/// atomic. The pool-taking call sites in the rest of this module are
+/// unchanged, which is the other half of the contract.
 #[tokio::test]
 async fn write_functions_accept_a_transaction_and_roll_back_together() {
     let app = spawn_test_app().await;

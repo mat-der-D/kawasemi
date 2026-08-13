@@ -395,9 +395,9 @@ pub async fn find_by_id(pool: &PgPool, media_id: Id) -> Result<Option<Media>, Ap
     Ok(row.map(row_to_media))
 }
 
-/// The batched form of [`find_by_id`] (structural-refactor task 4.1,
-/// Requirements 5.1/5.4): resolves every id in `ids` in one query instead of
-/// one query per media, so a list endpoint's attachment hydration stops
+/// The batched form of [`find_by_id`]: resolves every id in `ids` in one
+/// query instead of one query per media, so a list endpoint's attachment
+/// hydration stops
 /// scaling with the number of attachments it renders.
 ///
 /// Equivalent to calling [`find_by_id`] once per id, by construction: same

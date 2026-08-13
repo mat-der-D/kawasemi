@@ -1,9 +1,9 @@
-//! structural-refactor task 6.5 / Requirements 7.3, 7.4: the runtime test
-//! that fails when `crate::bootstrap::wiring::compose_modules`'s ordering
-//! constraint is broken.
+//! The runtime test that fails when
+//! `crate::bootstrap::wiring::compose_modules`'s ordering constraint is
+//! broken.
 //!
-//! design.md's `#### compose_modules` records an invariant the type system
-//! does not enforce: `AccountPortsRegistry` holds exactly one replaceable
+//! `compose_modules` carries an invariant the type system does not
+//! enforce: `AccountPortsRegistry` holds exactly one replaceable
 //! slot per port, so the **last** `set_*` call for a given slot is the one
 //! observed at request time. Two of the eleven wiring stages write into the
 //! account-ports registry:
@@ -17,16 +17,15 @@
 //!   merges social-graph's `followers`/`following` half with statuses-core's
 //!   `statuses`/`last_status_at` half into the single registered value.
 //!
-//! Reordering those stages still compiles and still boots. design.md's
-//! `#### 配線順序の検証テスト` therefore requires a test that observes the
-//! *effect* of the ordering through the real, `spawn_test_app`-booted router
-//! (which since task 6.3 runs `compose_modules` itself), not merely that
-//! startup succeeds.
+//! Reordering those stages still compiles and still boots. The invariant
+//! therefore needs a test that observes the *effect* of the ordering through
+//! the real, `spawn_test_app`-booted router (which runs `compose_modules`
+//! itself), not merely that startup succeeds.
 //!
 //! ## Which fields are actually order-sensitive (measured, not assumed)
-//! tasks.md's own prose for task 6.5 ("アカウントポート登録が呼ばれていなけれ
-//! ば 0 になり") is only half right, and task 6.4's review already corrected
-//! it. The precise, empirically-verified sensitivities are:
+//! It is tempting to assume every count reverts to `0` when the account-port
+//! registration is skipped, but that is only half right. The precise,
+//! empirically-verified sensitivities are:
 //!
 //! - **`followers_count` / `following_count` are sensitive to the stage
 //!   7 <-> stage 8 order.** If social-graph registers *before*
@@ -46,8 +45,8 @@
 //! - **The account's statuses page is sensitive to stage 7 being run at
 //!   all.** The `AccountStatusesProvider` slot has exactly one real
 //!   registrant (stage 7); stage 8 never touches it. Dropping stage 7 —
-//!   precisely the defect task 6.4 found in the federation-pair harness —
-//!   leaves `EmptyStatusesProvider` in place and the page silently empty
+//!   precisely the defect the federation-pair harness once had — leaves
+//!   `EmptyStatusesProvider` in place and the page silently empty
 //!   while the account still resolves with a 200.
 //!
 //! Together the two halves pin both failure modes: a swapped stage 7/8 pair
@@ -190,12 +189,11 @@ async fn get_json_unauthenticated(router: &Router, path: &str) -> (StatusCode, V
 }
 
 // ==========================================================================
-// The ordering assertions (Requirements 7.3, 7.4)
+// The ordering assertions
 // ==========================================================================
 
-/// Requirement 7.3/7.4: for an actor that genuinely has followers, a
-/// followee and authored posts, every count in the rendered Account must
-/// reflect that real data.
+/// For an actor that genuinely has followers, a followee and authored posts,
+/// every count in the rendered Account must reflect that real data.
 ///
 /// `followers_count`/`following_count` are the fields that go to `0` if
 /// wiring stage 8 (`build_social_graph_module`) is moved *before* stage 7
@@ -251,14 +249,14 @@ async fn account_counts_reflect_real_data_when_the_wiring_order_is_intact() {
     app.cleanup().await;
 }
 
-/// Requirement 7.3/7.4, second half: the `AccountStatusesProvider` slot must
-/// hold statuses-core's real implementation, not
+/// The second half: the `AccountStatusesProvider` slot must hold
+/// statuses-core's real implementation, not
 /// `accounts::ports::EmptyStatusesProvider`.
 ///
 /// Stage 7 (`statuses::register_account_ports`) is that slot's only real
 /// registrant, and nothing later overwrites it — so this is the assertion
 /// that fails when stage 7 is dropped from the sequence entirely, which is
-/// exactly the defect task 6.4 found in the federation-pair harness. The
+/// exactly the defect the federation-pair harness once had. The
 /// built-in default returns a 200 with an empty page, so only asserting on
 /// the *contents* can distinguish it.
 #[tokio::test]

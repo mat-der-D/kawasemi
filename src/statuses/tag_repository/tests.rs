@@ -275,10 +275,10 @@ async fn deleting_a_status_cascades_its_tag_associations() {
     app.cleanup().await;
 }
 
-// -- tags_for_statuses (task 4.2) -----------------------------------------
+// -- tags_for_statuses -----------------------------------------------------
 
-/// Requirements 5.1, task 4.2's own completion condition ("単数版 N 回 ==
-/// 複数版 1 回"): `tags_for_statuses` returns, for every id, exactly what
+/// N singular calls and one batched call must agree: `tags_for_statuses`
+/// returns, for every id, exactly what
 /// `tags_for_status` returns for that same id on its own — same `WHERE`
 /// scoping, same `ORDER BY tags.id` within each status, same treatment of a
 /// status carrying no tags at all.
@@ -351,11 +351,11 @@ async fn tags_for_statuses_matches_calling_the_singular_version_per_status() {
     app.cleanup().await;
 }
 
-/// Task 4.2's precondition: an empty `status_ids` returns an empty map
-/// *without issuing a query*. Closing the pool first is what makes that
-/// second half observable — every statement against a closed `PgPool` fails
-/// with `sqlx::Error::PoolClosed`, so an `Ok` here can only mean the
-/// function short-circuited before touching the database.
+/// An empty `status_ids` returns an empty map *without issuing a query*.
+/// Closing the pool first is what makes that second half observable — every
+/// statement against a closed `PgPool` fails with `sqlx::Error::PoolClosed`,
+/// so an `Ok` here can only mean the function short-circuited before touching
+/// the database.
 #[tokio::test]
 async fn tags_for_statuses_returns_empty_for_an_empty_slice_without_querying() {
     let app = spawn_test_app().await;
@@ -369,13 +369,13 @@ async fn tags_for_statuses_returns_empty_for_an_empty_slice_without_querying() {
     app.cleanup().await;
 }
 
-// -- executor genericity (task 5.1) ----------------------------------------
+// -- executor genericity ---------------------------------------------------
 
-/// Task 5.1 / Requirement 6.3: [`upsert_tag`] and [`associate_tag`] accept an
-/// open transaction, and rolling that transaction back leaves neither the
-/// `tags` row nor the `status_tags` association behind — the property
-/// `StatusService::create_status` (task 5.2) needs so a failed post creation
-/// cannot strand tag rows.
+/// [`upsert_tag`] and [`associate_tag`] accept an open transaction, and
+/// rolling that transaction back leaves neither the `tags` row nor the
+/// `status_tags` association behind — the property
+/// `StatusService::create_status` needs so a failed post creation cannot
+/// strand tag rows.
 #[tokio::test]
 async fn tag_writes_accept_a_transaction_and_roll_back_together() {
     let app = spawn_test_app().await;

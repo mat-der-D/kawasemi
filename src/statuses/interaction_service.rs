@@ -169,35 +169,34 @@
 //! job against this returned base `Status`, same as `favourite`'s own
 //! `favourited=true` reflection, per this module's own "Scope" section).
 //!
-//! ## Record and counter move together (structural-refactor task 5.3,
-//! Requirements 6.2, 6.3, 6.4, 6.5)
+//! ## Record and counter move together
 //! [`reblog`](InteractionService::reblog)/
 //! [`favourite`](InteractionService::favourite)/
 //! [`unfavourite`](InteractionService::unfavourite) each write two things —
 //! an interaction record (the boost `statuses` row, a `favourites` row) and
 //! the target's counter — and each now runs both inside **one**
 //! `sqlx::Transaction` taken from this service's own pool, so a failure
-//! part-way through can never leave one changed without the other
-//! (Requirement 6.2's "レコードとカウンタのいずれか一方だけが更新された状態").
+//! part-way through can never leave one changed without the other.
 //! The branch that decides whether the write pair happens at all — `reblog`'s
 //! `find_reblog` duplicate lookup, `favourite`/`unfavourite`'s
 //! `add_favourite`/`remove_favourite` idempotency `bool` — is evaluated
 //! *inside* that transaction, not before it, so the decision and the writes
 //! it authorizes always see the same snapshot.
 //!
-//! **Delivery and notification emit are strictly after commit** (design.md,
-//! "複合書き込みのトランザクション境界（A-3 後）"): awaiting outbound HTTP
+//! **Delivery and notification emit are strictly after commit**: awaiting
+//! outbound HTTP
 //! inside a transaction would pin a pooled connection for the whole network
 //! round trip, and a delivery failure must never roll back an otherwise
 //! correct local write. On the success path the response value and every
-//! counter are unchanged from before this refactor (Requirement 6.5) — the
-//! same repository calls, in the same order, with the same arguments; only
+//! counter are unchanged from before this refactor — the same repository
+//! calls, in the same order, with the same arguments; only
 //! the executor they run against differs.
 //!
 //! [`unreblog`](InteractionService::unreblog) is **not** covered here: its
 //! record half is `status_repository::delete_status`, which opens its own
 //! transaction for the two self-referential cleanup steps that layer owns,
-//! and task 5.3's own scope names boost/favourite/un-favourite only.
+//! so the transactional treatment here covers boost/favourite/un-favourite
+//! only.
 //! [`bookmark`](InteractionService::bookmark)/[`pin`](InteractionService::pin)
 //! need no transaction at all — neither has a counter (see "Bookmark/pin: no
 //! counter..." above), so there is no second write to stay consistent with.
@@ -381,9 +380,9 @@ where
             return Err(not_found());
         }
 
-        // Task 5.3 (Requirements 6.2, 6.3, 6.4): the duplicate-check branch
-        // and both writes it guards (the boost row, the target's counter) run
-        // inside one transaction, so a failure part-way through can never
+        // The duplicate-check branch and both writes it guards (the boost
+        // row, the target's counter) run inside one transaction, so a
+        // failure part-way through can never
         // leave a boost row without its counter increment (or vice versa).
         // The `find_reblog` read stays *inside* it deliberately — it is what
         // decides whether those writes happen at all.
@@ -395,7 +394,7 @@ where
             // Nothing was written; drop the (read-only) transaction rather
             // than committing or reporting a rollback failure, preserving
             // this branch's pre-existing "duplicate reblog is a plain
-            // success" contract exactly (Requirements 9.3, 6.5).
+            // success" contract exactly.
             drop(tx);
             return Ok(existing);
         }
@@ -430,8 +429,7 @@ where
         status_repository::adjust_counts(&mut *tx, target.id, CountKind::Reblogs, 1).await?;
         tx.commit().await.map_err(map_server_error)?;
 
-        // Delivery and notification emit are strictly *after* commit (task
-        // 5.3, design.md "複合書き込みのトランザクション境界（A-3 後）"):
+        // Delivery and notification emit are strictly *after* commit:
         // holding a pooled connection across outbound HTTP would occupy it
         // for the duration of the network round trip, and a delivery failure
         // must never roll back an otherwise-correct local write.
@@ -510,8 +508,8 @@ where
 
         let now = self.runtime.clock.now();
 
-        // Task 5.3 (Requirements 6.2, 6.3, 6.4): the `favourites` row and the
-        // target's `favourites_count` move together or not at all. The
+        // The `favourites` row and the target's `favourites_count` move
+        // together or not at all. The
         // `is_new` branch — `add_favourite`'s own idempotent-no-op signal —
         // stays inside the transaction, since it is what decides whether the
         // counter is touched.
@@ -567,9 +565,9 @@ where
             .await?
             .ok_or_else(not_found)?;
 
-        // Task 5.3 (Requirements 6.2, 6.3, 6.4): the mirror image of
-        // `favourite` above — the row deletion and the counter decrement are
-        // one transaction, with `remove_favourite`'s own "was anything
+        // The mirror image of `favourite` above — the row deletion and the
+        // counter decrement are one transaction, with `remove_favourite`'s
+        // own "was anything
         // actually removed" signal branching inside it.
         let mut tx = self.pool.begin().await.map_err(map_server_error)?;
         let removed =

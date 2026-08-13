@@ -102,7 +102,7 @@ async fn insert_target_poll(
 
 /// Like [`insert_target_poll`], but takes explicit `(idx, title)` pairs **in
 /// the order they are to be inserted** rather than deriving `idx` from that
-/// order. Task 4.4's batched `tally_many` has to preserve each poll's option
+/// order. The batched `tally_many` has to preserve each poll's option
 /// order exactly as `tally` does (`ORDER BY idx`), and that can only be
 /// detected when `idx` order, physical insertion order, and title
 /// alphabetical order all disagree, which is what this helper makes
@@ -628,9 +628,9 @@ async fn record_vote_serializes_concurrent_votes_by_the_same_actor() {
     app.cleanup().await;
 }
 
-// -- batched poll reads (structural-refactor task 4.4) ---------------------
+// -- batched poll reads ---------------------------------------------------
 
-/// The fixture task 4.4's `tally_many` comparison test builds: polls whose
+/// The fixture the `tally_many` comparison test builds: polls whose
 /// option order, vote pattern, and viewer dimension are all arranged so that
 /// a batched implementation cannot agree with the singular one by accident.
 struct BatchFixture {
@@ -724,8 +724,8 @@ async fn tallies_per_call(app: &TestApp, ids: &[Id], viewer: Option<Id>) -> Hash
     per_call
 }
 
-/// Requirement 5.1, task 4.4's own completion condition ("単数版 N 回 ==
-/// 複数版 1 回"): `find_polls_by_ids` returns, for every id, exactly what
+/// N singular calls and one batched call must agree: `find_polls_by_ids`
+/// returns, for every id, exactly what
 /// `find_poll_by_id` returns for that same id on its own — same `WHERE`
 /// scoping, same treatment of an id matching no row.
 #[tokio::test]
@@ -782,10 +782,10 @@ async fn find_polls_by_ids_matches_calling_the_singular_version_per_poll() {
     app.cleanup().await;
 }
 
-/// Requirement 5.1, task 4.4's own completion condition, for the aggregate
-/// half: `tally_many` returns, for every id and for every shape of `viewer`,
-/// exactly what `tally` returns for that same id on its own — same option
-/// order, same per-option counts, same `voters_count`, same `own_votes`.
+/// The same agreement, for the aggregate half: `tally_many` returns, for
+/// every id and for every shape of `viewer`, exactly what `tally` returns for
+/// that same id on its own — same option order, same per-option counts, same
+/// `voters_count`, same `own_votes`.
 #[tokio::test]
 async fn tally_many_matches_calling_the_singular_version_per_poll() {
     let app = spawn_test_app().await;
@@ -907,13 +907,13 @@ async fn tally_many_matches_calling_the_singular_version_per_poll() {
     app.cleanup().await;
 }
 
-/// Task 4.4's precondition, for both functions at once: an empty `poll_ids`
-/// returns an empty map *without issuing a query*. Closing the pool first is
+/// For both functions at once: an empty `poll_ids` returns an empty map
+/// *without issuing a query*. Closing the pool first is
 /// what makes that second half observable — every statement against a closed
 /// `PgPool` fails with `sqlx::Error::PoolClosed`, so an `Ok` here can only
 /// mean the function short-circuited before touching the database. Both
-/// share one closed pool rather than one test app each (task 4.3's
-/// precedent): the assertion is identical and a test app is the scarce
+/// share one closed pool rather than one test app each: the assertion is
+/// identical and a test app is the scarce
 /// resource, since each holds its own connection pool.
 #[tokio::test]
 async fn batched_poll_reads_return_empty_for_an_empty_slice_without_querying() {
@@ -943,12 +943,12 @@ async fn batched_poll_reads_return_empty_for_an_empty_slice_without_querying() {
     app.cleanup().await;
 }
 
-// -- executor genericity (task 5.1) ----------------------------------------
+// -- executor genericity ---------------------------------------------------
 
-/// Task 5.1 / Requirement 6.3: [`insert_poll`] accepts an open transaction,
-/// and rolling that transaction back leaves neither the `polls` row nor its
-/// `poll_options` rows behind — the property `StatusService::create_status`
-/// (task 5.2) needs so a failed post creation cannot strand a poll.
+/// [`insert_poll`] accepts an open transaction, and rolling that transaction
+/// back leaves neither the `polls` row nor its `poll_options` rows behind —
+/// the property `StatusService::create_status` needs so a failed post
+/// creation cannot strand a poll.
 #[tokio::test]
 async fn insert_poll_accepts_a_transaction_and_rolls_back() {
     let app = spawn_test_app().await;

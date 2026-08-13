@@ -664,14 +664,14 @@ where
     /// Persists every hashtag [`extract_content_tokens`] found in
     /// `status.content`, associated to `status.id` (Requirement 3.6).
     ///
-    /// Runs against a caller-supplied connection rather than `self.pool`
-    /// (task 5.2, Requirement 6.1): [`create_status`](Self::create_status)
-    /// drives it with the same open transaction as the status/media/poll
+    /// Runs against a caller-supplied connection rather than `self.pool`:
+    /// [`create_status`](Self::create_status) drives it with the same open
+    /// transaction as the status/media/poll
     /// writes, so a later failure rolls the tag rows back along with
     /// everything else. Two statements per hashtag means a borrowed
     /// connection, not a `sqlx::PgExecutor` (which a single `execute`
-    /// consumes) — the same distinction task 5.1 drew between its
-    /// single-statement and multi-statement repository writers.
+    /// consumes) — the same distinction `status_repository` draws between
+    /// its single-statement and multi-statement writers.
     async fn persist_tags(
         &self,
         conn: &mut sqlx::PgConnection,
@@ -816,9 +816,8 @@ where
             edited_at: None,
         };
 
-        // Task 5.2 (Requirements 6.1, 6.3, 6.4; design.md "複合書き込みの
-        // トランザクション境界（A-3 後）"): the status row, its media
-        // attachments, its poll, its tags, and the parent's reply-count
+        // The status row, its media attachments, its poll, its tags, and
+        // the parent's reply-count
         // increment are one transaction that commits only if every one of
         // them succeeds. An early `?` return below drops `tx` un-committed,
         // which rolls the whole set back and returns the error to the
@@ -867,8 +866,8 @@ where
                     })
                     .collect();
                 // Under the enclosing transaction `insert_poll`'s own
-                // `begin`/`commit` becomes a nested SAVEPOINT (task 5.1's
-                // Implementation Note) — two extra round trips, and
+                // `begin`/`commit` becomes a nested SAVEPOINT — two extra
+                // round trips, and
                 // correctness-preserving: releasing that savepoint does not
                 // commit anything on its own, so a later failure still
                 // rolls the poll back with the rest.
@@ -930,9 +929,7 @@ where
         }
 
         // Idempotency-key binding stays *outside* the transaction, in the
-        // position it has always occupied (task 5.2's "べき等キーの束縛
-        // 処理の実際の呼び出し位置を確認し、トランザクションに含めるべきかを
-        // 判断して記録する" — this comment is that record). Three reasons:
+        // position it has always occupied. Three reasons:
         //
         // 1. Ledger invariant. `status_idempotency_keys.status_id` is
         //    `NOT NULL REFERENCES statuses(id)` (`migrations/0007_statuses.sql`),
@@ -946,15 +943,15 @@ where
         //    retry with the same key is correctly free to create the post
         //    rather than resolving to a status that was rolled away.
         // 3. Boundary. `idempotency::bind` takes `&PgPool` and belongs to
-        //    the `IdempotencyStore` module, which task 5.1 deliberately left
-        //    out of its executor-generic conversion; including it here would
-        //    mean a signature change outside this task's `StatusService`
-        //    boundary for no correctness gain.
+        //    the `IdempotencyStore` module, which was deliberately left out
+        //    of the executor-generic conversion; including it here would
+        //    mean a signature change outside `StatusService`'s own boundary
+        //    for no correctness gain.
         //
-        // Residual (pre-existing, unchanged by this task): a failure between
-        // the commit and this bind leaves a created post whose key never got
-        // bound, so a retry creates a second post. That window is exactly as
-        // wide as before — Requirement 6.1 covers the create's own writes.
+        // Residual (pre-existing): a failure between the commit and this
+        // bind leaves a created post whose key never got bound, so a retry
+        // creates a second post. That window is exactly as wide as before —
+        // the transaction above covers the create's own writes only.
         if let Some(key) = idem {
             idempotency::bind(&self.pool, actor_id, key, status.id, now).await?;
         }

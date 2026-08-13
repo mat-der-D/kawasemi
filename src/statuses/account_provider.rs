@@ -69,30 +69,31 @@
 //! happened; what remains here is only the part that is genuinely this
 //! module's own: which target is visible, and to whom.
 //!
-//! That handoff is a single [`crate::statuses::render_assembler::StatusRenderAssembler::assemble_many`]
+//! That handoff is a single
+//! [`crate::statuses::render_assembler::StatusRenderAssembler::assemble_many`]
 //! call per page rather than one per status, so the media/tag/emoji/
 //! interaction/poll lookups a page needs are issued a number of times that
 //! does not depend on how many statuses it holds, and an author appearing
-//! twice on one page is resolved once (Requirements 5.1, 5.2, 5.3, 5.6).
-//! Boost targets ride in the same batch. What stays outside it — and stays
-//! per status — is exactly the two judgments above this rendering:
+//! twice on one page is resolved once. Boost targets ride in the same batch.
+//! What stays outside it — and stays per status — is exactly the two
+//! judgments above this rendering:
 //! [`AccountStatusesProviderImpl::visible_to`] and
 //! [`AccountStatusesProviderImpl::passes_filters`]. Those decide *which*
-//! statuses reach the page, which design.md leaves with this module rather
-//! than the assembler.
+//! statuses reach the page, which stays with this module rather than the
+//! assembler.
 //!
 //! One of them still costs a query per candidate, and that is a real
 //! remaining gap rather than a property of the design:
 //! [`AccountStatusesProviderImpl::passes_filters`] issues
 //! [`status_repository::media_ids_for_status`] when `only_media` is set and
 //! [`interaction_repository::exists_pin`] when `pinned` is set — media and
-//! interaction state, both of which Requirement 5.1 does enumerate. Batching
+//! interaction state, both of which the assembler otherwise batches. Batching
 //! them would not change which statuses reach the page:
 //! [`status_repository::media_ids_for_statuses`] and
 //! [`interaction_repository::pinned_status_ids`] already exist and answer the
 //! same question for a whole candidate set. Doing so means restructuring the
-//! filter chain, which the task that batched this rendering deliberately left
-//! untouched, so it is still outstanding.
+//! filter chain, which batching this rendering deliberately left untouched,
+//! so it is still outstanding.
 //!
 //! ## Filtering: fetch-then-filter-then-paginate, not sixteen SQL variants
 //! [`status_repository::list_by_actor`] fetches every status `query.target`
@@ -288,8 +289,8 @@ impl AccountStatusesProviderImpl {
     /// *target's own* author.
     ///
     /// Boost-target resolution stays here rather than moving into the
-    /// assembler — design.md's `Status 一覧の組み立て` flow, "ブースト先の
-    /// 解決と可視性判定は**呼び出し元に残る**": this provider re-checks the
+    /// assembler — boost-target resolution and visibility judgment stay with
+    /// the assembler's *caller*: this provider re-checks the
     /// target against its own [`RelationshipQueryRegistry`]-backed
     /// visibility judgment, keyed to the *target's* author rather than the
     /// booster's, and a target that fails is dropped entirely rather than
@@ -312,10 +313,10 @@ impl AccountStatusesProviderImpl {
     /// JSON, in the order given.
     ///
     /// Every boost target is resolved first, so that the whole page —
-    /// targets included (Requirement 5.6) — reaches
+    /// targets included — reaches
     /// [`StatusRenderAssembler::assemble_many`] as one batch and its
     /// per-status materials are fetched a number of times that does not
-    /// depend on the page's length (Requirement 5.1).
+    /// depend on the page's length.
     async fn render_page(
         &self,
         viewer: Option<Id>,
@@ -358,8 +359,8 @@ impl PollResolver for RequiredPolls {
     /// Two queries for the whole batch — one
     /// [`poll_repository::find_polls_by_ids`], one
     /// [`poll_repository::tally_many`] — regardless of how many ids it is
-    /// given, and none at all for an empty one (Requirement 5.1: an account's
-    /// status page must not have its poll lookups scale with its length).
+    /// given, and none at all for an empty one, so an account's status page
+    /// does not have its poll lookups scale with its length.
     fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
             let polls = poll_repository::find_polls_by_ids(&self.pool, poll_ids).await?;

@@ -170,7 +170,7 @@ fn client_tagged_matches_client_except_for_the_tag() {
 
 /// The tag is a caller-side discriminator only: it must never widen what
 /// reaches the wire, or it would change every tagged endpoint's response
-/// shape (Requirement 1.1).
+/// shape.
 #[tokio::test]
 async fn tag_never_reaches_the_response_body() {
     let plain = AppError::client(StatusCode::UNPROCESSABLE_ENTITY, "already voted");

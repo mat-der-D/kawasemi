@@ -12,13 +12,11 @@
 //! Scope: this module owns exactly [`insert_poll`], [`record_vote`], and
 //! [`tally`] — design.md's `PollRepository` Service Interface (design.md
 //! lines 443-445) — plus [`find_poll_by_id`], a thin additive read function
-//! task 5.3 (`PollService`) added on top (see that function's own doc
-//! comment for why), plus the batched forms of those two reads,
-//! [`find_polls_by_ids`] and [`tally_many`] (added later, by
-//! structural-refactor task 4.4, Requirement 5.1, so a list endpoint's poll
-//! lookups stop scaling with the number of statuses it renders; the singular
-//! reads stay, they have other callers). No
-//! `StatusRepository`/`InteractionRepository`/
+//! task 5.3 (`PollService`) added on top (see that function's own doc comment
+//! for why), plus the batched forms of those two reads, [`find_polls_by_ids`]
+//! and [`tally_many`] (added later, so a list endpoint's poll lookups stop
+//! scaling with the number of statuses it renders; the singular reads stay,
+//! they have other callers). No `StatusRepository`/`InteractionRepository`/
 //! `TagRepository` functionality, no `IdempotencyStore` (sibling module, not
 //! this file), no `PollService`/`StatusActivityBuilder`/`PollSerializer`
 //! orchestration, and no HTTP surface lives here.
@@ -141,17 +139,17 @@ fn rejected(message: &'static str) -> AppError {
 /// enforce that — it persists whatever `options` already carries, matching
 /// `insert_status`'s "persists whatever `status` already carries" precedent.
 ///
-/// Generic over `executor` (task 5.1, Requirement 6.3) so
-/// `StatusService::create_status` can drive it against an open
-/// `sqlx::Transaction` (`&mut *tx`); every pre-existing caller keeps passing
-/// a bare `&PgPool` unchanged. The bound is [`sqlx::Acquire`], not
-/// `sqlx::PgExecutor` (`status_repository::insert_status`'s bound), because
-/// this function is multi-statement *and* keeps its own `begin`/`commit`.
-/// Given a pool, `Acquire::begin` opens the same standalone transaction this
-/// function always opened; given an already-open transaction it opens a
-/// `SAVEPOINT` nested inside it — so a partial failure here still undoes
-/// only this function's own writes, while the enclosing transaction stays in
-/// control of whether they are ultimately committed.
+/// Generic over `executor` so `StatusService::create_status` can drive it
+/// against an open `sqlx::Transaction` (`&mut *tx`); every pre-existing
+/// caller keeps passing a bare `&PgPool` unchanged. The bound is
+/// [`sqlx::Acquire`], not `sqlx::PgExecutor`
+/// (`status_repository::insert_status`'s bound), because this function is
+/// multi-statement *and* keeps its own `begin`/`commit`. Given a pool,
+/// `Acquire::begin` opens the same standalone transaction this function
+/// always opened; given an already-open transaction it opens a `SAVEPOINT`
+/// nested inside it — so a partial failure here still undoes only this
+/// function's own writes, while the enclosing transaction stays in control of
+/// whether they are ultimately committed.
 pub async fn insert_poll<'a, A>(
     executor: A,
     poll: &Poll,
@@ -220,10 +218,9 @@ pub async fn find_poll_by_id(pool: &PgPool, poll_id: Id) -> Result<Option<Poll>,
     }))
 }
 
-/// The batched form of [`find_poll_by_id`] (structural-refactor task 4.4,
-/// Requirement 5.1): resolves every id in `poll_ids` in one query instead of
-/// one query per poll, so a list endpoint's poll lookups stop scaling with
-/// the number of statuses it renders.
+/// The batched form of [`find_poll_by_id`]: resolves every id in `poll_ids`
+/// in one query instead of one query per poll, so a list endpoint's poll
+/// lookups stop scaling with the number of statuses it renders.
 ///
 /// Equivalent to calling [`find_poll_by_id`] once per id, by construction:
 /// same table, same columns, same `WHERE id = ...` scoping (a `polls` row
@@ -488,8 +485,8 @@ pub async fn tally(pool: &PgPool, poll_id: Id, viewer: Option<Id>) -> Result<Pol
     })
 }
 
-/// The batched form of [`tally`] (structural-refactor task 4.4, Requirement
-/// 5.1): resolves every id in `poll_ids` with a fixed number of queries
+/// The batched form of [`tally`]: resolves every id in `poll_ids` with a
+/// fixed number of queries
 /// instead of a fixed number *per poll*, so a list endpoint's poll-aggregate
 /// lookups stop scaling with the number of statuses it renders.
 ///

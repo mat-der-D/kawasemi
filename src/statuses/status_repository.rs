@@ -163,25 +163,24 @@
 //! this repository's own writes, but is not assumed impossible) with a
 //! visited-id set.
 //!
-//! ## Task 5.1 additions
+//! ## Executor genericity
 //! [`insert_status`], [`attach_media`] and [`adjust_counts`] are generic over
 //! the executor they run against instead of taking a concrete `pool:
-//! &PgPool`. `StatusService::create_status` (task 5.2) must persist the post
-//! row, its media attachments, its poll, its tags and the parent's
-//! `replies_count` increment as **one** transaction (design.md, "複合書き込
-//! みのトランザクション境界（A-3 後）"; Requirement 6.3) — a genuine
-//! cross-statement atomicity need these functions cannot serve while pinned
-//! to a concrete `&PgPool` (a `PgPool` reference cannot join an already-open
-//! `sqlx::Transaction`). The change is purely additive: `&PgPool` itself
-//! satisfies both bounds used here, so **every existing call site compiles
-//! unchanged**; only a transaction-bound caller passes `&mut *tx` instead.
+//! &PgPool`. `StatusService::create_status` must persist the post row, its
+//! media attachments, its poll, its tags and the parent's `replies_count`
+//! increment as **one** transaction — a genuine cross-statement atomicity
+//! need these functions cannot serve while pinned to a concrete `&PgPool` (a
+//! `PgPool` reference cannot join an already-open `sqlx::Transaction`). The
+//! genericity is purely additive: `&PgPool` itself satisfies both bounds
+//! used here, so **every existing call site compiles unchanged**; only a
+//! transaction-bound caller passes `&mut *tx` instead.
 //!
 //! Two different sqlx bounds are used, chosen per function rather than
 //! unified:
 //! - Single-statement writers ([`insert_status`], [`adjust_counts`]) take
 //!   `E: sqlx::PgExecutor<'e>`, this crate's established idiom (see
 //!   [`fetch_raw`] here, and `social_graph/repository.rs::delete_follow` for
-//!   the same task-2.2 precedent).
+//!   the same precedent).
 //! - [`attach_media`] loops one `INSERT` per `media_id`, and a `PgExecutor`
 //!   is consumed by the single statement it drives. It therefore takes `A:
 //!   sqlx::Acquire<'a, Database = Postgres>` and acquires the connection
@@ -190,10 +189,9 @@
 //!
 //! The other writers here ([`apply_edit`], [`delete_status`],
 //! [`replace_media`], [`insert_mentions`], [`insert_remote_attachments`])
-//! keep their concrete `&PgPool` parameter: no composite write in task 5.2 or
-//! 5.3 needs them inside a shared transaction, and converting them
-//! speculatively would widen this task past its stated "purely additive"
-//! boundary.
+//! keep their concrete `&PgPool` parameter: no composite write currently
+//! needs them inside a shared transaction, and converting them speculatively
+//! would widen the change past its "purely additive" boundary.
 
 #[cfg(test)]
 mod tests;
@@ -395,7 +393,7 @@ async fn fetch_children(pool: &PgPool, parent_id: Id) -> Result<Vec<Status>, App
 /// A `statuses_uri_key` violation surfaces as a caller-facing (`ErrorKind::Client`)
 /// `409 Conflict` rather than a generic 5xx — see [`map_insert_error`].
 ///
-/// Generic over `executor` (this module's doc comment, "Task 5.1 additions")
+/// Generic over `executor` (this module's doc comment, "Executor genericity")
 /// so `StatusService::create_status` can drive it against an open
 /// `sqlx::Transaction` (`&mut *tx`); every pre-existing caller keeps passing
 /// a bare `&PgPool` unchanged.
@@ -786,10 +784,10 @@ pub enum CountKind {
 /// A no-op (`Ok(())`, no error) when `id` matches no row — same "absence is
 /// not an error at this layer" convention as [`delete_status`].
 ///
-/// Generic over `executor` (this module's doc comment, "Task 5.1 additions")
-/// so `StatusService`/`InteractionService` can drive it against an open
-/// `sqlx::Transaction` (`&mut *tx`) alongside the row write whose counter it
-/// adjusts (Requirement 6.3); every pre-existing caller keeps passing a bare
+/// Generic over `executor` (this module's doc comment, "Executor
+/// genericity") so `StatusService`/`InteractionService` can drive it against
+/// an open `sqlx::Transaction` (`&mut *tx`) alongside the row write whose
+/// counter it adjusts; every pre-existing caller keeps passing a bare
 /// `&PgPool` unchanged.
 pub async fn adjust_counts<'e, E>(
     executor: E,
@@ -842,15 +840,15 @@ where
 /// (`media_repository::find_owned`, media-pipeline's own contract) before
 /// calling this; this function only persists the association.
 ///
-/// Generic over `executor` (this module's doc comment, "Task 5.1 additions");
-/// every pre-existing caller keeps passing a bare `&PgPool` unchanged. Unlike
-/// this module's single-statement writers the bound here is
+/// Generic over `executor` (this module's doc comment, "Executor
+/// genericity"); every pre-existing caller keeps passing a bare `&PgPool`
+/// unchanged. Unlike this module's single-statement writers the bound here is
 /// [`sqlx::Acquire`], not `sqlx::PgExecutor`: a `PgExecutor` is consumed by
 /// the single `execute` it drives, which cannot serve this function's
 /// per-`media_id` loop. Acquiring once and reusing the borrowed connection
-/// keeps the emitted statements byte-identical to the pre-task-5.1 loop
-/// (this is deliberately *not* wrapped in a transaction of its own — the
-/// previous pool-driven behavior had none, and a transactional caller
+/// keeps the emitted statements byte-identical to the pool-driven loop this
+/// replaced (this is deliberately *not* wrapped in a transaction of its own —
+/// the previous pool-driven behavior had none, and a transactional caller
 /// supplies the enclosing one).
 ///
 /// Callers that already hold an open transaction use
@@ -870,11 +868,11 @@ where
 
 /// [`attach_media`] against an already-acquired connection — the variant
 /// `StatusService::create_status` uses to run this loop inside its own open
-/// transaction (task 5.2). Identical statements, identical order; the only
-/// difference is that the connection comes from the caller.
+/// transaction. Identical statements, identical order; the only difference
+/// is that the connection comes from the caller.
 ///
-/// This concrete-`&mut PgConnection` variant exists because task 5.1's
-/// generic [`sqlx::Acquire`] form, while callable from a transaction, yields
+/// This concrete-`&mut PgConnection` variant exists because the generic
+/// [`sqlx::Acquire`] form, while callable from a transaction, yields
 /// a future that cannot be *proven* `Send`: the value it holds across awaits
 /// has type `<A as Acquire>::Connection`, and when `A` is substituted with a
 /// reborrow like `&mut *tx` the auto-trait leak check universalizes over that
@@ -942,10 +940,10 @@ pub async fn media_ids_for_status(pool: &PgPool, status_id: Id) -> Result<Vec<Id
     Ok(rows.into_iter().map(|(id,)| Id::from_i64(id)).collect())
 }
 
-/// The batched form of [`media_ids_for_status`] (structural-refactor task
-/// 4.1, Requirements 5.1/5.4): resolves every id in `status_ids` in one
-/// query instead of one query per status, so a list endpoint's media
-/// lookups stop scaling with the number of statuses it returns.
+/// The batched form of [`media_ids_for_status`]: resolves every id in
+/// `status_ids` in one query instead of one query per status, so a list
+/// endpoint's media lookups stop scaling with the number of statuses it
+/// returns.
 ///
 /// Equivalent to calling [`media_ids_for_status`] once per id, by
 /// construction: same table, same `WHERE` scoping (`status_id` only — this

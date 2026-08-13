@@ -1007,8 +1007,7 @@ async fn self_reblog_does_not_emit_a_notification_event() {
     app.cleanup().await;
 }
 
-// -- atomicity of the record/counter pair (task 5.3, Requirements 6.2, 6.3,
-// 6.4, 6.5) ---------------------------------------------------------------
+// -- atomicity of the record/counter pair ---------------------------------
 
 /// Installs a `BEFORE UPDATE` trigger on this test instance's own `statuses`
 /// table that unconditionally raises, so the counter half of a composite
@@ -1016,11 +1015,10 @@ async fn self_reblog_does_not_emit_a_notification_event() {
 /// fails *after* the record half (the boost row `INSERT`, the `favourites`
 /// `INSERT`/`DELETE`) has already run.
 ///
-/// This is the mid-operation failure injection task 5.3's completion
-/// condition calls for: without a shared transaction the record half stays
-/// committed while the counter never moves (exactly the
-/// "レコードとカウンタのいずれか一方だけが更新された状態" Requirement 6.2
-/// forbids); with one, both roll back together. The trigger is created inside
+/// This is the mid-operation failure injection the atomicity guarantee needs
+/// to be tested against: without a shared transaction the record half stays
+/// committed while the counter never moves; with one, both roll back
+/// together. The trigger is created inside
 /// `spawn_test_app`'s own isolated schema (`search_path`-pinned), so it can
 /// never affect a concurrently running test.
 async fn fail_every_counter_update(app: &TestApp) {
@@ -1044,8 +1042,8 @@ async fn fail_every_counter_update(app: &TestApp) {
     .expect("creating the failure-injection trigger must succeed");
 }
 
-/// Requirements 6.2, 6.4: when the `reblogs_count` update fails mid-operation,
-/// the boost row must not survive — neither the record nor the counter may be
+/// When the `reblogs_count` update fails mid-operation, the boost row must
+/// not survive — neither the record nor the counter may be
 /// left changed on its own, and the caller must see the error.
 #[tokio::test]
 async fn reblog_leaves_neither_boost_row_nor_counter_changed_when_the_counter_update_fails() {
@@ -1061,7 +1059,7 @@ async fn reblog_leaves_neither_boost_row_nor_counter_changed_when_the_counter_up
     let err = service
         .reblog(booster, target.id)
         .await
-        .expect_err("a failed counter update must surface as an error (Requirement 6.4)");
+        .expect_err("a failed counter update must surface as an error");
     assert_eq!(err.kind, ErrorKind::Server);
 
     assert!(
@@ -1087,8 +1085,8 @@ async fn reblog_leaves_neither_boost_row_nor_counter_changed_when_the_counter_up
     app.cleanup().await;
 }
 
-/// Requirements 6.2, 6.4: when the `favourites_count` update fails
-/// mid-operation, the `favourites` row must not survive.
+/// When the `favourites_count` update fails mid-operation, the `favourites`
+/// row must not survive.
 #[tokio::test]
 async fn favourite_leaves_neither_row_nor_counter_changed_when_the_counter_update_fails() {
     let app = spawn_test_app().await;
@@ -1103,7 +1101,7 @@ async fn favourite_leaves_neither_row_nor_counter_changed_when_the_counter_updat
     let err = service
         .favourite(fan, target.id)
         .await
-        .expect_err("a failed counter update must surface as an error (Requirement 6.4)");
+        .expect_err("a failed counter update must surface as an error");
     assert_eq!(err.kind, ErrorKind::Server);
 
     assert!(
@@ -1124,7 +1122,7 @@ async fn favourite_leaves_neither_row_nor_counter_changed_when_the_counter_updat
     app.cleanup().await;
 }
 
-/// Requirements 6.2, 6.4: the un-favourite direction is symmetric — a failed
+/// The un-favourite direction is symmetric — a failed
 /// counter decrement must not leave the `favourites` row deleted.
 #[tokio::test]
 async fn unfavourite_leaves_neither_row_nor_counter_changed_when_the_counter_update_fails() {
@@ -1147,7 +1145,7 @@ async fn unfavourite_leaves_neither_row_nor_counter_changed_when_the_counter_upd
     let err = service
         .unfavourite(fan, target.id)
         .await
-        .expect_err("a failed counter update must surface as an error (Requirement 6.4)");
+        .expect_err("a failed counter update must surface as an error");
     assert_eq!(err.kind, ErrorKind::Server);
 
     assert!(
@@ -1162,7 +1160,7 @@ async fn unfavourite_leaves_neither_row_nor_counter_changed_when_the_counter_upd
         .expect("target must still exist");
     assert_eq!(
         reloaded.favourites_count, 1,
-        "counter and row must stay consistent (Requirement 6.3)"
+        "counter and row must stay consistent"
     );
 
     assert_eq!(deliveries(&local_sink, &http_sink), 0);
@@ -1170,12 +1168,11 @@ async fn unfavourite_leaves_neither_row_nor_counter_changed_when_the_counter_upd
     app.cleanup().await;
 }
 
-// -- counter/record agreement on the success path (task 5.4, Requirement
-// 6.3) ---------------------------------------------------------------------
+// -- counter/record agreement on the success path -------------------------
 //
-// The rollback tests above pin the *failure* side of Requirement 6. Its 6.3
-// clause — 「複合書き込みが成功した ... カウンタの値と実体レコードの数が
-// 一致する」 — is a claim about the success path, and the existing success
+// The rollback tests above pin the *failure* side of composite writes. The
+// success side — a committed composite write leaves the counter equal to the
+// real number of rows it summarises — needs its own coverage: the success
 // tests only ever assert the counter (e.g. `favourites_count == 1`) without
 // ever counting the rows that counter is supposed to summarise. A counter
 // that drifted to a value no row backs would sail straight through them.
@@ -1201,11 +1198,11 @@ async fn assert_favourite_counter_matches_rows(
     assert_eq!(
         (reloaded.favourites_count, rows),
         (expected, expected),
-        "after {step}, favourites_count and the real row count must agree (Requirement 6.3)"
+        "after {step}, favourites_count and the real row count must agree"
     );
 }
 
-/// Requirement 6.3: after successful favourite composite writes, the cached
+/// After successful favourite composite writes, the cached
 /// `favourites_count` equals the real number of `favourites` rows — checked
 /// across a first favourite, a duplicate (the idempotent no-op branch, which
 /// must move neither half), a second distinct favouriter, and an

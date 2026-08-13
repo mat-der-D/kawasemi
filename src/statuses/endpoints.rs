@@ -135,7 +135,7 @@
 //!   (no mute feature exists in this spec's dependency set, same documented
 //!   gap `tasks.md`'s own Implementation Notes name for `InteractionService`):
 //!   this surface has no mute context to offer, so it passes
-//!   `RenderContext::muted: None` (Requirement 4.4 of structural-refactor).
+//!   `RenderContext::muted: None`.
 //! - `reblog`: **at most one level of nesting.** When `status.reblog_of_id`
 //!   is `Some`, the target is fetched via `StatusService::show`
 //!   ([`StatusesEndpointsState::resolve_reblog_target`]) — a
@@ -154,22 +154,21 @@
 //! `assemble_many` call per list. Media, tags, emoji, interaction state and
 //! author Accounts are therefore fetched a number of times that does not
 //! depend on how many statuses the list holds, with an author appearing
-//! twice resolved once (structural-refactor's Requirements 5.1, 5.2, 5.3,
-//! 5.6, 5.7).
+//! twice resolved once.
 //!
 //! **Polls are the deliberate exception, and remain proportional to the
 //! number of statuses in the list that have one.** [`PollServiceResolver`]
 //! resolves through `PollService::poll`, which applies its own
 //! `visible_poll_and_status` check per poll; batching it would need a new
 //! visibility-aware multi-poll method on `PollService`, which is a different
-//! component's boundary. design.md's `#### PollResolver` Implementation
-//! Notes permits this on the grounds that "この経路は単一 Status の取得が
-//! 主用途" — but that premise is narrower than it reads: these three list
-//! handlers are on this surface too, so a bookmark page of N poll-bearing
-//! statuses issues N `PollService::poll` calls. Requirement 5.1 names 投票
-//! explicitly, so this is a real residual, not a satisfied criterion.
+//! component's boundary. It is tolerated here on the grounds that this
+//! surface's main use is fetching a single Status — but that premise is
+//! narrower than it reads: the three list handlers are on this surface too,
+//! so a bookmark page of N poll-bearing statuses issues N
+//! `PollService::poll` calls. This is a real residual, not a satisfied
+//! criterion.
 //!
-//! ## Wire-shape judgment calls not fixed by design.md's API Contract table
+//! ## Wire-shape judgment calls the API contract does not fix
 //! - **id path segments are `404`, not `422`, when unparseable** — mirrors
 //!   `media/endpoints.rs::parse_media_id`'s identical, already-reviewed
 //!   precedent and reasoning (an unparseable id and a nonexistent one are
@@ -426,8 +425,8 @@ where
     /// rendered at all.
     ///
     /// Boost-target resolution stays here rather than moving into the
-    /// assembler — design.md's `Status 一覧の組み立て` flow, "ブースト先の
-    /// 解決と可視性判定は**呼び出し元に残る**". A target the *current*
+    /// assembler — boost-target resolution and visibility judgment stay with
+    /// the assembler's *caller*. A target the *current*
     /// viewer may no longer see (the post went private after the boost was
     /// made, say) is dropped whole, rendering `reblog: null` rather than
     /// erroring the response or rendering it partially.
@@ -473,11 +472,11 @@ where
     /// representations, in the order given.
     ///
     /// Every boost target is resolved first, so the whole page — targets
-    /// included (Requirement 5.6) — reaches
+    /// included — reaches
     /// [`StatusRenderAssembler::assemble_many`] as one batch and its
     /// per-status materials are fetched a number of times that does not
-    /// depend on how many statuses the page holds (Requirement 5.1), with an
-    /// author appearing twice resolved once (Requirements 5.2, 5.3). See
+    /// depend on how many statuses the page holds, with an author appearing
+    /// twice resolved once. See
     /// this module's doc comment ("Page rendering is one batch per list")
     /// for what this does *not* cover: [`PollServiceResolver`] still issues
     /// one query pair per poll-bearing status.

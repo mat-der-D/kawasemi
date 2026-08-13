@@ -450,13 +450,13 @@ async fn find_by_id_returns_none_for_a_nonexistent_media_id() {
     app.cleanup().await;
 }
 
-// -- find_by_ids (task 4.1) --------------------------------------------
+// -- find_by_ids -------------------------------------------------------
 
-/// Requirements 5.1/5.4, task 4.1's own completion condition ("単数版を N 回
-/// 呼んだ結果と複数版を 1 回呼んだ結果が一致する"): `find_by_ids` returns,
-/// for every id, exactly the [`Media`] `find_by_id` returns for that same id
-/// on its own — including `find_by_id`'s deliberate lack of any owner
-/// scoping, and its "no row" case (an absent map entry, never an error).
+/// Calling the singular form N times and the batched form once must agree:
+/// `find_by_ids` returns, for every id, exactly the [`Media`] `find_by_id`
+/// returns for that same id on its own — including `find_by_id`'s deliberate
+/// lack of any owner scoping, and its "no row" case (an absent map entry,
+/// never an error).
 #[tokio::test]
 async fn find_by_ids_matches_calling_find_by_id_per_media() {
     let app = spawn_test_app().await;
@@ -520,11 +520,11 @@ async fn find_by_ids_matches_calling_find_by_id_per_media() {
     app.cleanup().await;
 }
 
-/// Task 4.1's precondition: an empty `ids` returns an empty map *without
-/// issuing a query*. Closing the pool first is what makes that second half
-/// observable — every statement against a closed `PgPool` fails with
-/// `sqlx::Error::PoolClosed`, so an `Ok` here can only mean the function
-/// short-circuited before touching the database.
+/// An empty `ids` returns an empty map *without issuing a query*. Closing the
+/// pool first is what makes that second half observable — every statement
+/// against a closed `PgPool` fails with `sqlx::Error::PoolClosed`, so an `Ok`
+/// here can only mean the function short-circuited before touching the
+/// database.
 #[tokio::test]
 async fn find_by_ids_returns_empty_for_an_empty_slice_without_querying() {
     let app = spawn_test_app().await;

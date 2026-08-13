@@ -326,7 +326,7 @@ async fn federation_pair_round_trip_verifies_signature_and_dispatch_and_local_ht
 
 // ==========================================================================
 // (3) Each paired instance runs the SAME module-wiring sequence production
-// runs (structural-refactor task 6.4, Requirements 1.4, 7.1, 7.7)
+// runs
 // ==========================================================================
 
 /// Inserts a plain public local `Status` row directly via `StatusRepository`
@@ -390,8 +390,8 @@ async fn get_json_unauthenticated(router: &Router, path: &str) -> (StatusCode, V
     (status, value)
 }
 
-/// structural-refactor Requirements 1.4, 7.1, 7.7: every startup path — this
-/// federation-pair harness included — runs the one shared module-wiring
+/// Every startup path — this federation-pair harness included — runs the
+/// one shared module-wiring
 /// sequence (`crate::bootstrap::wiring::compose_modules`), so BOTH paired
 /// instances' Account representations go through statuses-core's real
 /// `AccountStatusesProvider`/`AccountCountsContribution`
@@ -399,11 +399,10 @@ async fn get_json_unauthenticated(router: &Router, path: &str) -> (StatusCode, V
 /// `build_accounts_module`'s built-in `EmptyStatusesProvider`/
 /// `ZeroCountsProvider` defaults.
 ///
-/// Before task 6.4, `spawn_paired_instance` open-coded the wiring sequence
-/// and omitted `register_account_ports` entirely, so the account-statuses
-/// page below read empty on both instances even with a real authored post in
-/// the database — the exact pre-existing wiring divergence Requirement 7.7
-/// asks to be corrected and recorded. The `statuses_count` assertion below
+/// `spawn_paired_instance` used to open-code the wiring sequence and omit
+/// `register_account_ports` entirely, so the account-statuses page below
+/// read empty on both instances even with a real authored post in the
+/// database. The `statuses_count` assertion below
 /// passed even then (`social_graph::CombinedAccountCountsProvider`, wiring
 /// stage 8, builds its own `AccountCountsContribution` rather than reading
 /// back stage 7's registration) and is kept as a guard that the corrected

@@ -106,11 +106,10 @@ use self::wiring::{ComposedModules, FederationPollCadence, ModuleWiringInput, co
 #[cfg(test)]
 mod tests;
 
-/// The single implementation of the module-wiring sequence
-/// (structural-refactor task 6.1, Requirements 7.1, 7.2, 7.3, 7.5), called
-/// from [`build_state`] below (task 6.2) as well as from
+/// The single implementation of the module-wiring sequence, called from
+/// [`build_state`] below as well as from
 /// `crate::test_harness::spawn_test_app` and
-/// `crate::federation::test_harness::spawn_paired_instance` (tasks 6.3/6.4).
+/// `crate::federation::test_harness::spawn_paired_instance`.
 pub(crate) mod wiring;
 
 /// Aggregated startup failure (design.md's Bootstrap Service Interface,
@@ -350,8 +349,8 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     let (runtime, actor_module) = build_actor_wiring(&pool, &cfg).await?;
 
     // Runs the module-wiring sequence itself — the single implementation
-    // shared by all three startup paths (`self::wiring::compose_modules`,
-    // task 6.2, Requirements 7.1, 7.5, 7.6). Everything above this line is
+    // shared by all three startup paths (`self::wiring::compose_modules`).
+    // Everything above this line is
     // what deliberately stays here because it is genuinely production-
     // specific (real config from the environment, a real pool, migrations,
     // the real KEK-bound key supply) — and everything below it is the
@@ -360,9 +359,9 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     // CONCERN carried over from this call site's previous inline wiring
     // (documented judgment call): the OAuth module's `cookie_secure` is
     // hardcoded to `false` — see `wiring::compose_modules`'s stage 1, which
-    // now owns that call. design.md's Security Considerations call for the
-    // owner-session cookie's `Secure` attribute "TLS 配信時" (when served
-    // over TLS), but `AppConfig`/`ServerConfig` (`src/config.rs`) has no
+    // now owns that call. The owner-session cookie ought to carry `Secure`
+    // whenever the instance is served over TLS, but
+    // `AppConfig`/`ServerConfig` (`src/config.rs`) has no
     // TLS-termination setting at all, and this crate's own HTTP listener
     // (`src/server.rs`) never terminates TLS itself. `false` is the
     // conservative choice: a single-owner instance commonly sits behind a
@@ -422,16 +421,15 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     // (`MediaConfig::worker_concurrency` workers) as detached background
     // tasks, mirroring `federation_background.spawn()`'s own "never blocks
     // this function's own startup" contract immediately above. Each worker's
-    // own shutdown signal is `server::os_shutdown_signal` itself (`pub(crate)`
-    // for exactly this reuse) passed directly as the signal factory — see
-    // `MediaBackgroundWorkers::spawn`'s own doc comment for why calling it
-    // once per worker (plus once more, independently, inside
+    // own shutdown signal is `server::os_shutdown_signal` itself
+    // (`pub(crate)` for exactly this reuse) passed directly as the signal
+    // factory — see `MediaBackgroundWorkers::spawn`'s own doc comment for why
+    // calling it once per worker (plus once more, independently, inside
     // `serve_with_shutdown`'s own call below) observes the same real OS
     // shutdown event without needing a broadcast/watch channel to fan one
     // signal out to several tasks. This is the production-specific half of
-    // `compose_modules`' "return the handles, never spawn them" contract
-    // (Requirement 7.5); the two test harnesses spawn against a signal that
-    // never resolves instead.
+    // `compose_modules`' "return the handles, never spawn them" contract; the
+    // two test harnesses spawn against a signal that never resolves instead.
     media_background.spawn(server::os_shutdown_signal);
 
     Ok(AppState::new(

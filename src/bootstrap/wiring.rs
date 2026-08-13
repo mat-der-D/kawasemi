@@ -1,20 +1,17 @@
-//! The single implementation of this application's module-wiring sequence
-//! (structural-refactor design.md's "合成ルート層" -> `#### compose_modules`;
-//! Requirements 7.1, 7.2, 7.3, 7.5).
+//! The single implementation of this application's module-wiring sequence.
 //!
 //! ## Why this module exists
-//! Until this task, the identical 11-stage build order of the nine feature
-//! modules was written out three separate times — once in
+//! The identical 11-stage build order of the nine feature modules used to be
+//! written out three separate times — once in
 //! [`crate::bootstrap`]'s own `build_state` (production), once in
 //! `crate::test_harness::spawn_test_app`, and once in
 //! `crate::federation::test_harness::spawn_paired_instance`. Adding a new
 //! spec meant copying the sequence into all three, and re-honoring by hand an
 //! ordering constraint the type system does not enforce (see "The ordering
-//! constraint" below). This module holds that sequence exactly once
-//! (Requirements 7.1, 7.2); tasks 6.2/6.3/6.4 migrate the three call sites
-//! onto it.
+//! constraint" below). This module holds that sequence exactly once, and
+//! every startup path goes through it.
 //!
-//! ## The ordering constraint (Requirement 7.3)
+//! ## The ordering constraint
 //! `crate::accounts::AccountPortsRegistry` and
 //! `crate::statuses::RelationshipQueryRegistry` are runtime-replaceable
 //! registry slots: the *last* `set_*` call for a given slot is the one
@@ -30,10 +27,10 @@
 //! So the order `build_statuses_module` -> `register_account_ports` ->
 //! `build_social_graph_module` is load-bearing, and swapping any two of them
 //! still compiles and still boots — it silently produces an instance whose
-//! Account representation reports zero counts. Task 6.5 adds the runtime test
-//! that fails when this order is broken (Requirement 7.4).
+//! Account representation reports zero counts. `tests/module_wiring_it.rs`
+//! holds the runtime test that fails when this order is broken.
 //!
-//! ## What deliberately stays with the caller (Requirement 7.5)
+//! ## What deliberately stays with the caller
 //! Config loading/synthesis, pool creation, migrations, actor-model wiring
 //! (`build_actor_wiring` / `load_key_cache` + `build_actor_module`), the HTTP
 //! listener bind, and the shutdown-signal handling are all *not* here: those
@@ -62,7 +59,7 @@
 //! one successfully — this module follows the latter. The HTTP requests
 //! emitted are unchanged; only the underlying connection pool is now shared.
 //! (`crate::search::build_search_module` still constructs its own client
-//! internally; changing that is outside this task's boundary.)
+//! internally — a known residual.)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,12 +92,10 @@ use crate::timelines::{self, TimelinesModule};
 
 /// The background-loop cadence [`compose_modules`] builds its
 /// [`FederationWiringConfig`] with — the one part of that config that is
-/// genuinely per-startup-path rather than derived from [`AppConfig`]
-/// (Requirement 7.5).
+/// genuinely per-startup-path rather than derived from [`AppConfig`].
 ///
-/// design.md's pinned `ModuleWiringInput` lists only `config` and
-/// `http_client` as caller-supplied collaborators, but the three current call
-/// sites do differ here: production uses
+/// It is passed separately from the rest of [`ModuleWiringInput`] because the
+/// three current call sites genuinely differ here: production uses
 /// [`FederationWiringConfig::production`]'s multi-second defaults, while both
 /// test harnesses use sub-second intervals so an integration test observing a
 /// delivery can finish quickly. Passing the three numbers (rather than a
@@ -127,14 +122,14 @@ impl FederationPollCadence {
     }
 }
 
-/// Everything [`compose_modules`] needs from its caller (design.md's
-/// `ModuleWiringInput`). A plain data bundle, mirroring this crate's own
+/// Everything [`compose_modules`] needs from its caller. A plain data
+/// bundle, mirroring this crate's own
 /// `FederationWiringConfig`/`TestAppParts` convention of grouping a
 /// constructor's inputs into a named struct rather than a long positional
 /// parameter list.
 ///
 /// Every field is a value the caller has *already* built by its own,
-/// path-specific means (Requirement 7.5): `pool` is migrated, `runtime` and
+/// path-specific means: `pool` is migrated, `runtime` and
 /// `actor_module` are constructed, `config` is either loaded from the
 /// environment or synthesized by a test harness.
 pub(crate) struct ModuleWiringInput<'a> {
@@ -160,10 +155,9 @@ pub(crate) struct ModuleWiringInput<'a> {
     pub federation_cadence: FederationPollCadence,
 }
 
-/// Everything [`compose_modules`] produces (design.md's `ComposedModules`):
-/// the nine feature modules `crate::state::AppState::new` takes, plus the two
-/// background-task handles the caller must spawn against *its own* shutdown
-/// signal.
+/// Everything [`compose_modules`] produces: the nine feature modules
+/// `crate::state::AppState::new` takes, plus the two background-task handles
+/// the caller must spawn against *its own* shutdown signal.
 pub(crate) struct ComposedModules {
     pub oauth: OauthModule,
     pub federation: FederationModule,
@@ -186,7 +180,7 @@ pub(crate) struct ComposedModules {
 }
 
 /// Runs the 11-stage module-wiring sequence — the single implementation
-/// shared by every startup path (Requirements 7.1, 7.2, 7.3, 7.5).
+/// shared by every startup path.
 ///
 /// Stages, in the order they must run:
 /// 1. `OauthModule`
@@ -223,7 +217,7 @@ pub(crate) struct ComposedModules {
 /// fallible (the failure-prone startup stages — config, pool, migrations, key
 /// supply — all stay with the caller), so this currently always returns `Ok`;
 /// the `Result` is what lets a future stage fail without changing every call
-/// site (design.md's `compose_modules` Implementation Notes, "Risks").
+/// site.
 pub(crate) async fn compose_modules(
     input: ModuleWiringInput<'_>,
 ) -> Result<ComposedModules, AppError> {

@@ -84,14 +84,15 @@
 //! here is only the part that is genuinely this module's own: which post a
 //! notification refers to, and whether it is still there.
 //!
-//! That handoff is a single [`crate::statuses::render_assembler::StatusRenderAssembler::assemble_many`]
+//! That handoff is a single
+//! [`crate::statuses::render_assembler::StatusRenderAssembler::assemble_many`]
 //! call per page rather than one per notification, so the media/tag/emoji/
 //! interaction/poll lookups a page needs are issued a number of times that
 //! does not depend on how many notifications it holds, and an author whose
-//! posts appear twice on one page is resolved once (Requirements 5.1, 5.2,
-//! 5.3, 5.6). Boost targets ride in the same batch. Notifications with no
-//! live post contribute nothing to it and simply take no slot in the result
-//! — see "Dangling references are not errors" below.
+//! posts appear twice on one page is resolved once. Boost targets ride in the
+//! same batch. Notifications with no live post contribute nothing to it and
+//! simply take no slot in the result — see "Dangling references are not
+//! errors" below.
 //!
 //! What stays outside that batch, and stays per notification, is the walk
 //! that decides *which* posts reach it: the envelope's own
@@ -99,16 +100,16 @@
 //! [`status_repository::find_by_id`] pair that resolves a notification's
 //! related post and that post's boost target. The design leaves boost
 //! resolution with the caller, and neither the envelope account nor the
-//! status row itself is one of the per-Status materials Requirement 5.1
-//! enumerates. The envelope account is nonetheless a real remaining
+//! status row itself is one of the per-Status materials the assembler
+//! batches. The envelope account is nonetheless a real remaining
 //! per-notification `show_account`: a page of N notifications from N
 //! distinct origins issues N of them, and two notifications from the *same*
 //! origin resolve that origin twice, which the assembler's own author
 //! memoization would have collapsed had the origin been a status author.
 //! Batching it means resolving accounts for a set rather than one at a
-//! time, which `AccountService` has no entry point for — noted here rather
-//! than attempted, since the task that batched this rendering deliberately
-//! left the envelope alone.
+//! time, which `AccountService` has no entry point for — noted here as a
+//! known residual rather than attempted, since batching the rendering
+//! deliberately left the envelope alone.
 //!
 //! One narrowing versus `account_provider.rs`'s own equivalent: this module's
 //! [`NotificationService::resolve_reblog_target`] does **not** re-check
@@ -275,8 +276,8 @@ impl NotificationService {
     /// its target has since been deleted.
     ///
     /// Boost-target resolution stays here rather than moving into the
-    /// assembler — design.md's `Status 一覧の組み立て` flow, "ブースト先の
-    /// 解決と可視性判定は**呼び出し元に残る**" — and deliberately performs
+    /// assembler — boost-target resolution and visibility judgment stay with
+    /// the assembler's *caller* — and deliberately performs
     /// **no** visibility re-check on the target, unlike every sibling caller.
     /// See this module's doc comment ("Rendering `account`/`status`") for why
     /// that narrowing exists and why batching does not change it.
@@ -290,20 +291,19 @@ impl NotificationService {
     /// Renders one already-fetched page of [`Notification`]s into their full
     /// Notification JSON, in the order given (account + status embeds
     /// resolved, then delegated to [`notification_to_json`] for the outer
-    /// shell + null discipline — task 2.1's own boundary, not reimplemented
-    /// here).
+    /// shell + null discipline, not reimplemented here).
     ///
     /// The page's related posts and their boost targets are gathered first
     /// and handed to [`StatusRenderAssembler::assemble_many`] as **one**
     /// batch, so the materials they need are fetched a number of times that
-    /// does not depend on the page's length (Requirement 5.1 of
-    /// structural-refactor) and targets ride in the same batch (5.6).
+    /// does not depend on the page's length, and targets ride in the same
+    /// batch.
     ///
     /// The gathering pass issues its lookups in exactly the order the
     /// per-notification loop this replaces did — for each notification in
     /// turn, its origin account, then its related post, then that post's
     /// boost target — so a failure in any of them still aborts the whole
-    /// page on the notification it aborted on before (Requirement 1.1).
+    /// page on the notification it aborted on before.
     /// Notably, a post is resolved even for a `Follow`/`FollowRequest`
     /// notification, whose rendered `status` [`notification_to_json`] then
     /// discards: skipping it would turn an erroring page into a rendering
@@ -462,9 +462,8 @@ impl PollResolver for RequiredPolls {
     /// Two queries for the whole batch — one
     /// [`poll_repository::find_polls_by_ids`], one
     /// [`poll_repository::tally_many`] — regardless of how many ids it is
-    /// given, and none at all for an empty one (Requirement 5.1: a
-    /// notification page must not have its poll lookups scale with its
-    /// length).
+    /// given, and none at all for an empty one, so a notification page's poll
+    /// lookups do not scale with its length.
     fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
             let polls = poll_repository::find_polls_by_ids(&self.pool, poll_ids).await?;

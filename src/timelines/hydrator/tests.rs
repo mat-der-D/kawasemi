@@ -1,5 +1,5 @@
 //! Tests for this module's [`super::TolerantPolls`] — the [`PollResolver`]
-//! `StatusHydrator` hands the assembler (Requirement 5.1; task 4.5).
+//! `StatusHydrator` hands the assembler.
 //!
 //! Scoped to the resolver rather than to `hydrate` as a whole: end-to-end
 //! timeline hydration is already covered by `tests/timeline_hydrator_it.rs`

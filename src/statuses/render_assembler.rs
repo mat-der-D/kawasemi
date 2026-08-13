@@ -63,7 +63,7 @@
 //!   sequence is still sorted. See [`ResolvedEmojis::select`].
 //! - **Author Account JSON is memoized for the duration of one call and no
 //!   longer.** A list of twenty posts by one author resolves that author
-//!   once (Requirements 5.2, 5.3); a *second* call resolves them again.
+//!   once; a *second* call resolves them again.
 //!   Caching across calls would trade query count for a class of bug this
 //!   module does not currently have — serving an account whose display
 //!   name, avatar or counters changed since some earlier request.
@@ -330,7 +330,7 @@ impl StatusRenderAssembler {
         );
 
         // Boost targets are rows in their own right, so they belong in the
-        // same id set as the statuses that carry them (Requirement 5.6).
+        // same id set as the statuses that carry them.
         // Interleaved target-then-status rather than appended, matching the
         // order the render loop below visits them in: nothing observable
         // depends on it, but it keeps the order a `PollResolver` sees its
@@ -431,7 +431,7 @@ impl StatusRenderAssembler {
 
         // One `show_account` per distinct author, and none of it kept past
         // this call — see this module's doc comment for why the cache stops
-        // at the call boundary (Requirements 5.2, 5.3).
+        // at the call boundary.
         let mut accounts: HashMap<Id, Value> = HashMap::new();
         for author in unique(statuses.iter().map(|status| status.actor_id)) {
             let account = self

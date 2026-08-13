@@ -685,7 +685,7 @@ fn material_fingerprint(json: &Value) -> Value {
 ///
 /// Every expectation below was captured from the sequential implementation
 /// before the materials were batched, so a difference here is a difference
-/// in rendered output, which Requirement 5.7 does not permit. Four of them
+/// in rendered output, which batching must not produce. Four of them
 /// are load-bearing in ways a smaller fixture would miss:
 ///
 /// - `emojis` comes back `["alpha", "zulu"]` while the content mentions
@@ -925,7 +925,7 @@ async fn an_unauthenticated_batch_reports_no_interactions_but_still_mutes() {
     app.cleanup().await;
 }
 
-// -- author resolution (Requirements 5.2, 5.3; task 4.6) --------------------
+// -- author resolution -----------------------------------------------------
 
 /// Inserts `count` statuses whose authors cycle through `authors`, so that a
 /// list of a fixed length can be built with any number of distinct authors
@@ -954,7 +954,7 @@ async fn measure(app: &TestApp, statuses: &[Status], ctx: &RenderContext<'_>) ->
     log
 }
 
-/// Requirements 5.2 and 5.3, measured: the number of account-resolution
+/// Measured: the number of account-resolution
 /// queries a call issues tracks the number of **distinct authors** in the
 /// list, and not the number of statuses.
 ///
@@ -1007,7 +1007,7 @@ async fn author_resolution_tracks_distinct_authors_and_not_list_length() {
         one_author_one_status.per_statement(),
     );
 
-    // Requirement 5.2: twenty statuses sharing one author resolve them once
+    // Twenty statuses sharing one author resolve them once
     // — the same cost as a single status by them.
     assert_eq!(
         resolutions(&one_author),
@@ -1018,7 +1018,7 @@ async fn author_resolution_tracks_distinct_authors_and_not_list_length() {
         one_author.per_statement(),
     );
 
-    // Requirement 5.3: K distinct authors cost K resolutions — at K = 2 and
+    // K distinct authors cost K resolutions — at K = 2 and
     // at K = N, where "proportional to K" and "proportional to N" would
     // otherwise be indistinguishable.
     assert_eq!(
@@ -1035,7 +1035,7 @@ async fn author_resolution_tracks_distinct_authors_and_not_list_length() {
         twenty_authors.per_statement(),
     );
 
-    // The materials Requirement 5.1 enumerates are unchanged by any of it:
+    // The batched per-status materials are unchanged by any of it:
     // same list length, same author count, same everything.
     one_author_one_status.require_kinds(&[
         QueryKind::Media,

@@ -483,7 +483,7 @@ async fn hydrate_hashtags_renders_multiple_tags_in_order() {
     app.cleanup().await;
 }
 
-// -- `TolerantPolls` (Requirement 5.1; task 4.5) ---------------------------
+// -- `TolerantPolls` -------------------------------------------------------
 
 /// Inserts a `polls` row carrying `titles` as options `idx 0..N`, attached
 /// to a fresh `statuses` row — `polls.status_id` is a real FK, so a genuine
@@ -625,8 +625,7 @@ async fn resolve_many_reports_the_viewers_own_votes() {
     app.cleanup().await;
 }
 
-// -- `hydrate_statuses` page characterization (Requirements 1.2, 4.2, 4.6;
-//    structural-refactor Requirements 1.1, 5.1, 5.7) ----------------------
+// -- `hydrate_statuses` page characterization ------------------------------
 
 /// Seeds a locally-registered custom emoji, mirroring
 /// `statuses/render_assembler/tests.rs`'s identical test-local helper.

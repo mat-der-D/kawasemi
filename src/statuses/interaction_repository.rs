@@ -31,17 +31,16 @@
 //! [`remove_bookmark`] / [`exists_bookmark`] / [`list_bookmarks`]
 //! (Requirements 11.1, 11.2, 11.3), [`set_pin`] / [`exists_pin`]
 //! (Requirements 12.1, 12.2), and [`find_reblog`] (Requirement 9.3's
-//! read-only half, see above), plus the batched forms of those four
-//! existence checks — [`favourited_status_ids`] / [`bookmarked_status_ids`] /
-//! [`pinned_status_ids`] / [`reblogged_status_ids`] (added later, by
-//! structural-refactor task 4.3, Requirements 5.1 and 5.5, so a list
+//! read-only half, see above), plus the batched forms of those four existence
+//! checks — [`favourited_status_ids`] / [`bookmarked_status_ids`] /
+//! [`pinned_status_ids`] / [`reblogged_status_ids`] (added later, so a list
 //! endpoint's per-viewer interaction lookups stop scaling with the number of
 //! statuses it renders; the singular checks stay, they have other callers).
-//! No `StatusRepository`/`TagRepository`
-//! functionality, no `PollRepository`/`IdempotencyStore` (task 2.3), no
-//! visibility/addressing policy, no Activity generation, no scope/ownership
-//! enforcement (`write:favourites`/`write:bookmarks`/`12.3`'s ownership
-//! check/`12.4`'s direct-visibility rejection — those are `InteractionService`
+//! No `StatusRepository`/`TagRepository` functionality, no
+//! `PollRepository`/`IdempotencyStore` (task 2.3), no visibility/addressing
+//! policy, no Activity generation, no scope/ownership enforcement
+//! (`write:favourites`/`write:bookmarks`/`12.3`'s ownership check/`12.4`'s
+//! direct-visibility rejection — those are `InteractionService`
 //! /`StatusEndpoints` concerns, task 5.x/6.x, operating *above* this
 //! repository), and no serialization live here.
 //!
@@ -247,12 +246,11 @@ fn row_to_status(row: StatusRow) -> Status {
 /// "重複したお気に入りを作成しない" — a silent idempotent no-op, not an
 /// error; see this module's doc comment, "Duplicate handling").
 ///
-/// Generic over `executor` (task 5.1, Requirement 6.3) so
-/// `InteractionService::favourite` can drive it against an open
-/// `sqlx::Transaction` (`&mut *tx`) together with the matching
-/// `status_repository::adjust_counts`, so the row and its counter can never
-/// diverge; every pre-existing caller keeps passing a bare `&PgPool`
-/// unchanged.
+/// Generic over `executor` so `InteractionService::favourite` can drive it
+/// against an open `sqlx::Transaction` (`&mut *tx`) together with the
+/// matching `status_repository::adjust_counts`, so the row and its counter
+/// can never diverge; every pre-existing caller keeps passing a bare
+/// `&PgPool` unchanged.
 pub async fn add_favourite<'e, E>(
     executor: E,
     actor_id: Id,
@@ -282,8 +280,8 @@ where
 /// no-op success, mirroring `StatusRepository::delete_status`'s "absence is
 /// not an error at this layer" convention.
 ///
-/// Generic over `executor` for the same reason as [`add_favourite`] (task
-/// 5.1, Requirement 6.3) — every pre-existing caller keeps passing a bare
+/// Generic over `executor` for the same reason as [`add_favourite`] — every
+/// pre-existing caller keeps passing a bare
 /// `&PgPool` unchanged.
 pub async fn remove_favourite<'e, E>(
     executor: E,
@@ -590,9 +588,9 @@ pub async fn exists_pin(pool: &PgPool, actor_id: Id, status_id: Id) -> Result<bo
 /// recording/revoking that row itself is `StatusRepository`'s job, not
 /// this function's.
 ///
-/// Generic over `executor` (structural-refactor task 5.3, Requirements 6.2,
-/// 6.3) for the same reason [`add_favourite`]/[`remove_favourite`] are (task
-/// 5.1): `InteractionService::reblog`'s "has this actor already boosted?"
+/// Generic over `executor` for the same reason
+/// [`add_favourite`]/[`remove_favourite`] are:
+/// `InteractionService::reblog`'s "has this actor already boosted?"
 /// branch decides whether the boost row is inserted and `reblogs_count`
 /// incremented at all, so it has to be read *inside* the same transaction
 /// those two writes run in — otherwise the branch is taken against a snapshot
@@ -620,7 +618,7 @@ where
     Ok(row.map(row_to_status))
 }
 
-// -- batched interaction state (structural-refactor task 4.3) ---------------
+// -- batched interaction state ---------------------------------------------
 
 /// Runs one of the four batched interaction-state queries below and collects
 /// its single-column result into a set.
@@ -628,7 +626,7 @@ where
 /// `sql` must select exactly the status id column to report as "present",
 /// take the viewer as `$1` and the status-id array as `$2`, and otherwise
 /// carry the same `WHERE` scoping as the singular check it batches — that
-/// equivalence is what task 4.3's per-function comparison tests pin down.
+/// equivalence is what this module's per-function comparison tests pin down.
 /// Ordering is deliberately unconstrained: the result is a [`HashSet`], so
 /// unlike `tags_for_statuses` there is no per-key sequence for a batched
 /// query to disagree with its singular counterpart about, and a duplicate row
@@ -656,9 +654,8 @@ async fn status_id_set(
     Ok(rows.into_iter().map(|(id,)| Id::from_i64(id)).collect())
 }
 
-/// The batched form of [`exists_favourite`] (structural-refactor task 4.3,
-/// Requirements 5.1 and 5.5): reports which of `status_ids` `viewer` has
-/// favourited, in one query instead of one query per status.
+/// The batched form of [`exists_favourite`]: reports which of `status_ids`
+/// `viewer` has favourited, in one query instead of one query per status.
 ///
 /// Equivalent to calling [`exists_favourite`] once per id, by construction —
 /// same table, same `actor_id = $1 AND status_id = ...` scoping, just
@@ -684,8 +681,8 @@ pub async fn favourited_status_ids(
     .await
 }
 
-/// The batched form of [`exists_bookmark`] (task 4.3, Requirements 5.1 and
-/// 5.5): reports which of `status_ids` `viewer` has bookmarked, in one query.
+/// The batched form of [`exists_bookmark`]: reports which of `status_ids`
+/// `viewer` has bookmarked, in one query.
 ///
 /// Equivalent to calling [`exists_bookmark`] once per id, by construction
 /// (same table, same `actor_id`/`status_id` scoping widened to `= ANY`), with
@@ -710,8 +707,8 @@ pub async fn bookmarked_status_ids(
     .await
 }
 
-/// The batched form of [`exists_pin`] (task 4.3, Requirements 5.1 and 5.5):
-/// reports which of `status_ids` `viewer` has pinned, in one query.
+/// The batched form of [`exists_pin`]: reports which of `status_ids` `viewer`
+/// has pinned, in one query.
 ///
 /// Equivalent to calling [`exists_pin`] once per id, by construction, with
 /// the same "no row -> absent" contract and empty-slice short-circuit as
@@ -719,12 +716,12 @@ pub async fn bookmarked_status_ids(
 ///
 /// A pin is conventionally an author's pin of their *own* post rather than a
 /// viewer-to-anyone relation, but that is a policy `InteractionService`
-/// enforces above this repository (Requirement 12.3; see [`set_pin`]'s own
-/// doc comment) — the `pins` table itself is keyed `(actor_id, status_id)`
-/// exactly like `favourites`/`bookmarks`, and [`exists_pin`] scopes purely by
-/// `actor_id`. This function therefore takes the same `viewer` parameter as
-/// its three siblings and mirrors that same `WHERE`, with no ownership
-/// predicate the singular version does not have.
+/// enforces above this repository (see [`set_pin`]'s own doc comment) — the
+/// `pins` table itself is keyed `(actor_id, status_id)` exactly like
+/// `favourites`/`bookmarks`, and [`exists_pin`] scopes purely by `actor_id`.
+/// This function therefore takes the same `viewer` parameter as its three
+/// siblings and mirrors that same `WHERE`, with no ownership predicate the
+/// singular version does not have.
 pub async fn pinned_status_ids(
     pool: &PgPool,
     viewer: Id,
@@ -739,9 +736,8 @@ pub async fn pinned_status_ids(
     .await
 }
 
-/// The batched form of [`find_reblog`]'s existence half (task 4.3,
-/// Requirements 5.1 and 5.5): reports which of `status_ids` `viewer` has
-/// boosted, in one query.
+/// The batched form of [`find_reblog`]'s existence half: reports which of
+/// `status_ids` `viewer` has boosted, in one query.
 ///
 /// Unlike its three siblings there is no interaction table to read — a boost
 /// is a `statuses` row of its own, with `actor_id` set to the booster and

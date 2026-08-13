@@ -1,12 +1,11 @@
-//! Counting the SQL statements a piece of code actually issues
-//! (`structural-refactor` task 4.6, Requirements 5.1, 5.2, 5.3).
+//! Counting the SQL statements a piece of code actually issues.
 //!
-//! Requirement 5 is a statement about *query counts*, and prose has already
-//! proven to be the wrong place to keep them — `tasks.md`'s written tally of
-//! `assemble_many`'s queries drifted twice during task 4.5. So the counts
-//! live here instead, as something measured rather than asserted in a
-//! comment: the tests that use this module are the first-class record of how
-//! many queries a list render costs, and they go red when that changes.
+//! Prose has already proven to be the wrong place to keep query counts — a
+//! written tally of `assemble_many`'s queries drifted twice while the
+//! batching was being built. So the counts live here instead, as something
+//! measured rather than asserted in a comment: the tests that use this module
+//! are the first-class record of how many queries a list render costs, and
+//! they go red when that changes.
 //!
 //! ## How the counting works
 //! `sqlx` already emits one `tracing` event per executed statement, on the
@@ -107,10 +106,9 @@ const SUMMARY_FIELD: &str = "summary";
 
 /// What a captured statement is counted as.
 ///
-/// The five kinds Requirement 5.1 enumerates ("メディア・タグ・絵文字・
-/// インタラクション状態・投票") plus the account resolution Requirements 5.2
-/// and 5.3 are about, so a test can assert on the thing the requirement
-/// names rather than on a SQL string.
+/// The five per-status material kinds a list render batches — media, tags,
+/// emoji, interaction state, polls — plus account resolution, so a test can
+/// assert on the thing it means rather than on a SQL string.
 ///
 /// Classification is by full statement text, so a batched lookup and a
 /// per-row one against the same table are different kinds — that
@@ -120,8 +118,8 @@ pub(crate) enum QueryKind {
     /// Batched: `status_media` rows, and the `media` rows they point at.
     Media,
     /// Per status: one `status_media` lookup for a single `status_id`.
-    /// `account_provider`'s `only_media` filter still issues these
-    /// (task 4.5's accepted residual).
+    /// `account_provider`'s `only_media` filter still issues these — an
+    /// accepted residual of the batching.
     MediaPerStatus,
     /// Batched: a page's tags.
     Tags,
@@ -130,14 +128,13 @@ pub(crate) enum QueryKind {
     /// Batched: the viewer's favourite/reblog/bookmark/pin state.
     Interaction,
     /// Per status: a single `pins` existence check. `account_provider`'s
-    /// `pinned` filter still issues these (task 4.5's accepted residual).
+    /// `pinned` filter still issues these — an accepted residual.
     InteractionPerStatus,
     /// Batched: `polls`, `poll_options`, `poll_votes`.
     Poll,
     /// Per poll: the single-poll `polls`/`poll_options`/`poll_votes`
     /// lookups `PollService::poll` issues. `statuses/endpoints.rs`'s
-    /// `PollServiceResolver` still issues these (task 4.5's accepted
-    /// residual, recorded in `tasks.md`'s Implementation Notes).
+    /// `PollServiceResolver` still issues these — an accepted residual.
     PollPerPoll,
     /// Per distinct account: what one `AccountService::show_account` costs.
     AccountResolution,
@@ -215,8 +212,8 @@ impl QueryKind {
 ///
 /// Deliberately the whole set rather than one representative statement: an
 /// author resolved twice costs every one of these twice, and counting all of
-/// them means the assertion in Requirement 5.3's test ("proportional to the
-/// number of distinct authors") fails on a regression that duplicated any
+/// them means the "proportional to the number of distinct authors"
+/// assertion fails on a regression that duplicated any
 /// part of the resolution, not only on one that duplicated the actor lookup.
 fn is_account_resolution(sql: &str) -> bool {
     (sql.contains("FROM local_actors") && !sql.contains("= ANY("))

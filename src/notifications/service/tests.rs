@@ -623,7 +623,7 @@ async fn clear_succeeds_when_the_recipient_has_no_notifications() {
         .expect("clear must succeed even with no notifications");
 }
 
-// -- one whole list page (Requirements 1.1, 5.1, 5.7; task 4.5) ------------
+// -- one whole list page ---------------------------------------------------
 
 /// Seeds a locally-registered custom emoji — an exact copy of
 /// `statuses/account_provider/tests.rs`'s and `statuses/render_assembler/
@@ -748,8 +748,7 @@ fn notification_fingerprint(json: &Value) -> Value {
 ///
 /// Ordering is asserted separately from content: `repository::list` returns
 /// `ORDER BY id DESC`, and a page that renders the right six notifications
-/// in the wrong order violates Requirement 5.7 just as much as one that
-/// renders them wrong.
+/// in the wrong order is just as wrong as one that renders them wrong.
 #[tokio::test]
 async fn list_renders_a_mixed_page_of_every_status_shape_in_order() {
     let app = spawn_test_app().await;
@@ -1164,7 +1163,7 @@ async fn show_and_list_render_the_same_notification_identically() {
     app.cleanup().await;
 }
 
-// -- `RequiredPolls` (Requirement 5.1; task 4.5) ---------------------------
+// -- `RequiredPolls` -------------------------------------------------------
 
 /// Inserts a `polls` row carrying `titles` as options `idx 0..N`, attached
 /// to a fresh `statuses` row — `polls.status_id` is a real FK, so a genuine

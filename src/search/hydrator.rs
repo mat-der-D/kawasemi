@@ -71,13 +71,12 @@
 //! call per result set rather than one per status, so the media/tag/emoji/
 //! interaction/poll lookups it needs are issued a number of times that does
 //! not depend on how many statuses came back, and an author appearing twice
-//! is resolved once (structural-refactor's Requirements 5.1, 5.2, 5.3, 5.6).
-//! Boost targets ride in the same batch. What stays outside it — and stays
-//! per candidate — is the candidate walk itself
+//! is resolved once. Boost targets ride in the same batch. What stays outside
+//! it — and stays per candidate — is the candidate walk itself
 //! ([`SearchHydrator::status_visible`] and the `find_by_id` feeding it),
-//! because `limit` counts results rather than ids and so decides how far
-//! into `ids` the walk goes; see "`hydrate_statuses`: best-effort
-//! truncation" below.
+//! because `limit` counts results rather than ids and so decides how far into
+//! `ids` the walk goes; see "`hydrate_statuses`: best-effort truncation"
+//! below.
 //!
 //! ## `hydrate_accounts`: dedup first, `following` filter last (Requirements
 //! 3.5, 3.3)
@@ -318,7 +317,7 @@ impl SearchHydrator {
         // counts *results*, not ids, so how far into `ids` this gets is a
         // function of how many were skipped — and stopping the moment
         // enough have accumulated is what keeps this method from fetching
-        // candidates it would never render (Requirement 4.6). Collecting the
+        // candidates it would never render. Collecting the
         // rows instead of the rendered JSON does not move that boundary:
         // every status that survives both `continue`s below is rendered, and
         // a render that fails aborts the whole call either way, so this
@@ -358,8 +357,8 @@ impl SearchHydrator {
     /// *target's own* author.
     ///
     /// Boost-target resolution stays here rather than moving into the
-    /// assembler — design.md's `Status 一覧の組み立て` flow, "ブースト先の
-    /// 解決と可視性判定は**呼び出し元に残る**": this module re-checks the
+    /// assembler — boost-target resolution and visibility judgment stay with
+    /// the assembler's *caller*: this module re-checks the
     /// target through its own [`RelationshipQueryRegistry`]-backed
     /// judgment, keyed to the target's own author, and a target that fails
     /// is dropped entirely rather than partially rendered.
@@ -385,10 +384,10 @@ impl SearchHydrator {
     /// target under `reblog` at most one level deep.
     ///
     /// Every boost target is resolved first, so that the whole result set —
-    /// targets included (Requirement 5.6 of structural-refactor) — reaches
+    /// targets included — reaches
     /// [`StatusRenderAssembler::assemble_many`] as one batch and its
     /// per-status materials are fetched a number of times that does not
-    /// depend on how many statuses it holds (that spec's Requirement 5.1).
+    /// depend on how many statuses it holds.
     async fn render_statuses(
         &self,
         statuses: &[Status],
@@ -458,8 +457,8 @@ impl PollResolver for TolerantPolls {
     /// Two queries for the whole batch — one
     /// [`poll_repository::find_polls_by_ids`], one
     /// [`poll_repository::tally_many`] — regardless of how many ids it is
-    /// given, and none at all for an empty one (Requirement 5.1: a result
-    /// page's poll lookups must not scale with its length).
+    /// given, and none at all for an empty one, so a result page's poll
+    /// lookups do not scale with its length.
     fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
             let polls = poll_repository::find_polls_by_ids(&self.pool, poll_ids).await?;

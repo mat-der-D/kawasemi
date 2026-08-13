@@ -664,11 +664,11 @@ async fn poll_with_a_blank_option_is_rejected() {
     app.cleanup().await;
 }
 
-// -- create_status atomicity (task 5.2) -----------------------------------
+// -- create_status atomicity ----------------------------------------------
 //
-// Requirement 6.1 ("投稿の作成が途中で失敗した ... 投稿本体・メディア添付・
-// 投票・タグ・親投稿の返信カウントを含め、その操作による変更を一切残さない")
-// and 6.4 ("呼び出し元にエラーを返し、成功したかのように振る舞わない").
+// A create that fails part-way through must leave nothing behind — no status
+// row, media attachment, poll, tag, or parent reply-count change — and must
+// surface the error to the caller rather than appearing to succeed.
 //
 // Failure injection: the parent post's `replies_count` (a `BIGINT`, see
 // `migrations/0007_statuses.sql`) is pre-set to `i64::MAX`, so
@@ -681,7 +681,7 @@ async fn poll_with_a_blank_option_is_rejected() {
 // produce this failure.
 
 /// Row counts of every table `create_status` writes to, plus the parent's
-/// own `replies_count` — the exact set Requirement 6.1 enumerates.
+/// own `replies_count` — the exact set a create must roll back together.
 #[derive(Debug, PartialEq, Eq)]
 struct WriteFootprint {
     statuses: i64,
@@ -745,7 +745,7 @@ async fn parent_with_saturated_reply_count(app: &TestApp, service: &TestService,
     parent.id
 }
 
-/// Requirements 6.1, 6.4: when a write late in `create_status` fails, the
+/// When a write late in `create_status` fails, the
 /// status row, its media attachments, its tags, and the parent's reply
 /// count are all left exactly as they were.
 #[tokio::test]
@@ -766,25 +766,25 @@ async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_med
     let err = service
         .create_status(author, input, None)
         .await
-        .expect_err("a failing reply-count increment must surface as an error (Requirement 6.4)");
+        .expect_err("a failing reply-count increment must surface as an error");
     assert_eq!(err.kind, ErrorKind::Server);
 
     assert_eq!(
         write_footprint(&app, parent_id).await,
         before,
         "no status row, media attachment, tag, or reply-count change may survive a failed \
-         create_status (Requirement 6.1)"
+         create_status"
     );
     assert_eq!(
         deliveries(&local_sink, &http_sink),
         deliveries_before,
-        "a failed create must not have dispatched a Create Activity (Requirement 1.2)"
+        "a failed create must not have dispatched a Create Activity"
     );
 
     app.cleanup().await;
 }
 
-/// Requirements 6.1, 6.4: the poll half of the same guarantee — a poll (and
+/// The poll half of the same guarantee — a poll (and
 /// its options) written earlier in the same composite write is rolled back
 /// too. Polls and media are mutually exclusive, hence the separate test.
 #[tokio::test]
@@ -808,28 +808,27 @@ async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_pol
     let err = service
         .create_status(author, input, None)
         .await
-        .expect_err("a failing reply-count increment must surface as an error (Requirement 6.4)");
+        .expect_err("a failing reply-count increment must surface as an error");
     assert_eq!(err.kind, ErrorKind::Server);
 
     assert_eq!(
         write_footprint(&app, parent_id).await,
         before,
         "no status row, poll, poll option, tag, or reply-count change may survive a failed \
-         create_status (Requirement 6.1)"
+         create_status"
     );
     assert_eq!(
         deliveries(&local_sink, &http_sink),
         deliveries_before,
-        "a failed create must not have dispatched a Create Activity (Requirement 1.2)"
+        "a failed create must not have dispatched a Create Activity"
     );
 
     app.cleanup().await;
 }
 
-// -- counter/record agreement on the success path (task 5.4, Requirement
-// 6.3) ---------------------------------------------------------------------
+// -- counter/record agreement on the success path -------------------------
 
-/// Requirement 6.3: after successful `create_status` composite writes, the
+/// After successful `create_status` composite writes, the
 /// parent's cached `replies_count` equals the real number of reply rows, and
 /// the status's tag associations match the tags actually extracted. The two
 /// rollback tests above pin the failure side; the existing success tests
@@ -875,7 +874,7 @@ async fn reply_counter_matches_the_actual_reply_row_count_after_successful_creat
             (replies_count, rows),
             (n, n),
             "after reply {n}, the parent's replies_count and the real reply row count must \
-             agree (Requirement 6.3)"
+             agree"
         );
     }
 
@@ -884,8 +883,7 @@ async fn reply_counter_matches_the_actual_reply_row_count_after_successful_creat
     assert_eq!(
         count_rows(&app, "SELECT COUNT(*) FROM status_tags").await,
         3,
-        "each committed reply must have contributed exactly one tag association \
-         (Requirement 6.3)"
+        "each committed reply must have contributed exactly one tag association"
     );
 
     app.cleanup().await;

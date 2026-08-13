@@ -1603,8 +1603,7 @@ async fn poll_json_resolves_a_registered_shortcode_from_an_option_title() {
 }
 
 // ==== Page-shaped rendering: `GET /api/v1/statuses/:id/context` and
-//      `GET /api/v1/bookmarks` (structural-refactor Requirements 1.1, 5.1,
-//      5.2, 5.6, 5.7) ====
+//      `GET /api/v1/bookmarks` ====
 
 /// The one `statuses` row shape this module's own HTTP surface cannot
 /// create — a row that replies *and* boosts, or carries a poll. Mirrors
@@ -1751,10 +1750,10 @@ fn id_string(id: Id) -> Value {
 /// either batches or must deliberately keep out of the batch:
 ///
 /// - two ancestors by the **same author**, so resolving that author once per
-///   response cannot be told apart from resolving it twice (Requirement 5.2);
+///   response cannot be told apart from resolving it twice;
 /// - a descendant boosting a target the viewer **can** see, nesting a fully
 ///   rendered `reblog` — the target is a row in its own right and belongs in
-///   the same batch (Requirement 5.6);
+///   the same batch;
 /// - a descendant boosting a target the viewer **cannot** see, rendering
 ///   `reblog: null` — dropped whole rather than partially, decided by
 ///   `StatusService::show` (this surface's own visibility rule), not by the
@@ -1766,8 +1765,7 @@ fn id_string(id: Id) -> Value {
 /// - tags, custom emoji, and a favourite, so no material the assembler
 ///   resolves is at its default everywhere in the page.
 ///
-/// `muted` is `false` throughout: this surface has no mute context to offer
-/// (Requirement 4.4).
+/// `muted` is `false` throughout: this surface has no mute context to offer.
 #[tokio::test]
 async fn status_context_renders_every_ancestor_and_descendant_material_in_thread_order() {
     let app = spawn_test_app().await;
@@ -2293,11 +2291,10 @@ async fn bookmark_list_renders_every_material_newest_bookmark_first() {
     app.cleanup().await;
 }
 
-// ==== Query counts for `GET /api/v1/bookmarks` (Requirement 5.1; task 4.6)
-//      ====
+// ==== Query counts for `GET /api/v1/bookmarks` ====
 
-/// Seeds one bookmarked status carrying every material Requirement 5.1
-/// enumerates except the viewer's pin, and hands back its id.
+/// Seeds one bookmarked status carrying every batched per-status material
+/// except the viewer's pin, and hands back its id.
 async fn seed_bookmarked_status(app: &TestApp, author: Id, viewer: Id) -> Id {
     let poll_id = app.runtime.ids.next_id();
     let status_id = seed_status(
@@ -2326,15 +2323,15 @@ async fn seed_bookmarked_status(app: &TestApp, author: Id, viewer: Id) -> Id {
     status_id
 }
 
-/// Requirement 5.1 through the real HTTP surface, and the one place this
-/// spec's record of it is qualified: on `GET /api/v1/bookmarks` the media,
-/// tag, emoji and interaction-state lookups are page-sized — but the **poll
-/// lookups are still per poll**, and that is a known, accepted residual
-/// rather than an oversight.
+/// Page-sized material lookups through the real HTTP surface, with one
+/// qualification: on `GET /api/v1/bookmarks` the media, tag, emoji and
+/// interaction-state lookups are page-sized — but the **poll lookups are
+/// still per poll**, and that is a known, accepted residual rather than an
+/// oversight.
 ///
-/// `tasks.md`'s Implementation Notes carry the decision: this endpoint's
-/// `PollServiceResolver` goes through `PollService::poll`, which applies its
-/// own per-poll `visible_poll_and_status` check, and batching it needs a
+/// The reason: this endpoint's `PollServiceResolver` goes through
+/// `PollService::poll`, which applies its own per-poll
+/// `visible_poll_and_status` check, and batching it needs a
 /// visibility-checking multi-poll entry point `PollService` does not have.
 /// The residual is asserted here as an exact multiple of the page's poll
 /// count rather than excluded from the measurement, so that (a) nobody
@@ -2342,9 +2339,8 @@ async fn seed_bookmarked_status(app: &TestApp, author: Id, viewer: Id) -> Id {
 /// closing the gap later fails this test and forces the note to be struck.
 ///
 /// Measured through `router.oneshot` rather than against the handler
-/// directly: the loop task 4.5 replaced was in the handler, and a page
-/// assembled through the real request path is the thing the requirement is
-/// about.
+/// directly: the per-status loop this replaced was in the handler, and a
+/// page assembled through the real request path is the thing that matters.
 #[tokio::test]
 async fn the_bookmark_page_batches_every_material_except_its_polls() {
     let app = spawn_test_app().await;
@@ -2429,9 +2425,9 @@ async fn the_bookmark_page_batches_every_material_except_its_polls() {
         twenty_log.count(QueryKind::PollPerPoll),
         20 * per_poll,
         "`PollServiceResolver` still resolves one poll at a time — an \
-         accepted residual (tasks.md, Implementation Notes: \
-         \"endpoints.rs の 3 経路では投票だけが件数比例のまま残る\"). \
-         Batching it must strike that note and this assertion together."
+         accepted residual: on this module's three list routes, polls alone \
+         stay proportional to the page's length. Batching it must strike \
+         this assertion together with the note in the module doc comment."
     );
     assert_eq!(
         twenty_log.count(QueryKind::Poll),

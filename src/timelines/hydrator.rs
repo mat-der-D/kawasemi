@@ -323,8 +323,8 @@ impl PollResolver for TolerantPolls {
     /// Two queries for the whole batch — one
     /// [`poll_repository::find_polls_by_ids`], one
     /// [`poll_repository::tally_many`] — regardless of how many ids it is
-    /// given, and none at all for an empty one (Requirement 5.1: a
-    /// timeline's poll lookups must not scale with its length).
+    /// given, and none at all for an empty one, so a timeline's poll lookups
+    /// do not scale with its length.
     fn resolve_many<'a>(&'a self, poll_ids: &'a [Id], viewer: Option<Id>) -> PollResolution<'a> {
         Box::pin(async move {
             let polls = poll_repository::find_polls_by_ids(&self.pool, poll_ids).await?;

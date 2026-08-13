@@ -23,9 +23,8 @@
 //! - [`associate_tag`]: persists one `status_tags` edge, deduplicated by
 //!   the table's own `(status_id, tag_id)` primary key.
 //! - [`tags_for_status`]: the status -> tag read direction, plus its batched
-//!   form [`tags_for_statuses`] (added later, by task 4.2, so a list
-//!   endpoint's tag lookups do not scale with the number of statuses it
-//!   renders).
+//!   form [`tags_for_statuses`] (added later, so a list endpoint's tag
+//!   lookups do not scale with the number of statuses it renders).
 //! - [`status_ids_for_tag`]: the tag -> status read direction (downstream:
 //!   timelines' tag timeline, search's hashtag index, per this task's own
 //!   instruction). Returns `Id`s rather than full `Status` rows deliberately
@@ -80,11 +79,10 @@ fn row_to_tag(row: TagRow) -> Tag {
 /// given `name` establishes that row's `id` permanently, exactly like
 /// `upsert_remote`'s `actor_uri`).
 ///
-/// Generic over `executor` (task 5.1, Requirement 6.3) so
-/// `StatusService::create_status` can drive it against an open
-/// `sqlx::Transaction` (`&mut *tx`) together with the post insertion whose
-/// hashtags it registers; every pre-existing caller keeps passing a bare
-/// `&PgPool` unchanged.
+/// Generic over `executor` so `StatusService::create_status` can drive it
+/// against an open `sqlx::Transaction` (`&mut *tx`) together with the post
+/// insertion whose hashtags it registers; every pre-existing caller keeps
+/// passing a bare `&PgPool` unchanged.
 pub async fn upsert_tag<'e, E>(executor: E, tag: &Tag) -> Result<Tag, AppError>
 where
     E: sqlx::PgExecutor<'e>,
@@ -123,9 +121,8 @@ pub async fn find_tag_by_name(pool: &PgPool, name: &str) -> Result<Option<Tag>, 
 /// (`ON CONFLICT (status_id, tag_id) DO NOTHING`), matching `status_tags`'
 /// own composite primary key's dedup guarantee.
 ///
-/// Generic over `executor` for the same reason as [`upsert_tag`] (task 5.1,
-/// Requirement 6.3) — every pre-existing caller keeps passing a bare
-/// `&PgPool` unchanged.
+/// Generic over `executor` for the same reason as [`upsert_tag`] — every
+/// pre-existing caller keeps passing a bare `&PgPool` unchanged.
 pub async fn associate_tag<'e, E>(executor: E, status_id: Id, tag_id: Id) -> Result<(), AppError>
 where
     E: sqlx::PgExecutor<'e>,
@@ -159,8 +156,8 @@ pub async fn tags_for_status(pool: &PgPool, status_id: Id) -> Result<Vec<Tag>, A
     Ok(rows.into_iter().map(row_to_tag).collect())
 }
 
-/// The batched form of [`tags_for_status`] (structural-refactor task 4.2,
-/// Requirement 5.1): resolves every id in `status_ids` in one query instead
+/// The batched form of [`tags_for_status`]: resolves every id in
+/// `status_ids` in one query instead
 /// of one query per status, so a list endpoint's tag lookups stop scaling
 /// with the number of statuses it returns.
 ///
