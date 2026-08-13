@@ -191,7 +191,7 @@
   - _Requirements: 6.3_
   - _Boundary: StatusRepository, PollRepository, TagRepository, InteractionRepository_
 
-- [ ] 5.2 投稿作成を単一トランザクションにまとめる
+- [x] 5.2 投稿作成を単一トランザクションにまとめる
   - 投稿本体の挿入・メディア添付・投票挿入・タグ登録・親投稿の返信カウント加算を 1 つのトランザクションに入れ、すべて成功した場合のみコミットする
   - **Activity の配送と通知の発行は必ずコミット後**に行う。ネットワーク I/O をトランザクション内に入れると接続を占有し、配送失敗が正常なローカル書き込みを巻き戻す
   - べき等キーの束縛処理の実際の呼び出し位置を確認し、トランザクションに含めるべきかを判断して記録する
@@ -432,3 +432,18 @@
   5.3 の境界内では原子化できない。**feature レベル検証（task 7 / `/kiro-validate-impl`）への
   申し送り事項。** 是正するなら `delete_status` のエグゼキュータ汎用化が前提になる。
   `find_reblog` は 5.3 の実装過程で `PgExecutor<'e>` に変換済み（5.1 の境界の範囲内、純追加）。
+- **task 5.2: `attach_media` はトランザクション reborrow から直接呼べない。** `attach_media<'a, A: Acquire<'a>>`
+  （5.1 で追加）に `A = &mut *tx` を渡すと、`Acquire::Connection` 関連型を await をまたいで保持する形が
+  reborrow のライフタイムに対して汎用化されすぎ、rustc が `implementation of sqlx::Acquire is not
+  general enough` を出して axum ハンドラの `Send` 境界（`server.rs:674`）が壊れる（レビューで再現確認済み）。
+  対応として `status_repository::attach_media_on_conn(conn: &mut PgConnection, ..)` を追加し、
+  `attach_media` はそれに委譲する形にした（ループ本体は完全に同一、SQL 変更なし、既存 8 呼び出し側は無変更）。
+  `insert_poll` は具体的な `sqlx::Transaction` を保持するため同じ問題を踏まない。
+  **task 5.3（InteractionService）はこの問題を踏まない**（そちらの書き込みはすべて `PgExecutor`）。
+- **task 5.2: べき等キーの束縛は意図的にトランザクション外・配送後の元の位置に残した。**
+  `status_idempotency_keys.status_id` は `statuses(id)` への `NOT NULL` FK
+  （`migrations/0007_statuses.sql:243`）なので、コミット前に束縛するとロールバック時にダングリング
+  参照を残すリスクがある。`idempotency::bind` は `&PgPool` を取る（5.1 が意図的に変換対象から外した
+  モジュール）。残存する未解決の窓：commit 成功後 bind 失敗時、リトライで投稿が重複作成される。
+  これは本タスク着手前から存在する既知の残余で、幅は変わっていない（Requirement 6.1 の列挙は
+  投稿本体・メディア添付・投票・タグ・親投稿の返信カウントのみで、べき等キー自体は対象外）。

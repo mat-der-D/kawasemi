@@ -288,6 +288,7 @@ use sqlx::postgres::PgPool;
 use time::OffsetDateTime;
 
 use crate::actor::{ActorDirectory, Handle};
+use crate::api::db::map_server_error;
 use crate::domain::{AccountRef, Id, Visibility};
 use crate::error::AppError;
 use crate::federation::{ActorUrls, DeliverySink, LocalActorLookup, ObjectKind, Recipient};
@@ -662,15 +663,25 @@ where
 
     /// Persists every hashtag [`extract_content_tokens`] found in
     /// `status.content`, associated to `status.id` (Requirement 3.6).
+    ///
+    /// Runs against a caller-supplied connection rather than `self.pool`
+    /// (task 5.2, Requirement 6.1): [`create_status`](Self::create_status)
+    /// drives it with the same open transaction as the status/media/poll
+    /// writes, so a later failure rolls the tag rows back along with
+    /// everything else. Two statements per hashtag means a borrowed
+    /// connection, not a `sqlx::PgExecutor` (which a single `execute`
+    /// consumes) — the same distinction task 5.1 drew between its
+    /// single-statement and multi-statement repository writers.
     async fn persist_tags(
         &self,
+        conn: &mut sqlx::PgConnection,
         status_id: Id,
         hashtags: &[String],
         now: OffsetDateTime,
     ) -> Result<(), AppError> {
         for name in hashtags {
             let tag = tag_repository::upsert_tag(
-                &self.pool,
+                &mut *conn,
                 &Tag {
                     id: self.runtime.ids.next_id(),
                     name: name.clone(),
@@ -678,7 +689,7 @@ where
                 },
             )
             .await?;
-            tag_repository::associate_tag(&self.pool, status_id, tag.id).await?;
+            tag_repository::associate_tag(&mut *conn, status_id, tag.id).await?;
         }
         Ok(())
     }
@@ -805,10 +816,26 @@ where
             edited_at: None,
         };
 
-        status_repository::insert_status(&self.pool, &status).await?;
+        // Task 5.2 (Requirements 6.1, 6.3, 6.4; design.md "複合書き込みの
+        // トランザクション境界（A-3 後）"): the status row, its media
+        // attachments, its poll, its tags, and the parent's reply-count
+        // increment are one transaction that commits only if every one of
+        // them succeeds. An early `?` return below drops `tx` un-committed,
+        // which rolls the whole set back and returns the error to the
+        // caller — never a "looks like it succeeded" partial write.
+        //
+        // Everything with network I/O or an observable side effect outside
+        // this database — Activity delivery and notification emission —
+        // deliberately stays *after* `tx.commit()`: holding a pooled
+        // connection across an outbound HTTP wait would starve the pool,
+        // and a delivery failure would otherwise roll back local writes
+        // that are perfectly valid.
+        let mut tx = self.pool.begin().await.map_err(map_server_error)?;
+
+        status_repository::insert_status(&mut *tx, &status).await?;
 
         if !input.media_ids.is_empty() {
-            status_repository::attach_media(&self.pool, status.id, &input.media_ids).await?;
+            status_repository::attach_media_on_conn(&mut tx, status.id, &input.media_ids).await?;
         }
 
         // Requirement 13.1: create the poll and associate it with the post
@@ -839,19 +866,29 @@ where
                         votes_count: 0,
                     })
                     .collect();
-                poll_repository::insert_poll(&self.pool, &poll, &options).await?;
+                // Under the enclosing transaction `insert_poll`'s own
+                // `begin`/`commit` becomes a nested SAVEPOINT (task 5.1's
+                // Implementation Note) — two extra round trips, and
+                // correctness-preserving: releasing that savepoint does not
+                // commit anything on its own, so a later failure still
+                // rolls the poll back with the rest.
+                poll_repository::insert_poll(&mut *tx, &poll, &options).await?;
                 Some((poll, options))
             } else {
                 None
             };
 
         let extracted = extract_content_tokens(&status.content);
-        self.persist_tags(status.id, &extracted.hashtags, now)
+        self.persist_tags(&mut tx, status.id, &extracted.hashtags, now)
             .await?;
 
         if let Some(parent_id) = status.in_reply_to_id {
-            status_repository::adjust_counts(&self.pool, parent_id, CountKind::Replies, 1).await?;
+            status_repository::adjust_counts(&mut *tx, parent_id, CountKind::Replies, 1).await?;
         }
+
+        tx.commit().await.map_err(map_server_error)?;
+
+        // -- everything below this line runs after the commit ------------
 
         let (addressing, recipients, mentioned_ids) =
             self.build_addressing(&status, &extracted.mentions).await?;
@@ -892,6 +929,32 @@ where
                 .await?;
         }
 
+        // Idempotency-key binding stays *outside* the transaction, in the
+        // position it has always occupied (task 5.2's "べき等キーの束縛
+        // 処理の実際の呼び出し位置を確認し、トランザクションに含めるべきかを
+        // 判断して記録する" — this comment is that record). Three reasons:
+        //
+        // 1. Ledger invariant. `status_idempotency_keys.status_id` is
+        //    `NOT NULL REFERENCES statuses(id)` (`migrations/0007_statuses.sql`),
+        //    and `check_or_reserve`'s `Existing` branch above returns a 500
+        //    when a bound key points at a status that no longer exists. A
+        //    key must therefore only ever be bound to a *committed* status;
+        //    binding inside the transaction would write ledger rows that a
+        //    rollback has to take back with them.
+        // 2. Rollback semantics are already the ones we want. If the
+        //    composite write above fails, nothing is bound, so a client
+        //    retry with the same key is correctly free to create the post
+        //    rather than resolving to a status that was rolled away.
+        // 3. Boundary. `idempotency::bind` takes `&PgPool` and belongs to
+        //    the `IdempotencyStore` module, which task 5.1 deliberately left
+        //    out of its executor-generic conversion; including it here would
+        //    mean a signature change outside this task's `StatusService`
+        //    boundary for no correctness gain.
+        //
+        // Residual (pre-existing, unchanged by this task): a failure between
+        // the commit and this bind leaves a created post whose key never got
+        // bound, so a retry creates a second post. That window is exactly as
+        // wide as before — Requirement 6.1 covers the create's own writes.
         if let Some(key) = idem {
             idempotency::bind(&self.pool, actor_id, key, status.id, now).await?;
         }

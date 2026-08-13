@@ -842,17 +842,20 @@ where
 /// (`media_repository::find_owned`, media-pipeline's own contract) before
 /// calling this; this function only persists the association.
 ///
-/// Generic over `executor` (this module's doc comment, "Task 5.1 additions")
-/// so `StatusService::create_status` can drive it against an open
-/// `sqlx::Transaction` (`&mut *tx`); every pre-existing caller keeps passing
-/// a bare `&PgPool` unchanged. Unlike this module's single-statement writers
-/// the bound here is [`sqlx::Acquire`], not `sqlx::PgExecutor`: a
-/// `PgExecutor` is consumed by the single `execute` it drives, which cannot
-/// serve this function's per-`media_id` loop. Acquiring once and reusing the
-/// borrowed connection keeps the emitted statements byte-identical to the
-/// pre-task-5.1 loop (this is deliberately *not* wrapped in a transaction of
-/// its own — the previous pool-driven behavior had none, and task 5.2's
-/// caller supplies the enclosing one).
+/// Generic over `executor` (this module's doc comment, "Task 5.1 additions");
+/// every pre-existing caller keeps passing a bare `&PgPool` unchanged. Unlike
+/// this module's single-statement writers the bound here is
+/// [`sqlx::Acquire`], not `sqlx::PgExecutor`: a `PgExecutor` is consumed by
+/// the single `execute` it drives, which cannot serve this function's
+/// per-`media_id` loop. Acquiring once and reusing the borrowed connection
+/// keeps the emitted statements byte-identical to the pre-task-5.1 loop
+/// (this is deliberately *not* wrapped in a transaction of its own — the
+/// previous pool-driven behavior had none, and a transactional caller
+/// supplies the enclosing one).
+///
+/// Callers that already hold an open transaction use
+/// [`attach_media_on_conn`] instead — see its own doc comment for why the
+/// generic form cannot serve them.
 pub async fn attach_media<'a, A>(
     executor: A,
     status_id: Id,
@@ -862,7 +865,30 @@ where
     A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
 {
     let mut conn = executor.acquire().await.map_err(map_server_error)?;
+    attach_media_on_conn(&mut conn, status_id, media_ids).await
+}
 
+/// [`attach_media`] against an already-acquired connection — the variant
+/// `StatusService::create_status` uses to run this loop inside its own open
+/// transaction (task 5.2). Identical statements, identical order; the only
+/// difference is that the connection comes from the caller.
+///
+/// This concrete-`&mut PgConnection` variant exists because task 5.1's
+/// generic [`sqlx::Acquire`] form, while callable from a transaction, yields
+/// a future that cannot be *proven* `Send`: the value it holds across awaits
+/// has type `<A as Acquire>::Connection`, and when `A` is substituted with a
+/// reborrow like `&mut *tx` the auto-trait leak check universalizes over that
+/// borrow's region and reports "implementation of `sqlx::Acquire` is not
+/// general enough". An axum handler requires a `Send` future, so
+/// `create_status` could not otherwise call it (`insert_poll` is unaffected:
+/// it holds a concrete `sqlx::Transaction`, not an associated type). Adding
+/// this variant is purely additive — [`attach_media`]'s own signature,
+/// statements, and every existing caller are untouched.
+pub async fn attach_media_on_conn(
+    conn: &mut sqlx::PgConnection,
+    status_id: Id,
+    media_ids: &[Id],
+) -> Result<(), AppError> {
     for (position, media_id) in media_ids.iter().enumerate() {
         sqlx::query("INSERT INTO status_media (status_id, media_id, position) VALUES ($1, $2, $3)")
             .bind(status_id.as_i64())

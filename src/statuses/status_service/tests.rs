@@ -664,6 +664,168 @@ async fn poll_with_a_blank_option_is_rejected() {
     app.cleanup().await;
 }
 
+// -- create_status atomicity (task 5.2) -----------------------------------
+//
+// Requirement 6.1 ("投稿の作成が途中で失敗した ... 投稿本体・メディア添付・
+// 投票・タグ・親投稿の返信カウントを含め、その操作による変更を一切残さない")
+// and 6.4 ("呼び出し元にエラーを返し、成功したかのように振る舞わない").
+//
+// Failure injection: the parent post's `replies_count` (a `BIGINT`, see
+// `migrations/0007_statuses.sql`) is pre-set to `i64::MAX`, so
+// `status_repository::adjust_counts(.., Replies, 1)` — the *last* write in
+// `create_status`'s composite write — overflows and Postgres raises
+// `22003 numeric_value_out_of_range`. Every earlier write (status row,
+// media attachment, poll, tags) has already been issued at that point, so
+// the assertions below genuinely observe a rollback rather than
+// never-attempted work. No production code path is stubbed or bypassed to
+// produce this failure.
+
+/// Row counts of every table `create_status` writes to, plus the parent's
+/// own `replies_count` — the exact set Requirement 6.1 enumerates.
+#[derive(Debug, PartialEq, Eq)]
+struct WriteFootprint {
+    statuses: i64,
+    status_media: i64,
+    polls: i64,
+    poll_options: i64,
+    tags: i64,
+    status_tags: i64,
+    parent_replies_count: i64,
+}
+
+/// `sql` is always one of this module's own literal `SELECT COUNT(*)`
+/// statements (sqlx 0.9 only accepts `&'static str` here anyway).
+async fn count_rows(app: &TestApp, sql: &'static str) -> i64 {
+    let (n,): (i64,) = sqlx::query_as(sql)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap_or_else(|e| panic!("`{sql}` must succeed: {e}"));
+    n
+}
+
+async fn write_footprint(app: &TestApp, parent_id: Id) -> WriteFootprint {
+    let (parent_replies_count,): (i64,) =
+        sqlx::query_as("SELECT replies_count FROM statuses WHERE id = $1")
+            .bind(parent_id.as_i64())
+            .fetch_one(&app.pool)
+            .await
+            .expect("the parent status row must exist");
+
+    WriteFootprint {
+        statuses: count_rows(app, "SELECT COUNT(*) FROM statuses").await,
+        status_media: count_rows(app, "SELECT COUNT(*) FROM status_media").await,
+        polls: count_rows(app, "SELECT COUNT(*) FROM polls").await,
+        poll_options: count_rows(app, "SELECT COUNT(*) FROM poll_options").await,
+        tags: count_rows(app, "SELECT COUNT(*) FROM tags").await,
+        status_tags: count_rows(app, "SELECT COUNT(*) FROM status_tags").await,
+        parent_replies_count,
+    }
+}
+
+/// Creates a real parent post and saturates its `replies_count`, so the
+/// reply-count increment at the end of `create_status`'s composite write is
+/// guaranteed to fail. Returns the parent's id.
+async fn parent_with_saturated_reply_count(app: &TestApp, service: &TestService, author: Id) -> Id {
+    let parent = service
+        .create_status(
+            author,
+            create_input("parent post", Visibility::Public),
+            None,
+        )
+        .await
+        .expect("the parent post itself must be created normally");
+
+    sqlx::query("UPDATE statuses SET replies_count = $1 WHERE id = $2")
+        .bind(i64::MAX)
+        .bind(parent.id.as_i64())
+        .execute(&app.pool)
+        .await
+        .expect("saturating the parent's replies_count must succeed");
+
+    parent.id
+}
+
+/// Requirements 6.1, 6.4: when a write late in `create_status` fails, the
+/// status row, its media attachments, its tags, and the parent's reply
+/// count are all left exactly as they were.
+#[tokio::test]
+async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_media() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let (service, local_sink, http_sink) = service(&app, author, "alice", false);
+
+    let parent_id = parent_with_saturated_reply_count(&app, &service, author).await;
+    let media_id = insert_test_media(&app, author).await;
+    let before = write_footprint(&app, parent_id).await;
+    let deliveries_before = deliveries(&local_sink, &http_sink);
+
+    let mut input = create_input("a reply with #rollback and media", Visibility::Public);
+    input.in_reply_to_id = Some(parent_id);
+    input.media_ids = vec![media_id];
+
+    let err = service
+        .create_status(author, input, None)
+        .await
+        .expect_err("a failing reply-count increment must surface as an error (Requirement 6.4)");
+    assert_eq!(err.kind, ErrorKind::Server);
+
+    assert_eq!(
+        write_footprint(&app, parent_id).await,
+        before,
+        "no status row, media attachment, tag, or reply-count change may survive a failed \
+         create_status (Requirement 6.1)"
+    );
+    assert_eq!(
+        deliveries(&local_sink, &http_sink),
+        deliveries_before,
+        "a failed create must not have dispatched a Create Activity (Requirement 1.2)"
+    );
+
+    app.cleanup().await;
+}
+
+/// Requirements 6.1, 6.4: the poll half of the same guarantee — a poll (and
+/// its options) written earlier in the same composite write is rolled back
+/// too. Polls and media are mutually exclusive, hence the separate test.
+#[tokio::test]
+async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_poll() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let (service, local_sink, http_sink) = service(&app, author, "alice", false);
+
+    let parent_id = parent_with_saturated_reply_count(&app, &service, author).await;
+    let before = write_footprint(&app, parent_id).await;
+    let deliveries_before = deliveries(&local_sink, &http_sink);
+
+    let mut input = create_input("a reply with #rollback and a poll", Visibility::Public);
+    input.in_reply_to_id = Some(parent_id);
+    input.poll = Some(CreateStatusPoll {
+        options: vec!["yes".to_string(), "no".to_string()],
+        multiple: false,
+        expires_at: None,
+    });
+
+    let err = service
+        .create_status(author, input, None)
+        .await
+        .expect_err("a failing reply-count increment must surface as an error (Requirement 6.4)");
+    assert_eq!(err.kind, ErrorKind::Server);
+
+    assert_eq!(
+        write_footprint(&app, parent_id).await,
+        before,
+        "no status row, poll, poll option, tag, or reply-count change may survive a failed \
+         create_status (Requirement 6.1)"
+    );
+    assert_eq!(
+        deliveries(&local_sink, &http_sink),
+        deliveries_before,
+        "a failed create must not have dispatched a Create Activity (Requirement 1.2)"
+    );
+
+    app.cleanup().await;
+}
+
 // -- show / context ---------------------------------------------------------
 
 /// Requirement 6.4: an unauthenticated viewer only sees `public` posts —
