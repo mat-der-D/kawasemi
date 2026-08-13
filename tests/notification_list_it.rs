@@ -431,7 +431,7 @@ async fn list_returns_only_the_authenticated_actors_own_notifications_newest_fir
         &app,
         app_id,
         alice.id,
-        &["write:statuses", "read:notifications"],
+        &["write:statuses", "read:notifications", "follow"],
     )
     .await;
     let bob_token = issue_test_token(&app, app_id, bob.id, &["read:notifications"]).await;
