@@ -117,6 +117,24 @@ use crate::timelines;
 #[cfg(test)]
 mod tests;
 
+/// The single implementation of the module-wiring sequence
+/// (structural-refactor task 6.1, Requirements 7.1, 7.2, 7.3, 7.5). Not yet
+/// called from [`build_state`] below — tasks 6.2/6.3/6.4 migrate this
+/// module's own `build_state`, `crate::test_harness::spawn_test_app`, and
+/// `crate::federation::test_harness::spawn_paired_instance` onto it.
+///
+/// Until those three tasks land, nothing calls into this module, so
+/// `dead_code` is allowed for it as a whole (`pub(crate)` alone does not
+/// silence the lint, and this crate builds with `-D warnings`). The allow is
+/// scoped to this one `mod` declaration — the single line task 6.2 deletes
+/// once the first real caller exists — rather than being scattered over the
+/// module's individual items.
+#[allow(
+    dead_code,
+    reason = "wired into the three startup paths by tasks 6.2/6.3/6.4; task 6.1 only extracts it"
+)]
+pub(crate) mod wiring;
+
 /// Aggregated startup failure (design.md's Bootstrap Service Interface,
 /// Requirement 1.2). Each variant retains the real, original error from the
 /// stage that failed — never a stringly-typed summary — so a caller (here,
