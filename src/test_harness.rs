@@ -132,6 +132,13 @@ pub(crate) mod reaper;
 /// task 4.2 gates it.
 pub mod sweep;
 
+/// The lightweight fixture tier: an isolated schema and a migrated pool with
+/// no running instance around them (test-infrastructure Requirements
+/// 4.1-4.5). Not `#[cfg(test)]`, for the same reason [`reaper`] is not:
+/// `tests/*.rs` integration binaries are a separate crate and can only see
+/// `pub` items.
+pub mod db_fixture;
+
 /// SQL-statement counting for this crate's own unit tests. `#[cfg(test)]`
 /// because it exists only to measure the lib's tests and must not reach the
 /// shipped library, unlike the rest of this module — which `tests/*.rs`
@@ -357,6 +364,83 @@ async fn drop_schema(schema: &str) {
     }
 }
 
+/// The isolated database a fixture is built on: a freshly created schema, a
+/// pool pinned to it with the embedded migrations already applied, and the
+/// `DatabaseConfig` that pool was established from.
+///
+/// Exists so the two fixtures in this module tree — [`spawn_test_app`] and
+/// [`db_fixture::spawn_test_db`] — share one implementation of the
+/// schema/pool/migrate sequence rather than each carrying its own copy. That
+/// sequence is exactly the part they have in common, and the part whose
+/// details (the `search_path` pinning convention, the pool size, the startup
+/// sweep) must not drift between them: a second copy would mean a `TestDb`
+/// isolated by different rules than a `TestApp`, which the isolation
+/// guarantee both rely on cannot survive.
+pub(crate) struct IsolatedDb {
+    pub(crate) pool: PgPool,
+    pub(crate) schema: String,
+    /// Retained because [`spawn_test_app`] needs the very same
+    /// `DatabaseConfig` inside the `AppConfig` it synthesizes, and rebuilding
+    /// it there would reintroduce the schema-scoped URL construction this
+    /// helper exists to own.
+    pub(crate) db_config: DatabaseConfig,
+}
+
+/// Creates a fresh isolated schema and returns a migrated pool pinned to it
+/// (Requirements 8.2, 8.4), running the once-per-process startup sweep first.
+/// Panics on any failure, for the reason [`create_schema`] documents: a
+/// caller cannot do anything useful with a partially-initialized fixture.
+async fn establish_isolated_db() -> IsolatedDb {
+    // Before anything else in the process's first fixture: reclaim what
+    // earlier runs abandoned, so a suite never has to be preceded by a manual
+    // cleanup step (Requirement 1.2). Subsequent calls return immediately —
+    // the once-per-process guard (Requirement 3.4) lives inside
+    // `sweep_orphans`, so every fixture built on this helper inherits it by
+    // calling the same function rather than by repeating the trigger.
+    sweep::sweep_orphans().await;
+
+    let schema = unique_schema_name();
+    create_schema(&schema).await;
+
+    // `max_connections: 2` rather than 5: every connection here is opened
+    // eagerly, so a pool's full size is the unit in which a fixture costs
+    // the shared server. This started as a mitigation for `Drop` releasing
+    // nothing at all (at 5, the server's ~97 usable slots were exhausted
+    // after ~19 uncleaned instances, which is what made a single-process
+    // `cargo test --lib` run fail en masse with `PoolTimedOut`); `Drop` now
+    // hands the pool to `reaper::HarnessReaper`, so uncleaned instances are
+    // reclaimed rather than accumulated. The reduced size is kept because it
+    // still bounds what is held while a reclaim is in flight, and because
+    // no test needs more.
+    //
+    // Not 1: at a single connection
+    // `federation::outbound::worker::tests::run_once_marks_a_job_failed_
+    // immediately_when_sender_no_longer_resolves` deterministically claims
+    // zero jobs, even though `DbDeliveryQueue::claim_due` is a single
+    // `FOR UPDATE SKIP LOCKED` statement that should not depend on pool
+    // size. That interaction is unexplained and out of scope here, so this
+    // mitigation stops at the largest reduction that provably changes no
+    // test outcome.
+    let db_config = DatabaseConfig {
+        url: Secret::new(schema_scoped_url(&base_test_db_url(), &schema)),
+        max_connections: 2,
+        acquire_timeout: Duration::from_secs(5),
+    };
+    let pool = db::establish_pool(&db_config)
+        .await
+        .expect("establishing the isolated per-test-instance connection pool must succeed");
+
+    migrate::apply_migrations(&pool)
+        .await
+        .expect("applying embedded migrations to the isolated test schema must succeed");
+
+    IsolatedDb {
+        pool,
+        schema,
+        db_config,
+    }
+}
+
 /// A running test instance of the application (design.md's "TestHarness"
 /// Service Interface): a real, connectable [`address`](Self::address), a
 /// [`pool`](Self::pool) pinned to a schema isolated from every other
@@ -578,48 +662,11 @@ impl Drop for TestApp {
 /// `should_run_against_real_database` convention), since this function's
 /// design.md-specified signature returns `TestApp` directly, not a `Result`.
 pub async fn spawn_test_app() -> TestApp {
-    // Before anything else in the process's first fixture: reclaim what
-    // earlier runs abandoned, so a suite never has to be preceded by a manual
-    // cleanup step (Requirement 1.2). Subsequent calls return immediately —
-    // the once-per-process guard (Requirement 3.4) lives inside
-    // `sweep_orphans` so that `spawn_test_db` (task 3.1) inherits it by
-    // calling the same function rather than by repeating the trigger.
-    sweep::sweep_orphans().await;
-
-    let schema = unique_schema_name();
-    create_schema(&schema).await;
-
-    // `max_connections: 2` rather than 5: every connection here is opened
-    // eagerly, so a pool's full size is the unit in which a `TestApp` costs
-    // the shared server. This started as a mitigation for `Drop` releasing
-    // nothing at all (at 5, the server's ~97 usable slots were exhausted
-    // after ~19 uncleaned instances, which is what made a single-process
-    // `cargo test --lib` run fail en masse with `PoolTimedOut`); `Drop` now
-    // hands the pool to `reaper::HarnessReaper`, so uncleaned instances are
-    // reclaimed rather than accumulated. The reduced size is kept because it
-    // still bounds what is held while a reclaim is in flight, and because
-    // no test needs more.
-    //
-    // Not 1: at a single connection
-    // `federation::outbound::worker::tests::run_once_marks_a_job_failed_
-    // immediately_when_sender_no_longer_resolves` deterministically claims
-    // zero jobs, even though `DbDeliveryQueue::claim_due` is a single
-    // `FOR UPDATE SKIP LOCKED` statement that should not depend on pool
-    // size. That interaction is unexplained and out of scope here, so this
-    // mitigation stops at the largest reduction that provably changes no
-    // test outcome.
-    let db_config = DatabaseConfig {
-        url: Secret::new(schema_scoped_url(&base_test_db_url(), &schema)),
-        max_connections: 2,
-        acquire_timeout: Duration::from_secs(5),
-    };
-    let pool = db::establish_pool(&db_config)
-        .await
-        .expect("establishing the isolated per-test-instance connection pool must succeed");
-
-    migrate::apply_migrations(&pool)
-        .await
-        .expect("applying embedded migrations to the isolated test schema must succeed");
+    let IsolatedDb {
+        pool,
+        schema,
+        db_config,
+    } = establish_isolated_db().await;
 
     // `clock`/`ids`/`rng` stay deterministic (Requirement 8.3); `keys` is
     // swapped for the real, DB-backed `DbSigningKeyProvider` (task 6.1)

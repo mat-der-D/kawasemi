@@ -42,7 +42,7 @@
 
 - [ ] 3. 軽量 DB フィクスチャへの移行
 
-- [ ] 3.1 軽量フィクスチャを実装する
+- [x] 3.1 軽量フィクスチャを実装する
   - 隔離スキーマとマイグレーション適用済みプールのみを提供する
   - ルーター構築・待受開始・サーバータスク生成・モジュール構築・署名鍵生成を行わない
   - 決定性の注入（clock / id / RNG）は既存の実インスタンス用フィクスチャと同一の規約に従う
@@ -140,6 +140,18 @@
 - 1.1: `src/test_harness.rs` の `mod reaper;` に付けた `#[allow(dead_code)]` は 1.1/1.2 分割による
   過渡的なもの。`src/lib.rs` が `pub mod test_harness` を無ゲートで公開しているため、production
   caller（`Drop for TestApp`）が来る 1.2 まで全項目が未使用警告になる。**1.2 でこの属性を外すこと。**
+- 3.1: `TestDb.runtime.keys` は `RuntimeContext::deterministic` の `FixedSigningKeyProvider` の
+  まま。design の TestDb Invariant が clock / id / RNG のみを列挙し keys を意図的に外していること、
+  および「署名鍵生成を行わない」が根拠。`DbSigningKeyProvider` は `KeyCache` と `ActorModule` を
+  要求するので、そもそも TestDb が禁じられているモジュール構築が必要になる。
+- 3.1: schema+pool+migrate の並びは `establish_isolated_db()` に集約済み。`spawn_test_app` と
+  `spawn_test_db` の両方がこれを通る。新しいフィクスチャを足すときもここを通すこと。
+- **未解決の欠陥（要 follow-up、本 spec の要件 3.1 / 1.2 に関わる）**: `src/federation/test_harness.rs`
+  の連合ペアハーネスは schema+pool+migrate の 3 つ目の複製を持ち、(a) 起動時スイープを呼ばず、
+  (b) スキーマ接頭辞が `kawasemi_federation_pair_` で `HARNESS_SCHEMA_PREFIX` に一致しない。
+  結果として**異常終了で孤立した連合ペアのスキーマはどのスイープでも回収できない**。正常終了時は
+  `TestApp` の `Drop` がリーパーへ委譲するので実害は出ていない（実測でも残存 0）。タスク 6.1 の
+  一括実行前に判断が要る。
 - 2.2: 回収閾値は 2 時間（フルスイート 891 秒の約 8 倍）。誤射しても被害は「そのプロセスの以後の
   クエリが `relation does not exist` で大きな音を立てて落ちる」であって静かな破壊ではないが、
   過剰回収は不可逆なので長めに倒してある。
