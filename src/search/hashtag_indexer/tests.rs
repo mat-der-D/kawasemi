@@ -5,7 +5,7 @@
 //! テストが通る".
 //!
 //! Mirrors `src/search/hashtag_repository/tests.rs`'s established convention
-//! (`crate::test_harness::spawn_test_app` for an isolated, already-migrated
+//! (`crate::test_harness::db_fixture::spawn_test_db` for an isolated, already-migrated
 //! schema and a deterministic `RuntimeContext`), but — unlike that module's
 //! own tests, which never touch `statuses`/`tags`/`status_tags` — this
 //! module's fixtures *do* insert real upstream rows (`statuses` via
@@ -20,10 +20,10 @@
 //! below).
 //!
 //! The harness's own `RuntimeContext` uses a `FixedClock`
-//! (`app.runtime.clock.now()` always returns the same instant within one
-//! `TestApp`), so within a single test every inserted status shares the same
+//! (`db.runtime.clock.now()` always returns the same instant within one
+//! `TestDb`), so within a single test every inserted status shares the same
 //! `created_at` — this is precisely why the watermark's tie-break on `id`
-//! (monotonically increasing via `app.runtime.ids.next_id()`,
+//! (monotonically increasing via `db.runtime.ids.next_id()`,
 //! `SeqIdGenerator`) matters, and these tests deliberately rely on `id`
 //! ordering rather than `created_at` ordering to distinguish "older" from
 //! "newer" statuses.
@@ -34,17 +34,17 @@ use crate::search::hashtag_repository::{load_watermark, match_hashtags};
 use crate::statuses::model::{Status, Tag};
 use crate::statuses::status_repository::insert_status;
 use crate::statuses::tag_repository::{associate_tag, upsert_tag};
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 /// Builds and inserts a minimal `statuses` row (mirrors
 /// `src/statuses/status_repository/tests.rs::sample_status`'s "synthetic
 /// actor_id, logical-only reference" convention), returning its id.
-async fn insert_status_row(app: &TestApp) -> Id {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+async fn insert_status_row(db: &TestDb) -> Id {
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let status = Status {
         id,
-        actor_id: app.runtime.ids.next_id(),
+        actor_id: db.runtime.ids.next_id(),
         uri: format!("https://example.test/statuses/{}", id.as_i64()),
         url: Some(format!("https://example.test/@actor/{}", id.as_i64())),
         content: "hello world".to_string(),
@@ -63,7 +63,7 @@ async fn insert_status_row(app: &TestApp) -> Id {
         created_at: now,
         edited_at: None,
     };
-    insert_status(&app.pool, &status)
+    insert_status(&db.pool, &status)
         .await
         .expect("insert_status must succeed for a fresh id/uri");
     id
@@ -74,26 +74,26 @@ async fn insert_status_row(app: &TestApp) -> Id {
 /// `search_tags`/`search_status_tags`) — standing in for
 /// `StatusService::create_status`'s hashtag extraction, which already
 /// happened by the time `catch_up_from_watermark` runs.
-async fn tag_status(app: &TestApp, status_id: Id, name: &str) {
+async fn tag_status(db: &TestDb, status_id: Id, name: &str) {
     let tag = Tag {
-        id: app.runtime.ids.next_id(),
+        id: db.runtime.ids.next_id(),
         name: name.to_string(),
-        created_at: app.runtime.clock.now(),
+        created_at: db.runtime.clock.now(),
     };
-    let tag = upsert_tag(&app.pool, &tag)
+    let tag = upsert_tag(&db.pool, &tag)
         .await
         .expect("upsert_tag must succeed");
-    associate_tag(&app.pool, status_id, tag.id)
+    associate_tag(&db.pool, status_id, tag.id)
         .await
         .expect("associate_tag must succeed");
 }
 
 /// Inserts a status carrying `tag_names` (each an upstream-already-extracted
 /// hashtag), returning the status id.
-async fn insert_tagged_status(app: &TestApp, tag_names: &[&str]) -> Id {
-    let status_id = insert_status_row(app).await;
+async fn insert_tagged_status(db: &TestDb, tag_names: &[&str]) -> Id {
+    let status_id = insert_status_row(db).await;
     for name in tag_names {
-        tag_status(app, status_id, name).await;
+        tag_status(db, status_id, name).await;
     }
     status_id
 }
@@ -108,15 +108,15 @@ async fn insert_tagged_status(app: &TestApp, tag_names: &[&str]) -> Id {
 /// `match_hashtags`.
 #[tokio::test]
 async fn catch_up_from_watermark_backfills_existing_posts_hashtags() {
-    let app = spawn_test_app().await;
-    insert_tagged_status(&app, &["rustlang", "mastodon"]).await;
+    let db = spawn_test_db().await;
+    insert_tagged_status(&db, &["rustlang", "mastodon"]).await;
 
-    let processed = catch_up_from_watermark(&app.pool, &app.runtime)
+    let processed = catch_up_from_watermark(&db.pool, &db.runtime)
         .await
         .expect("catch_up_from_watermark must succeed");
     assert_eq!(processed, 1, "exactly one status was processed");
 
-    let mut names: Vec<String> = match_hashtags(&app.pool, "", 20, 0)
+    let mut names: Vec<String> = match_hashtags(&db.pool, "", 20, 0)
         .await
         .expect("match_hashtags must succeed")
         .into_iter()
@@ -125,7 +125,7 @@ async fn catch_up_from_watermark_backfills_existing_posts_hashtags() {
     names.sort();
     assert_eq!(names, vec!["mastodon".to_string(), "rustlang".to_string()]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A status backed by zero upstream hashtags is still counted as processed
@@ -135,15 +135,15 @@ async fn catch_up_from_watermark_backfills_existing_posts_hashtags() {
 /// further once such a status is the newest one.
 #[tokio::test]
 async fn catch_up_from_watermark_advances_past_a_status_with_zero_hashtags() {
-    let app = spawn_test_app().await;
-    insert_tagged_status(&app, &[]).await;
+    let db = spawn_test_db().await;
+    insert_tagged_status(&db, &[]).await;
 
-    let processed = catch_up_from_watermark(&app.pool, &app.runtime)
+    let processed = catch_up_from_watermark(&db.pool, &db.runtime)
         .await
         .expect("catch_up_from_watermark must succeed");
     assert_eq!(processed, 1, "the zero-hashtag status is still processed");
 
-    let rerun = catch_up_from_watermark(&app.pool, &app.runtime)
+    let rerun = catch_up_from_watermark(&db.pool, &db.runtime)
         .await
         .expect("rerunning catch_up_from_watermark must succeed");
     assert_eq!(
@@ -151,7 +151,7 @@ async fn catch_up_from_watermark_advances_past_a_status_with_zero_hashtags() {
         "the watermark must have advanced past the zero-hashtag status"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- idempotency / re-run behavior ------------------------------------------
@@ -163,22 +163,22 @@ async fn catch_up_from_watermark_advances_past_a_status_with_zero_hashtags() {
 /// rows or double-counted `search_tags.statuses_count`.
 #[tokio::test]
 async fn catch_up_from_watermark_rerun_with_no_new_statuses_is_a_safe_no_op() {
-    let app = spawn_test_app().await;
-    insert_tagged_status(&app, &["idempotent"]).await;
+    let db = spawn_test_db().await;
+    insert_tagged_status(&db, &["idempotent"]).await;
 
-    let first = catch_up_from_watermark(&app.pool, &app.runtime)
+    let first = catch_up_from_watermark(&db.pool, &db.runtime)
         .await
         .expect("first catch_up_from_watermark must succeed");
     assert_eq!(first, 1);
 
-    let second = catch_up_from_watermark(&app.pool, &app.runtime)
+    let second = catch_up_from_watermark(&db.pool, &db.runtime)
         .await
         .expect("second catch_up_from_watermark must succeed");
     assert_eq!(second, 0, "no new statuses to process on rerun");
 
     let tag_row: (i64,) = sqlx::query_as("SELECT statuses_count FROM search_tags WHERE name = $1")
         .bind("idempotent")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("fetching the search_tags row must succeed");
     assert_eq!(
@@ -187,7 +187,7 @@ async fn catch_up_from_watermark_rerun_with_no_new_statuses_is_a_safe_no_op() {
     );
 
     let association_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM search_status_tags")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting search_status_tags rows must succeed");
     assert_eq!(
@@ -195,7 +195,7 @@ async fn catch_up_from_watermark_rerun_with_no_new_statuses_is_a_safe_no_op() {
         "no duplicate (tag_id, status_id) association was created by the rerun"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- watermark-scoped catch-up (only newer statuses processed) -------------
@@ -206,22 +206,22 @@ async fn catch_up_from_watermark_rerun_with_no_new_statuses_is_a_safe_no_op() {
 /// by the next run while the already-processed status is not reprocessed.
 #[tokio::test]
 async fn catch_up_from_watermark_only_processes_statuses_newer_than_watermark() {
-    let app = spawn_test_app().await;
-    insert_tagged_status(&app, &["oldtag"]).await;
+    let db = spawn_test_db().await;
+    insert_tagged_status(&db, &["oldtag"]).await;
 
-    let first = catch_up_from_watermark(&app.pool, &app.runtime)
+    let first = catch_up_from_watermark(&db.pool, &db.runtime)
         .await
         .expect("first catch_up_from_watermark must succeed");
     assert_eq!(first, 1);
 
-    insert_tagged_status(&app, &["newtag"]).await;
+    insert_tagged_status(&db, &["newtag"]).await;
 
-    let second = catch_up_from_watermark(&app.pool, &app.runtime)
+    let second = catch_up_from_watermark(&db.pool, &db.runtime)
         .await
         .expect("second catch_up_from_watermark must succeed");
     assert_eq!(second, 1, "only the newly inserted status is processed");
 
-    let mut names: Vec<String> = match_hashtags(&app.pool, "", 20, 0)
+    let mut names: Vec<String> = match_hashtags(&db.pool, "", 20, 0)
         .await
         .expect("match_hashtags must succeed")
         .into_iter()
@@ -234,7 +234,7 @@ async fn catch_up_from_watermark_only_processes_statuses_newer_than_watermark() 
         "both the old and new tag must be indexed, but the old one only once"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// After a successful run, `load_watermark` reflects the newest processed
@@ -242,20 +242,20 @@ async fn catch_up_from_watermark_only_processes_statuses_newer_than_watermark() 
 /// this indexer itself relies on for its next catch-up scan.
 #[tokio::test]
 async fn catch_up_from_watermark_advances_the_saved_watermark() {
-    let app = spawn_test_app().await;
-    let status_id = insert_tagged_status(&app, &["watermarked"]).await;
+    let db = spawn_test_db().await;
+    let status_id = insert_tagged_status(&db, &["watermarked"]).await;
 
-    catch_up_from_watermark(&app.pool, &app.runtime)
+    catch_up_from_watermark(&db.pool, &db.runtime)
         .await
         .expect("catch_up_from_watermark must succeed");
 
-    let watermark = load_watermark(&app.pool)
+    let watermark = load_watermark(&db.pool)
         .await
         .expect("load_watermark must succeed")
         .expect("a watermark was saved");
     assert_eq!(watermark.1, status_id);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- read-only against upstream tables ---------------------------------------
@@ -266,36 +266,36 @@ async fn catch_up_from_watermark_advances_the_saved_watermark() {
 /// `search_tags`/`search_status_tags`/`search_index_watermark` tables change.
 #[tokio::test]
 async fn catch_up_from_watermark_never_writes_upstream_tables() {
-    let app = spawn_test_app().await;
-    insert_tagged_status(&app, &["readonly"]).await;
+    let db = spawn_test_db().await;
+    insert_tagged_status(&db, &["readonly"]).await;
 
     let statuses_before: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM statuses")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting statuses rows must succeed");
     let tags_before: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tags")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting tags rows must succeed");
     let status_tags_before: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM status_tags")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting status_tags rows must succeed");
 
-    catch_up_from_watermark(&app.pool, &app.runtime)
+    catch_up_from_watermark(&db.pool, &db.runtime)
         .await
         .expect("catch_up_from_watermark must succeed");
 
     let statuses_after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM statuses")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting statuses rows must succeed");
     let tags_after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tags")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting tags rows must succeed");
     let status_tags_after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM status_tags")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting status_tags rows must succeed");
 
@@ -309,7 +309,7 @@ async fn catch_up_from_watermark_never_writes_upstream_tables() {
         "status_tags row count unchanged"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- multiple statuses sharing a tag -----------------------------------------
@@ -319,21 +319,21 @@ async fn catch_up_from_watermark_never_writes_upstream_tables() {
 /// reflects both.
 #[tokio::test]
 async fn catch_up_from_watermark_indexes_distinct_statuses_sharing_a_tag() {
-    let app = spawn_test_app().await;
-    insert_tagged_status(&app, &["popular"]).await;
-    insert_tagged_status(&app, &["popular"]).await;
+    let db = spawn_test_db().await;
+    insert_tagged_status(&db, &["popular"]).await;
+    insert_tagged_status(&db, &["popular"]).await;
 
-    let processed = catch_up_from_watermark(&app.pool, &app.runtime)
+    let processed = catch_up_from_watermark(&db.pool, &db.runtime)
         .await
         .expect("catch_up_from_watermark must succeed");
     assert_eq!(processed, 2);
 
     let tag_row: (i64,) = sqlx::query_as("SELECT statuses_count FROM search_tags WHERE name = $1")
         .bind("popular")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("fetching the search_tags row must succeed");
     assert_eq!(tag_row.0, 2);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

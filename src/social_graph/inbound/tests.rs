@@ -5,7 +5,7 @@
 //! 再受信で状態が二重変更されない状態".
 //!
 //! Mirrors `follow_service/tests.rs`'s established convention
-//! (`crate::test_harness::spawn_test_app`, `create_test_actor`/
+//! (`crate::test_harness::db_fixture::spawn_test_db`, `create_test_actor`/
 //! `create_test_remote` real-row fixtures, a `RecordingSink` `DeliverySink`
 //! double). Activities fed to `handle()` are built via a *real*
 //! `ActivityBuilder` (the same production Follow/Accept/Block/Undo JSON
@@ -45,7 +45,7 @@ use crate::social_graph::activity_builder::PgRemoteActorLookup;
 use crate::social_graph::model::FollowRequestDirection;
 use crate::social_graph::repository as sg_repository;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 const TEST_DOMAIN: &str = "kawasemi.example";
 
@@ -53,14 +53,14 @@ const TEST_DOMAIN: &str = "kawasemi.example";
 
 /// Creates a real owner + local actor row, returning the actor's `Id` --
 /// mirrors `follow_service/tests.rs::create_test_actor` exactly.
-async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+async fn create_test_actor(db: &TestDb, handle: &str) -> Id {
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
     let actor = crate::actor::model::LocalActor {
         id: actor_id,
         owner_id,
@@ -72,7 +72,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
         created_at: now,
         updated_at: now,
     };
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -87,15 +87,15 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
 
 /// Marks `actor_id`'s profile as locked (manually-approves-followers) --
 /// mirrors `follow_service/tests.rs::lock_actor` exactly.
-async fn lock_actor(app: &TestApp, actor_id: Id) {
+async fn lock_actor(db: &TestDb, actor_id: Id) {
     upsert_profile(
-        &app.pool,
+        &db.pool,
         actor_id,
         ProfilePatch {
             locked: Some(true),
             ..Default::default()
         },
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("locking the test actor's profile must succeed");
@@ -120,9 +120,9 @@ fn sample_remote_account(id: Id, actor_uri: &str, locked: bool) -> RemoteAccount
 }
 
 /// Creates a real `remote_accounts` row, returning its `Id`.
-async fn create_test_remote(app: &TestApp, actor_uri: &str, locked: bool) -> Id {
-    let id = app.runtime.ids.next_id();
-    upsert_remote(&app.pool, &sample_remote_account(id, actor_uri, locked))
+async fn create_test_remote(db: &TestDb, actor_uri: &str, locked: bool) -> Id {
+    let id = db.runtime.ids.next_id();
+    upsert_remote(&db.pool, &sample_remote_account(id, actor_uri, locked))
         .await
         .expect("upsert_remote must succeed");
     id
@@ -220,14 +220,14 @@ type TestHandler =
 
 type TestActivityBuilder = ActivityBuilder<ActorDirectory, PgRemoteActorLookup>;
 
-fn build_activity_builder(app: &TestApp, seed: i64) -> TestActivityBuilder {
+fn build_activity_builder(db: &TestDb, seed: i64) -> TestActivityBuilder {
     let urls = crate::federation::urls::ActorUrls::new(TEST_DOMAIN);
     let ids = Arc::new(SeqIdGenerator::new(seed)) as Arc<dyn crate::runtime::IdGenerator>;
     ActivityBuilder::new(
         urls,
         ids,
-        ActorDirectory::new(app.pool.clone()),
-        PgRemoteActorLookup::new(app.pool.clone()),
+        ActorDirectory::new(db.pool.clone()),
+        PgRemoteActorLookup::new(db.pool.clone()),
     )
 }
 
@@ -238,12 +238,12 @@ fn build_activity_builder(app: &TestApp, seed: i64) -> TestActivityBuilder {
 /// at a call site where the `DeliveryService`'s own type parameters are
 /// already fully concrete, never inside a function still generic over them).
 fn build_boxed_deliver(
-    app: &TestApp,
+    db: &TestDb,
     local_sink: Arc<RecordingSink>,
     http_sink: Arc<RecordingSink>,
 ) -> BoxedDeliver {
     let delivery = Arc::new(DeliveryService::new(
-        RecipientTargetResolver::new(ActorDirectory::new(app.pool.clone())),
+        RecipientTargetResolver::new(ActorDirectory::new(db.pool.clone())),
         local_sink,
         http_sink,
     ));
@@ -255,22 +255,22 @@ fn build_boxed_deliver(
 }
 
 fn build_handler(
-    app: &TestApp,
+    db: &TestDb,
     actor_uris: FakeActorUriResolver,
     seed: i64,
 ) -> (TestHandler, Arc<RecordingSink>, Arc<RecordingSink>) {
     let local_sink = Arc::new(RecordingSink::new());
     let http_sink = Arc::new(RecordingSink::new());
-    let deliver = build_boxed_deliver(app, Arc::clone(&local_sink), Arc::clone(&http_sink));
+    let deliver = build_boxed_deliver(db, Arc::clone(&local_sink), Arc::clone(&http_sink));
 
     let handler = SocialGraphInboundHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        ActorDirectory::new(app.pool.clone()),
-        build_activity_builder(app, seed),
+        db.pool.clone(),
+        db.runtime.clone(),
+        ActorDirectory::new(db.pool.clone()),
+        build_activity_builder(db, seed),
         Transitions::new(
-            app.pool.clone(),
-            app.runtime.clone(),
+            db.pool.clone(),
+            db.runtime.clone(),
             NotificationSinkRegistry::new(),
         ),
         deliver,
@@ -289,13 +289,13 @@ fn signer(actor_uri: &str) -> InboundContext {
 }
 
 async fn load_state(
-    app: &TestApp,
+    db: &TestDb,
     viewer: AccountRef,
     target: AccountRef,
 ) -> sg_repository::RelationshipState {
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     let mut states =
-        sg_repository::load_states(&app.pool, &viewer, std::slice::from_ref(&target), now)
+        sg_repository::load_states(&db.pool, &viewer, std::slice::from_ref(&target), now)
             .await
             .expect("load_states must succeed");
     states.pop().expect("exactly one state")
@@ -305,8 +305,8 @@ async fn load_state(
 
 #[tokio::test]
 async fn activity_types_names_all_five_owned_outer_types() {
-    let app = spawn_test_app().await;
-    let (handler, _local, _http) = build_handler(&app, FakeActorUriResolver::new(), 1_000);
+    let db = spawn_test_db().await;
+    let (handler, _local, _http) = build_handler(&db, FakeActorUriResolver::new(), 1_000);
     assert_eq!(
         handler.activity_types(),
         &["Follow", "Accept", "Reject", "Block", "Undo"]
@@ -317,19 +317,19 @@ async fn activity_types_names_all_five_owned_outer_types() {
 
 #[tokio::test]
 async fn inbound_follow_establishes_for_unlocked_local_target_and_delivers_accept() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let target_id = create_test_actor(&app, "target_unlocked").await;
+    let target_id = create_test_actor(&db, "target_unlocked").await;
     let target_url = actor_url("target_unlocked");
     let remote_uri = "https://remote.example/users/alice";
-    let remote_id = create_test_remote(&app, remote_uri, false).await;
+    let remote_id = create_test_remote(&db, remote_uri, false).await;
 
     let resolver = FakeActorUriResolver::new()
         .with(target_url.clone(), AccountRef::Local(target_id))
         .with(remote_uri, AccountRef::Remote(remote_id));
-    let (handler, local_sink, http_sink) = build_handler(&app, resolver, 2_000);
+    let (handler, local_sink, http_sink) = build_handler(&db, resolver, 2_000);
 
-    let builder = build_activity_builder(&app, 2_100);
+    let builder = build_activity_builder(&db, 2_100);
     let (activity_id, follow_json) = builder
         .build_follow(
             &AccountRef::Remote(remote_id),
@@ -352,7 +352,7 @@ async fn inbound_follow_establishes_for_unlocked_local_target_and_delivers_accep
     assert_eq!(outcome, HandleOutcome::Handled);
 
     let state = load_state(
-        &app,
+        &db,
         AccountRef::Local(target_id),
         AccountRef::Remote(remote_id),
     )
@@ -372,20 +372,20 @@ async fn inbound_follow_establishes_for_unlocked_local_target_and_delivers_accep
 
 #[tokio::test]
 async fn inbound_follow_records_pending_for_locked_local_target_and_sends_no_accept() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let target_id = create_test_actor(&app, "target_locked").await;
-    lock_actor(&app, target_id).await;
+    let target_id = create_test_actor(&db, "target_locked").await;
+    lock_actor(&db, target_id).await;
     let target_url = actor_url("target_locked");
     let remote_uri = "https://remote.example/users/bob";
-    let remote_id = create_test_remote(&app, remote_uri, false).await;
+    let remote_id = create_test_remote(&db, remote_uri, false).await;
 
     let resolver = FakeActorUriResolver::new()
         .with(target_url, AccountRef::Local(target_id))
         .with(remote_uri, AccountRef::Remote(remote_id));
-    let (handler, local_sink, http_sink) = build_handler(&app, resolver, 3_000);
+    let (handler, local_sink, http_sink) = build_handler(&db, resolver, 3_000);
 
-    let builder = build_activity_builder(&app, 3_100);
+    let builder = build_activity_builder(&db, 3_100);
     let (activity_id, follow_json) = builder
         .build_follow(
             &AccountRef::Remote(remote_id),
@@ -407,7 +407,7 @@ async fn inbound_follow_records_pending_for_locked_local_target_and_sends_no_acc
     assert_eq!(outcome, HandleOutcome::Handled);
 
     let state = load_state(
-        &app,
+        &db,
         AccountRef::Local(target_id),
         AccountRef::Remote(remote_id),
     )
@@ -423,20 +423,20 @@ async fn inbound_follow_records_pending_for_locked_local_target_and_sends_no_acc
 
 #[tokio::test]
 async fn inbound_follow_establishes_immediately_for_locked_local_target_same_server_privilege() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let target_id = create_test_actor(&app, "target_ss").await;
-    lock_actor(&app, target_id).await;
+    let target_id = create_test_actor(&db, "target_ss").await;
+    lock_actor(&db, target_id).await;
     let target_url = actor_url("target_ss");
-    let source_id = create_test_actor(&app, "source_ss").await;
+    let source_id = create_test_actor(&db, "source_ss").await;
     let source_url = actor_url("source_ss");
 
     let resolver = FakeActorUriResolver::new()
         .with(target_url, AccountRef::Local(target_id))
         .with(source_url.clone(), AccountRef::Local(source_id));
-    let (handler, local_sink, http_sink) = build_handler(&app, resolver, 4_000);
+    let (handler, local_sink, http_sink) = build_handler(&db, resolver, 4_000);
 
-    let builder = build_activity_builder(&app, 4_100);
+    let builder = build_activity_builder(&db, 4_100);
     let (activity_id, follow_json) = builder
         .build_follow(&AccountRef::Local(source_id), &AccountRef::Local(target_id))
         .await
@@ -455,7 +455,7 @@ async fn inbound_follow_establishes_immediately_for_locked_local_target_same_ser
     assert_eq!(outcome, HandleOutcome::Handled);
 
     let state = load_state(
-        &app,
+        &db,
         AccountRef::Local(target_id),
         AccountRef::Local(source_id),
     )
@@ -474,17 +474,17 @@ async fn inbound_follow_establishes_immediately_for_locked_local_target_same_ser
 
 #[tokio::test]
 async fn inbound_follow_is_ignored_when_object_does_not_resolve_locally() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
     let other_remote_uri = "https://other.example/users/carol";
-    let other_remote_id = create_test_remote(&app, other_remote_uri, false).await;
+    let other_remote_id = create_test_remote(&db, other_remote_uri, false).await;
     let remote_uri = "https://remote.example/users/dave";
-    let remote_id = create_test_remote(&app, remote_uri, false).await;
+    let remote_id = create_test_remote(&db, remote_uri, false).await;
 
     let resolver = FakeActorUriResolver::new()
         .with(other_remote_uri, AccountRef::Remote(other_remote_id))
         .with(remote_uri, AccountRef::Remote(remote_id));
-    let (handler, _local, _http) = build_handler(&app, resolver, 5_000);
+    let (handler, _local, _http) = build_handler(&db, resolver, 5_000);
 
     let activity = ParsedActivity {
         id: "https://remote.example/activities/follow/1".to_string(),
@@ -509,19 +509,19 @@ async fn inbound_follow_is_ignored_when_object_does_not_resolve_locally() {
 
 #[tokio::test]
 async fn inbound_follow_received_twice_does_not_double_apply_or_redeliver_accept() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let target_id = create_test_actor(&app, "target_dup").await;
+    let target_id = create_test_actor(&db, "target_dup").await;
     let target_url = actor_url("target_dup");
     let remote_uri = "https://remote.example/users/eve";
-    let remote_id = create_test_remote(&app, remote_uri, false).await;
+    let remote_id = create_test_remote(&db, remote_uri, false).await;
 
     let resolver = FakeActorUriResolver::new()
         .with(target_url, AccountRef::Local(target_id))
         .with(remote_uri, AccountRef::Remote(remote_id));
-    let (handler, _local_sink, http_sink) = build_handler(&app, resolver, 6_000);
+    let (handler, _local_sink, http_sink) = build_handler(&db, resolver, 6_000);
 
-    let builder = build_activity_builder(&app, 6_100);
+    let builder = build_activity_builder(&db, 6_100);
 
     for i in 0..2 {
         let (activity_id, follow_json) = builder
@@ -545,7 +545,7 @@ async fn inbound_follow_received_twice_does_not_double_apply_or_redeliver_accept
     }
 
     let state = load_state(
-        &app,
+        &db,
         AccountRef::Local(target_id),
         AccountRef::Remote(remote_id),
     )
@@ -562,7 +562,7 @@ async fn inbound_follow_received_twice_does_not_double_apply_or_redeliver_accept
     )
     .bind(remote_id.as_i64())
     .bind(target_id.as_i64())
-    .fetch_one(&app.pool)
+    .fetch_one(&db.pool)
     .await
     .expect("counting follows must succeed");
     assert_eq!(follow_rows, 1, "no duplicate follow row");
@@ -572,24 +572,24 @@ async fn inbound_follow_received_twice_does_not_double_apply_or_redeliver_accept
 
 #[tokio::test]
 async fn inbound_accept_promotes_our_outbound_pending_request_to_established() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let requester_id = create_test_actor(&app, "requester_accept").await;
+    let requester_id = create_test_actor(&db, "requester_accept").await;
     let requester_url = actor_url("requester_accept");
     let remote_uri = "https://remote.example/users/frank";
-    let remote_id = create_test_remote(&app, remote_uri, false).await;
+    let remote_id = create_test_remote(&db, remote_uri, false).await;
 
     let resolver = FakeActorUriResolver::new()
         .with(requester_url.clone(), AccountRef::Local(requester_id))
         .with(remote_uri, AccountRef::Remote(remote_id));
-    let (handler, _local, _http) = build_handler(&app, resolver, 7_000);
+    let (handler, _local, _http) = build_handler(&db, resolver, 7_000);
 
     // Seed an outbound pending FollowRequest (as `FollowService::follow`
     // would have already recorded before this Accept arrives).
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     sg_repository::upsert_request(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &crate::social_graph::model::FollowRequest {
             requester: AccountRef::Local(requester_id),
             target: AccountRef::Remote(remote_id),
@@ -601,7 +601,7 @@ async fn inbound_accept_promotes_our_outbound_pending_request_to_established() {
     .await
     .expect("seeding the pending request must succeed");
 
-    let builder = build_activity_builder(&app, 7_100);
+    let builder = build_activity_builder(&db, 7_100);
     let accept_json = builder
         .build_accept(
             &AccountRef::Remote(remote_id),
@@ -625,7 +625,7 @@ async fn inbound_accept_promotes_our_outbound_pending_request_to_established() {
     assert_eq!(outcome, HandleOutcome::Handled);
 
     let state = load_state(
-        &app,
+        &db,
         AccountRef::Local(requester_id),
         AccountRef::Remote(remote_id),
     )
@@ -636,19 +636,19 @@ async fn inbound_accept_promotes_our_outbound_pending_request_to_established() {
 
 #[tokio::test]
 async fn inbound_accept_with_no_matching_pending_request_is_an_idempotent_no_op() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let requester_id = create_test_actor(&app, "requester_noop").await;
+    let requester_id = create_test_actor(&db, "requester_noop").await;
     let requester_url = actor_url("requester_noop");
     let remote_uri = "https://remote.example/users/gina";
-    let remote_id = create_test_remote(&app, remote_uri, false).await;
+    let remote_id = create_test_remote(&db, remote_uri, false).await;
 
     let resolver = FakeActorUriResolver::new()
         .with(requester_url, AccountRef::Local(requester_id))
         .with(remote_uri, AccountRef::Remote(remote_id));
-    let (handler, _local, _http) = build_handler(&app, resolver, 7_500);
+    let (handler, _local, _http) = build_handler(&db, resolver, 7_500);
 
-    let builder = build_activity_builder(&app, 7_600);
+    let builder = build_activity_builder(&db, 7_600);
     let accept_json = builder
         .build_accept(
             &AccountRef::Remote(remote_id),
@@ -671,7 +671,7 @@ async fn inbound_accept_with_no_matching_pending_request_is_an_idempotent_no_op(
     assert_eq!(outcome, HandleOutcome::Handled);
 
     let state = load_state(
-        &app,
+        &db,
         AccountRef::Local(requester_id),
         AccountRef::Remote(remote_id),
     )
@@ -683,22 +683,22 @@ async fn inbound_accept_with_no_matching_pending_request_is_an_idempotent_no_op(
 
 #[tokio::test]
 async fn inbound_reject_drops_our_outbound_pending_request_without_establishing() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let requester_id = create_test_actor(&app, "requester_reject").await;
+    let requester_id = create_test_actor(&db, "requester_reject").await;
     let requester_url = actor_url("requester_reject");
     let remote_uri = "https://remote.example/users/hank";
-    let remote_id = create_test_remote(&app, remote_uri, false).await;
+    let remote_id = create_test_remote(&db, remote_uri, false).await;
 
     let resolver = FakeActorUriResolver::new()
         .with(requester_url, AccountRef::Local(requester_id))
         .with(remote_uri, AccountRef::Remote(remote_id));
-    let (handler, _local, _http) = build_handler(&app, resolver, 8_000);
+    let (handler, _local, _http) = build_handler(&db, resolver, 8_000);
 
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     sg_repository::upsert_request(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &crate::social_graph::model::FollowRequest {
             requester: AccountRef::Local(requester_id),
             target: AccountRef::Remote(remote_id),
@@ -710,7 +710,7 @@ async fn inbound_reject_drops_our_outbound_pending_request_without_establishing(
     .await
     .expect("seeding the pending request must succeed");
 
-    let builder = build_activity_builder(&app, 8_100);
+    let builder = build_activity_builder(&db, 8_100);
     let reject_json = builder
         .build_reject(
             &AccountRef::Remote(remote_id),
@@ -733,7 +733,7 @@ async fn inbound_reject_drops_our_outbound_pending_request_without_establishing(
     assert_eq!(outcome, HandleOutcome::Handled);
 
     let state = load_state(
-        &app,
+        &db,
         AccountRef::Local(requester_id),
         AccountRef::Remote(remote_id),
     )
@@ -746,24 +746,24 @@ async fn inbound_reject_drops_our_outbound_pending_request_without_establishing(
 
 #[tokio::test]
 async fn inbound_block_marks_blocked_by_and_clears_existing_follows() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let target_id = create_test_actor(&app, "target_block").await;
+    let target_id = create_test_actor(&db, "target_block").await;
     let target_url = actor_url("target_block");
     let remote_uri = "https://remote.example/users/ivan";
-    let remote_id = create_test_remote(&app, remote_uri, false).await;
+    let remote_id = create_test_remote(&db, remote_uri, false).await;
 
     let resolver = FakeActorUriResolver::new()
         .with(target_url, AccountRef::Local(target_id))
         .with(remote_uri, AccountRef::Remote(remote_id));
-    let (handler, _local, _http) = build_handler(&app, resolver, 9_000);
+    let (handler, _local, _http) = build_handler(&db, resolver, 9_000);
 
     // Seed a pre-existing follow both directions so this Block's
     // relationship-clearing side effect is observable.
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     sg_repository::upsert_follow(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &crate::social_graph::model::Follow {
             follower: AccountRef::Remote(remote_id),
             followee: AccountRef::Local(target_id),
@@ -777,7 +777,7 @@ async fn inbound_block_marks_blocked_by_and_clears_existing_follows() {
     .await
     .expect("seeding the pre-existing follow must succeed");
 
-    let builder = build_activity_builder(&app, 9_100);
+    let builder = build_activity_builder(&db, 9_100);
     let (_activity_id, block_json) = builder
         .build_block(
             &AccountRef::Remote(remote_id),
@@ -799,7 +799,7 @@ async fn inbound_block_marks_blocked_by_and_clears_existing_follows() {
     assert_eq!(outcome, HandleOutcome::Handled);
 
     let state = load_state(
-        &app,
+        &db,
         AccountRef::Local(target_id),
         AccountRef::Remote(remote_id),
     )
@@ -815,23 +815,23 @@ async fn inbound_block_marks_blocked_by_and_clears_existing_follows() {
 
 #[tokio::test]
 async fn inbound_undo_follow_removes_the_established_follow() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let target_id = create_test_actor(&app, "target_undo_follow").await;
+    let target_id = create_test_actor(&db, "target_undo_follow").await;
     let target_url = actor_url("target_undo_follow");
     let remote_uri = "https://remote.example/users/judy";
-    let remote_id = create_test_remote(&app, remote_uri, false).await;
+    let remote_id = create_test_remote(&db, remote_uri, false).await;
 
     let resolver = FakeActorUriResolver::new()
         .with(target_url, AccountRef::Local(target_id))
         .with(remote_uri, AccountRef::Remote(remote_id));
-    let (handler, _local, _http) = build_handler(&app, resolver, 10_000);
+    let (handler, _local, _http) = build_handler(&db, resolver, 10_000);
 
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     let orig_activity_id = "https://remote.example/activities/follow/pre2".to_string();
     sg_repository::upsert_follow(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &crate::social_graph::model::Follow {
             follower: AccountRef::Remote(remote_id),
             followee: AccountRef::Local(target_id),
@@ -845,7 +845,7 @@ async fn inbound_undo_follow_removes_the_established_follow() {
     .await
     .expect("seeding the established follow must succeed");
 
-    let builder = build_activity_builder(&app, 10_100);
+    let builder = build_activity_builder(&db, 10_100);
     let (_wrapped_id, wrapped) = builder
         .build_follow(
             &AccountRef::Remote(remote_id),
@@ -871,7 +871,7 @@ async fn inbound_undo_follow_removes_the_established_follow() {
     assert_eq!(outcome, HandleOutcome::Handled);
 
     let state = load_state(
-        &app,
+        &db,
         AccountRef::Local(target_id),
         AccountRef::Remote(remote_id),
     )
@@ -886,23 +886,23 @@ async fn inbound_undo_follow_removes_the_established_follow() {
 
 #[tokio::test]
 async fn inbound_undo_block_clears_blocked_by() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let target_id = create_test_actor(&app, "target_undo_block").await;
+    let target_id = create_test_actor(&db, "target_undo_block").await;
     let target_url = actor_url("target_undo_block");
     let remote_uri = "https://remote.example/users/karl";
-    let remote_id = create_test_remote(&app, remote_uri, false).await;
+    let remote_id = create_test_remote(&db, remote_uri, false).await;
 
     let resolver = FakeActorUriResolver::new()
         .with(target_url, AccountRef::Local(target_id))
         .with(remote_uri, AccountRef::Remote(remote_id));
-    let (handler, _local, _http) = build_handler(&app, resolver, 11_000);
+    let (handler, _local, _http) = build_handler(&db, resolver, 11_000);
 
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     let orig_activity_id = "https://remote.example/activities/block/pre".to_string();
     sg_repository::upsert_block(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &crate::social_graph::model::Block {
             blocker: AccountRef::Remote(remote_id),
             blocked: AccountRef::Local(target_id),
@@ -913,7 +913,7 @@ async fn inbound_undo_block_clears_blocked_by() {
     .await
     .expect("seeding the block must succeed");
 
-    let builder = build_activity_builder(&app, 11_100);
+    let builder = build_activity_builder(&db, 11_100);
     let (_wrapped_id, wrapped) = builder
         .build_block(
             &AccountRef::Remote(remote_id),
@@ -939,7 +939,7 @@ async fn inbound_undo_block_clears_blocked_by() {
     assert_eq!(outcome, HandleOutcome::Handled);
 
     let state = load_state(
-        &app,
+        &db,
         AccountRef::Local(target_id),
         AccountRef::Remote(remote_id),
     )
@@ -954,8 +954,8 @@ async fn inbound_undo_block_clears_blocked_by() {
 
 #[tokio::test]
 async fn inbound_undo_with_unrelated_inner_type_is_ignored() {
-    let app = spawn_test_app().await;
-    let (handler, _local, _http) = build_handler(&app, FakeActorUriResolver::new(), 12_000);
+    let db = spawn_test_db().await;
+    let (handler, _local, _http) = build_handler(&db, FakeActorUriResolver::new(), 12_000);
 
     let activity = ParsedActivity {
         id: "https://remote.example/activities/undo/3".to_string(),

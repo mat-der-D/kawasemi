@@ -5,7 +5,7 @@
 //! ト後にシンクへ 1 度だけイベントが渡り既定 no-op のため notifications
 //! 未配線でも成功すること".
 //!
-//! Mirrors `repository/tests.rs`'s `spawn_test_app`-based harness
+//! Mirrors `repository/tests.rs`'s `spawn_test_db`-based harness
 //! convention (an isolated, already-migrated schema plus a deterministic
 //! `RuntimeContext`) and `interaction_service/tests.rs`'s
 //! `RecordingNotificationSink` convention (records every
@@ -21,7 +21,7 @@ use crate::social_graph::transitions::Transitions;
 use crate::statuses::notification_sink::{
     NotificationEvent, NotificationEventSink, NotificationSinkRegistry, NotificationType,
 };
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 /// Records every [`NotificationEventSink::emit`] call — mirrors
 /// `interaction_service/tests.rs::RecordingNotificationSink` exactly.
@@ -67,14 +67,14 @@ fn default_opts() -> FollowOptions {
 
 #[tokio::test]
 async fn establish_follow_creates_a_new_follow_and_emits_once_for_local_followee() {
-    let app = spawn_test_app().await;
-    let follower = AccountRef::Remote(app.runtime.ids.next_id());
-    let followee = AccountRef::Local(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let follower = AccountRef::Remote(db.runtime.ids.next_id());
+    let followee = AccountRef::Local(db.runtime.ids.next_id());
 
     let sink = Arc::new(RecordingNotificationSink::new());
     let registry = NotificationSinkRegistry::new();
     registry.set_sink(Arc::clone(&sink) as Arc<dyn NotificationEventSink>);
-    let transitions = Transitions::new(app.pool.clone(), app.runtime.clone(), registry);
+    let transitions = Transitions::new(db.pool.clone(), db.runtime.clone(), registry);
 
     transitions
         .establish_follow(
@@ -87,10 +87,10 @@ async fn establish_follow_creates_a_new_follow_and_emits_once_for_local_followee
         .expect("establish_follow must succeed for a fresh pair");
 
     let states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &follower,
         std::slice::from_ref(&followee),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -109,14 +109,14 @@ async fn establish_follow_creates_a_new_follow_and_emits_once_for_local_followee
 
 #[tokio::test]
 async fn establish_follow_is_idempotent_and_does_not_reemit_on_repeat_call() {
-    let app = spawn_test_app().await;
-    let follower = AccountRef::Remote(app.runtime.ids.next_id());
-    let followee = AccountRef::Local(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let follower = AccountRef::Remote(db.runtime.ids.next_id());
+    let followee = AccountRef::Local(db.runtime.ids.next_id());
 
     let sink = Arc::new(RecordingNotificationSink::new());
     let registry = NotificationSinkRegistry::new();
     registry.set_sink(Arc::clone(&sink) as Arc<dyn NotificationEventSink>);
-    let transitions = Transitions::new(app.pool.clone(), app.runtime.clone(), registry);
+    let transitions = Transitions::new(db.pool.clone(), db.runtime.clone(), registry);
 
     transitions
         .establish_follow(
@@ -146,10 +146,10 @@ async fn establish_follow_is_idempotent_and_does_not_reemit_on_repeat_call() {
         .expect("repeat establish_follow must succeed idempotently");
 
     let states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &follower,
         std::slice::from_ref(&followee),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -169,14 +169,14 @@ async fn establish_follow_is_idempotent_and_does_not_reemit_on_repeat_call() {
 
 #[tokio::test]
 async fn establish_follow_does_not_emit_when_followee_is_remote() {
-    let app = spawn_test_app().await;
-    let follower = AccountRef::Local(app.runtime.ids.next_id());
-    let followee = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let follower = AccountRef::Local(db.runtime.ids.next_id());
+    let followee = AccountRef::Remote(db.runtime.ids.next_id());
 
     let sink = Arc::new(RecordingNotificationSink::new());
     let registry = NotificationSinkRegistry::new();
     registry.set_sink(Arc::clone(&sink) as Arc<dyn NotificationEventSink>);
-    let transitions = Transitions::new(app.pool.clone(), app.runtime.clone(), registry);
+    let transitions = Transitions::new(db.pool.clone(), db.runtime.clone(), registry);
 
     transitions
         .establish_follow(
@@ -196,14 +196,14 @@ async fn establish_follow_does_not_emit_when_followee_is_remote() {
 
 #[tokio::test]
 async fn establish_follow_succeeds_with_default_noop_sink_when_notifications_unwired() {
-    let app = spawn_test_app().await;
-    let follower = AccountRef::Remote(app.runtime.ids.next_id());
-    let followee = AccountRef::Local(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let follower = AccountRef::Remote(db.runtime.ids.next_id());
+    let followee = AccountRef::Local(db.runtime.ids.next_id());
 
     // No `set_sink` call: this registry is exactly what a `Transitions`
     // built before `SocialGraphModule` wiring (task 5.2) looks like today.
     let registry = NotificationSinkRegistry::new();
-    let transitions = Transitions::new(app.pool.clone(), app.runtime.clone(), registry);
+    let transitions = Transitions::new(db.pool.clone(), db.runtime.clone(), registry);
 
     transitions
         .establish_follow(
@@ -220,12 +220,12 @@ async fn establish_follow_succeeds_with_default_noop_sink_when_notifications_unw
 
 #[tokio::test]
 async fn remove_follow_deletes_and_is_idempotent_when_nothing_exists() {
-    let app = spawn_test_app().await;
-    let follower = AccountRef::Local(app.runtime.ids.next_id());
-    let followee = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let follower = AccountRef::Local(db.runtime.ids.next_id());
+    let followee = AccountRef::Remote(db.runtime.ids.next_id());
     let transitions = Transitions::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         NotificationSinkRegistry::new(),
     );
 
@@ -244,10 +244,10 @@ async fn remove_follow_deletes_and_is_idempotent_when_nothing_exists() {
         .await
         .expect("remove_follow must succeed");
     let states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &follower,
         std::slice::from_ref(&followee),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -264,21 +264,21 @@ async fn remove_follow_deletes_and_is_idempotent_when_nothing_exists() {
 
 #[tokio::test]
 async fn record_pending_inbound_emits_once_and_is_idempotent() {
-    let app = spawn_test_app().await;
-    let requester = AccountRef::Remote(app.runtime.ids.next_id());
-    let target = AccountRef::Local(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let requester = AccountRef::Remote(db.runtime.ids.next_id());
+    let target = AccountRef::Local(db.runtime.ids.next_id());
 
     let sink = Arc::new(RecordingNotificationSink::new());
     let registry = NotificationSinkRegistry::new();
     registry.set_sink(Arc::clone(&sink) as Arc<dyn NotificationEventSink>);
-    let transitions = Transitions::new(app.pool.clone(), app.runtime.clone(), registry);
+    let transitions = Transitions::new(db.pool.clone(), db.runtime.clone(), registry);
 
     let req = FollowRequest {
         requester,
         target,
         direction: FollowRequestDirection::Inbound,
         activity_id: "https://remote.test/acts/follow-1".to_string(),
-        created_at: app.runtime.clock.now(),
+        created_at: db.runtime.clock.now(),
     };
 
     transitions
@@ -303,21 +303,21 @@ async fn record_pending_inbound_emits_once_and_is_idempotent() {
 
 #[tokio::test]
 async fn record_pending_outbound_never_emits() {
-    let app = spawn_test_app().await;
-    let requester = AccountRef::Local(app.runtime.ids.next_id());
-    let target = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let requester = AccountRef::Local(db.runtime.ids.next_id());
+    let target = AccountRef::Remote(db.runtime.ids.next_id());
 
     let sink = Arc::new(RecordingNotificationSink::new());
     let registry = NotificationSinkRegistry::new();
     registry.set_sink(Arc::clone(&sink) as Arc<dyn NotificationEventSink>);
-    let transitions = Transitions::new(app.pool.clone(), app.runtime.clone(), registry);
+    let transitions = Transitions::new(db.pool.clone(), db.runtime.clone(), registry);
 
     let req = FollowRequest {
         requester,
         target,
         direction: FollowRequestDirection::Outbound,
         activity_id: "https://local.test/acts/follow-2".to_string(),
-        created_at: app.runtime.clock.now(),
+        created_at: db.runtime.clock.now(),
     };
 
     transitions
@@ -336,12 +336,12 @@ async fn record_pending_outbound_never_emits() {
 #[tokio::test]
 async fn promote_pending_establishes_follow_from_existing_outbound_request_and_preserves_activity_id()
  {
-    let app = spawn_test_app().await;
-    let requester = AccountRef::Local(app.runtime.ids.next_id());
-    let target = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let requester = AccountRef::Local(db.runtime.ids.next_id());
+    let target = AccountRef::Remote(db.runtime.ids.next_id());
     let transitions = Transitions::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         NotificationSinkRegistry::new(),
     );
 
@@ -350,7 +350,7 @@ async fn promote_pending_establishes_follow_from_existing_outbound_request_and_p
         target,
         direction: FollowRequestDirection::Outbound,
         activity_id: "https://local.test/acts/follow-3".to_string(),
-        created_at: app.runtime.clock.now(),
+        created_at: db.runtime.clock.now(),
     };
     transitions
         .record_pending(&req)
@@ -363,10 +363,10 @@ async fn promote_pending_establishes_follow_from_existing_outbound_request_and_p
         .expect("promote_pending must succeed");
 
     let states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &requester,
         std::slice::from_ref(&target),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -387,10 +387,10 @@ async fn promote_pending_establishes_follow_from_existing_outbound_request_and_p
         .await
         .expect("repeat promote_pending must be a no-op success");
     let states_again = repository::load_states(
-        &app.pool,
+        &db.pool,
         &requester,
         std::slice::from_ref(&target),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -399,12 +399,12 @@ async fn promote_pending_establishes_follow_from_existing_outbound_request_and_p
 
 #[tokio::test]
 async fn promote_pending_is_idempotent_noop_when_no_pending_request_exists() {
-    let app = spawn_test_app().await;
-    let requester = AccountRef::Local(app.runtime.ids.next_id());
-    let target = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let requester = AccountRef::Local(db.runtime.ids.next_id());
+    let target = AccountRef::Remote(db.runtime.ids.next_id());
     let transitions = Transitions::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         NotificationSinkRegistry::new(),
     );
 
@@ -414,10 +414,10 @@ async fn promote_pending_is_idempotent_noop_when_no_pending_request_exists() {
         .expect("promote_pending with nothing pending must succeed as a no-op");
 
     let states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &requester,
         std::slice::from_ref(&target),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -434,12 +434,12 @@ async fn promote_pending_establishes_follow_from_existing_inbound_request_and_pr
     // the `InboundHandler` Accept-received case. Previously
     // `promote_pending` hardcoded `Outbound` and silently found nothing,
     // never establishing the follow.
-    let app = spawn_test_app().await;
-    let requester = AccountRef::Remote(app.runtime.ids.next_id());
-    let target = AccountRef::Local(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let requester = AccountRef::Remote(db.runtime.ids.next_id());
+    let target = AccountRef::Local(db.runtime.ids.next_id());
     let transitions = Transitions::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         NotificationSinkRegistry::new(),
     );
 
@@ -448,7 +448,7 @@ async fn promote_pending_establishes_follow_from_existing_inbound_request_and_pr
         target,
         direction: FollowRequestDirection::Inbound,
         activity_id: "https://remote.test/acts/follow-5".to_string(),
-        created_at: app.runtime.clock.now(),
+        created_at: db.runtime.clock.now(),
     };
     transitions
         .record_pending(&req)
@@ -461,10 +461,10 @@ async fn promote_pending_establishes_follow_from_existing_inbound_request_and_pr
         .expect("promote_pending must succeed");
 
     let states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &requester,
         std::slice::from_ref(&target),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -481,10 +481,10 @@ async fn promote_pending_establishes_follow_from_existing_inbound_request_and_pr
     // convention (`requested`/`requested_by` are viewer-relative flags, not
     // symmetric).
     let target_states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &target,
         std::slice::from_ref(&requester),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -500,10 +500,10 @@ async fn promote_pending_establishes_follow_from_existing_inbound_request_and_pr
         .await
         .expect("repeat promote_pending must be a no-op success");
     let states_again = repository::load_states(
-        &app.pool,
+        &db.pool,
         &requester,
         std::slice::from_ref(&target),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -512,12 +512,12 @@ async fn promote_pending_establishes_follow_from_existing_inbound_request_and_pr
 
 #[tokio::test]
 async fn drop_pending_deletes_outbound_request_and_is_idempotent() {
-    let app = spawn_test_app().await;
-    let requester = AccountRef::Local(app.runtime.ids.next_id());
-    let target = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let requester = AccountRef::Local(db.runtime.ids.next_id());
+    let target = AccountRef::Remote(db.runtime.ids.next_id());
     let transitions = Transitions::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         NotificationSinkRegistry::new(),
     );
 
@@ -526,7 +526,7 @@ async fn drop_pending_deletes_outbound_request_and_is_idempotent() {
         target,
         direction: FollowRequestDirection::Outbound,
         activity_id: "https://local.test/acts/follow-4".to_string(),
-        created_at: app.runtime.clock.now(),
+        created_at: db.runtime.clock.now(),
     };
     transitions
         .record_pending(&req)
@@ -539,10 +539,10 @@ async fn drop_pending_deletes_outbound_request_and_is_idempotent() {
         .expect("drop_pending must succeed");
 
     let states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &requester,
         std::slice::from_ref(&target),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -564,12 +564,12 @@ async fn drop_pending_deletes_inbound_request_and_is_idempotent() {
     // pending row was recorded `Inbound` (`FollowRequestService.reject_request`
     // case, Requirement 2.4). Previously `drop_pending` hardcoded `Outbound`
     // and silently deleted nothing, leaving the inbound pending row behind.
-    let app = spawn_test_app().await;
-    let requester = AccountRef::Remote(app.runtime.ids.next_id());
-    let target = AccountRef::Local(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let requester = AccountRef::Remote(db.runtime.ids.next_id());
+    let target = AccountRef::Local(db.runtime.ids.next_id());
     let transitions = Transitions::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         NotificationSinkRegistry::new(),
     );
 
@@ -578,7 +578,7 @@ async fn drop_pending_deletes_inbound_request_and_is_idempotent() {
         target,
         direction: FollowRequestDirection::Inbound,
         activity_id: "https://remote.test/acts/follow-6".to_string(),
-        created_at: app.runtime.clock.now(),
+        created_at: db.runtime.clock.now(),
     };
     transitions
         .record_pending(&req)
@@ -595,10 +595,10 @@ async fn drop_pending_deletes_inbound_request_and_is_idempotent() {
     // request_and_preserves_activity_id`): load `target`'s states with
     // `requester` as the lookup target to observe `requested_by`.
     let target_states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &target,
         std::slice::from_ref(&requester),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -608,10 +608,10 @@ async fn drop_pending_deletes_inbound_request_and_is_idempotent() {
     );
 
     let requester_states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &requester,
         std::slice::from_ref(&target),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -630,12 +630,12 @@ async fn drop_pending_deletes_inbound_request_and_is_idempotent() {
 
 #[tokio::test]
 async fn apply_block_clears_bidirectional_follows_and_pending_requests_and_creates_block_row() {
-    let app = spawn_test_app().await;
-    let blocker = AccountRef::Local(app.runtime.ids.next_id());
-    let blocked = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let blocker = AccountRef::Local(db.runtime.ids.next_id());
+    let blocked = AccountRef::Remote(db.runtime.ids.next_id());
     let transitions = Transitions::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         NotificationSinkRegistry::new(),
     );
 
@@ -667,7 +667,7 @@ async fn apply_block_clears_bidirectional_follows_and_pending_requests_and_creat
             target: blocked,
             direction: FollowRequestDirection::Outbound,
             activity_id: "https://local.test/acts/req1".to_string(),
-            created_at: app.runtime.clock.now(),
+            created_at: db.runtime.clock.now(),
         })
         .await
         .expect("record_pending (outbound) must succeed");
@@ -677,7 +677,7 @@ async fn apply_block_clears_bidirectional_follows_and_pending_requests_and_creat
             target: blocker,
             direction: FollowRequestDirection::Inbound,
             activity_id: "https://remote.test/acts/req2".to_string(),
-            created_at: app.runtime.clock.now(),
+            created_at: db.runtime.clock.now(),
         })
         .await
         .expect("record_pending (inbound) must succeed");
@@ -688,10 +688,10 @@ async fn apply_block_clears_bidirectional_follows_and_pending_requests_and_creat
         .expect("apply_block must succeed");
 
     let states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &blocker,
         std::slice::from_ref(&blocked),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -714,10 +714,10 @@ async fn apply_block_clears_bidirectional_follows_and_pending_requests_and_creat
         .await
         .expect("repeat apply_block must succeed idempotently");
     let states_again = repository::load_states(
-        &app.pool,
+        &db.pool,
         &blocker,
         std::slice::from_ref(&blocked),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -728,12 +728,12 @@ async fn apply_block_clears_bidirectional_follows_and_pending_requests_and_creat
 
 #[tokio::test]
 async fn clear_block_removes_block_row_and_is_idempotent() {
-    let app = spawn_test_app().await;
-    let blocker = AccountRef::Local(app.runtime.ids.next_id());
-    let blocked = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let blocker = AccountRef::Local(db.runtime.ids.next_id());
+    let blocked = AccountRef::Remote(db.runtime.ids.next_id());
     let transitions = Transitions::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         NotificationSinkRegistry::new(),
     );
 
@@ -748,10 +748,10 @@ async fn clear_block_removes_block_row_and_is_idempotent() {
         .expect("clear_block must succeed");
 
     let states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &blocker,
         std::slice::from_ref(&blocked),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -767,12 +767,12 @@ async fn clear_block_removes_block_row_and_is_idempotent() {
 
 #[tokio::test]
 async fn mark_blocked_by_clears_relationships_and_creates_block_row_without_activity_id() {
-    let app = spawn_test_app().await;
-    let source = AccountRef::Remote(app.runtime.ids.next_id());
-    let target = AccountRef::Local(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let source = AccountRef::Remote(db.runtime.ids.next_id());
+    let target = AccountRef::Local(db.runtime.ids.next_id());
     let transitions = Transitions::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         NotificationSinkRegistry::new(),
     );
 
@@ -801,10 +801,10 @@ async fn mark_blocked_by_clears_relationships_and_creates_block_row_without_acti
         .expect("mark_blocked_by must succeed");
 
     let states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &target,
         std::slice::from_ref(&source),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");
@@ -830,12 +830,12 @@ async fn mark_blocked_by_clears_relationships_and_creates_block_row_without_acti
 
 #[tokio::test]
 async fn clear_blocked_by_removes_block_row() {
-    let app = spawn_test_app().await;
-    let source = AccountRef::Remote(app.runtime.ids.next_id());
-    let target = AccountRef::Local(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let source = AccountRef::Remote(db.runtime.ids.next_id());
+    let target = AccountRef::Local(db.runtime.ids.next_id());
     let transitions = Transitions::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         NotificationSinkRegistry::new(),
     );
 
@@ -850,10 +850,10 @@ async fn clear_blocked_by_removes_block_row() {
         .expect("clear_blocked_by must succeed");
 
     let states = repository::load_states(
-        &app.pool,
+        &db.pool,
         &target,
         std::slice::from_ref(&source),
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("load_states must succeed");

@@ -4,7 +4,7 @@
 //! が冪等、アンフォローで Undo が配送される状態".
 //!
 //! Mirrors `interaction_service/tests.rs`'s established convention
-//! (`crate::test_harness::spawn_test_app`, a `RecordingSink` `DeliverySink`
+//! (`crate::test_harness::db_fixture::spawn_test_db`, a `RecordingSink` `DeliverySink`
 //! double capturing every dispatched Activity) and `account_service/
 //! tests.rs`'s `create_test_actor`/`sample_remote_account` helpers (this
 //! service needs *real* `actor`/`account_profiles`/`remote_accounts` rows,
@@ -30,7 +30,7 @@ use crate::federation::outbound::target::RecipientTargetResolver;
 use crate::federation::{CanonicalActivity, DeliveryTarget};
 use crate::runtime::SeqIdGenerator;
 use crate::social_graph::activity_builder::PgRemoteActorLookup;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 // --- Test fixtures ----------------------------------------------------------
 
@@ -38,14 +38,14 @@ use crate::test_harness::{TestApp, spawn_test_app};
 /// exact copy of `account_service/tests.rs::create_test_actor` (this
 /// module's own tests need the identical real-actor shape `ActorDirectory`
 /// resolves against).
-async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+async fn create_test_actor(db: &TestDb, handle: &str) -> Id {
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
     let actor = crate::actor::model::LocalActor {
         id: actor_id,
         owner_id,
@@ -57,7 +57,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
         created_at: now,
         updated_at: now,
     };
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -72,15 +72,15 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
 
 /// Marks `actor_id`'s profile as locked (manually-approves-followers), for
 /// Requirement 3.x-adjacent approval-necessity scenarios.
-async fn lock_actor(app: &TestApp, actor_id: Id) {
+async fn lock_actor(db: &TestDb, actor_id: Id) {
     upsert_profile(
-        &app.pool,
+        &db.pool,
         actor_id,
         ProfilePatch {
             locked: Some(true),
             ..Default::default()
         },
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("locking the test actor's profile must succeed");
@@ -110,15 +110,12 @@ fn sample_remote_account(
 }
 
 /// Creates a real `remote_accounts` row, returning its `Id`.
-async fn create_test_remote(app: &TestApp, actor_uri: &str, locked: bool) -> Id {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    upsert_remote(
-        &app.pool,
-        &sample_remote_account(id, actor_uri, now, locked),
-    )
-    .await
-    .expect("upsert_remote must succeed");
+async fn create_test_remote(db: &TestDb, actor_uri: &str, locked: bool) -> Id {
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    upsert_remote(&db.pool, &sample_remote_account(id, actor_uri, now, locked))
+        .await
+        .expect("upsert_remote must succeed");
     id
 }
 
@@ -174,11 +171,11 @@ type TestService = FollowService<
     Arc<RecordingSink>,
 >;
 
-fn build_service(app: &TestApp) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
+fn build_service(db: &TestDb) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
     let local_sink = Arc::new(RecordingSink::new());
     let http_sink = Arc::new(RecordingSink::new());
     let delivery = DeliveryService::new(
-        RecipientTargetResolver::new(ActorDirectory::new(app.pool.clone())),
+        RecipientTargetResolver::new(ActorDirectory::new(db.pool.clone())),
         Arc::clone(&local_sink),
         Arc::clone(&http_sink),
     );
@@ -187,18 +184,18 @@ fn build_service(app: &TestApp) -> (TestService, Arc<RecordingSink>, Arc<Recordi
     let activity_builder = ActivityBuilder::new(
         urls,
         ids,
-        ActorDirectory::new(app.pool.clone()),
-        PgRemoteActorLookup::new(app.pool.clone()),
+        ActorDirectory::new(db.pool.clone()),
+        PgRemoteActorLookup::new(db.pool.clone()),
     );
 
     let service = FollowService::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        ActorDirectory::new(app.pool.clone()),
+        db.pool.clone(),
+        db.runtime.clone(),
+        ActorDirectory::new(db.pool.clone()),
         activity_builder,
         Transitions::new(
-            app.pool.clone(),
-            app.runtime.clone(),
+            db.pool.clone(),
+            db.runtime.clone(),
             crate::statuses::notification_sink::NotificationSinkRegistry::new(),
         ),
         Arc::new(delivery),
@@ -226,11 +223,11 @@ fn as_bool(value: &serde_json::Value, key: &str) -> bool {
 
 #[tokio::test]
 async fn follow_establishes_a_relationship_for_an_unlocked_local_target_and_delivers_follow() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "follower1").await;
-    let target = create_test_actor(&app, "target1").await;
+    let viewer = create_test_actor(&db, "follower1").await;
+    let target = create_test_actor(&db, "target1").await;
 
     let relationship = service
         .follow(viewer, &target.as_i64().to_string(), default_opts())
@@ -256,12 +253,12 @@ async fn follow_establishes_immediately_for_a_locked_local_target_same_server_pr
     // for two local actors -- a locked *local* target must still establish
     // immediately, never go pending (unlike a locked *remote* target, see
     // `follow_records_a_pending_request_for_a_locked_remote_target` below).
-    let app = spawn_test_app().await;
-    let (service, local_sink, _http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, _http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "follower2").await;
-    let target = create_test_actor(&app, "target2").await;
-    lock_actor(&app, target).await;
+    let viewer = create_test_actor(&db, "follower2").await;
+    let target = create_test_actor(&db, "target2").await;
+    lock_actor(&db, target).await;
 
     let relationship = service
         .follow(viewer, &target.as_i64().to_string(), default_opts())
@@ -275,11 +272,11 @@ async fn follow_establishes_immediately_for_a_locked_local_target_same_server_pr
 
 #[tokio::test]
 async fn follow_applies_follow_options() {
-    let app = spawn_test_app().await;
-    let (service, _local_sink, _http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, _local_sink, _http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "follower3").await;
-    let target = create_test_actor(&app, "target3").await;
+    let viewer = create_test_actor(&db, "follower3").await;
+    let target = create_test_actor(&db, "target3").await;
 
     let opts = FollowOptions {
         reblogs: false,
@@ -304,11 +301,11 @@ async fn follow_applies_follow_options() {
 
 #[tokio::test]
 async fn follow_is_idempotent_for_an_already_established_follow() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, _http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, _http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "follower4").await;
-    let target = create_test_actor(&app, "target4").await;
+    let viewer = create_test_actor(&db, "follower4").await;
+    let target = create_test_actor(&db, "target4").await;
 
     let first = service
         .follow(viewer, &target.as_i64().to_string(), default_opts())
@@ -337,11 +334,11 @@ async fn follow_is_idempotent_for_an_already_pending_request() {
     // `follow_establishes_immediately_for_a_locked_local_target_same_server_privilege`
     // above) genuinely requires approval, so it is the reachable case for
     // testing "already pending -> idempotent, no duplicate Activity".
-    let app = spawn_test_app().await;
-    let (service, _local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, _local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "follower5").await;
-    let target = create_test_remote(&app, "https://remote.example/users/dave", true).await;
+    let viewer = create_test_actor(&db, "follower5").await;
+    let target = create_test_remote(&db, "https://remote.example/users/dave", true).await;
 
     let first = service
         .follow(viewer, &target.as_i64().to_string(), default_opts())
@@ -360,10 +357,10 @@ async fn follow_is_idempotent_for_an_already_pending_request() {
 
 #[tokio::test]
 async fn follow_rejects_a_self_follow() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "loner").await;
+    let viewer = create_test_actor(&db, "loner").await;
 
     let err = service
         .follow(viewer, &viewer.as_i64().to_string(), default_opts())
@@ -378,10 +375,10 @@ async fn follow_rejects_a_self_follow() {
 
 #[tokio::test]
 async fn follow_returns_not_found_for_a_nonexistent_target() {
-    let app = spawn_test_app().await;
-    let (service, _local_sink, _http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, _local_sink, _http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "seeker").await;
+    let viewer = create_test_actor(&db, "seeker").await;
 
     let err = service
         .follow(viewer, "999999999", default_opts())
@@ -396,11 +393,11 @@ async fn follow_returns_not_found_for_a_nonexistent_target() {
 
 #[tokio::test]
 async fn follow_establishes_a_relationship_for_an_unlocked_remote_target_and_delivers_via_http() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "follower6").await;
-    let target = create_test_remote(&app, "https://remote.example/users/alice", false).await;
+    let viewer = create_test_actor(&db, "follower6").await;
+    let target = create_test_remote(&db, "https://remote.example/users/alice", false).await;
 
     let relationship = service
         .follow(viewer, &target.as_i64().to_string(), default_opts())
@@ -425,11 +422,11 @@ async fn follow_establishes_a_relationship_for_an_unlocked_remote_target_and_del
 
 #[tokio::test]
 async fn follow_records_a_pending_request_for_a_locked_remote_target() {
-    let app = spawn_test_app().await;
-    let (service, _local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, _local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "follower7").await;
-    let target = create_test_remote(&app, "https://remote.example/users/bob", true).await;
+    let viewer = create_test_actor(&db, "follower7").await;
+    let target = create_test_remote(&db, "https://remote.example/users/bob", true).await;
 
     let relationship = service
         .follow(viewer, &target.as_i64().to_string(), default_opts())
@@ -445,11 +442,11 @@ async fn follow_records_a_pending_request_for_a_locked_remote_target() {
 
 #[tokio::test]
 async fn unfollow_removes_an_established_follow_and_delivers_undo() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, _http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, _http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "follower8").await;
-    let target = create_test_actor(&app, "target8").await;
+    let viewer = create_test_actor(&db, "follower8").await;
+    let target = create_test_actor(&db, "target8").await;
 
     service
         .follow(viewer, &target.as_i64().to_string(), default_opts())
@@ -474,12 +471,12 @@ async fn unfollow_removes_an_established_follow_and_delivers_undo() {
 
 #[tokio::test]
 async fn unfollow_removes_a_pending_outbound_request_and_delivers_undo() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, _http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, _http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "follower9").await;
-    let target = create_test_actor(&app, "target9").await;
-    lock_actor(&app, target).await;
+    let viewer = create_test_actor(&db, "follower9").await;
+    let target = create_test_actor(&db, "target9").await;
+    lock_actor(&db, target).await;
 
     service
         .follow(viewer, &target.as_i64().to_string(), default_opts())
@@ -499,11 +496,11 @@ async fn unfollow_removes_a_pending_outbound_request_and_delivers_undo() {
 
 #[tokio::test]
 async fn unfollow_is_a_noop_when_no_relationship_exists() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "follower10").await;
-    let target = create_test_actor(&app, "target10").await;
+    let viewer = create_test_actor(&db, "follower10").await;
+    let target = create_test_actor(&db, "target10").await;
 
     let relationship = service
         .unfollow(viewer, &target.as_i64().to_string())
@@ -517,11 +514,11 @@ async fn unfollow_is_a_noop_when_no_relationship_exists() {
 
 #[tokio::test]
 async fn unfollow_removes_an_established_follow_for_a_remote_target_via_http() {
-    let app = spawn_test_app().await;
-    let (service, _local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, _local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "follower11").await;
-    let target = create_test_remote(&app, "https://remote.example/users/carol", false).await;
+    let viewer = create_test_actor(&db, "follower11").await;
+    let target = create_test_remote(&db, "https://remote.example/users/carol", false).await;
 
     service
         .follow(viewer, &target.as_i64().to_string(), default_opts())

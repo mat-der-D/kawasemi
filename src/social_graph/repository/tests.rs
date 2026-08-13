@@ -6,9 +6,9 @@
 //!
 //! Mirrors `statuses/interaction_repository/tests.rs`'s and
 //! `statuses/status_repository/tests.rs`'s established convention: reuses
-//! `crate::test_harness::spawn_test_app` for an isolated, already-migrated
+//! `crate::test_harness::db_fixture::spawn_test_db` for an isolated, already-migrated
 //! schema and a deterministic `RuntimeContext`. Every account reference used
-//! here is a plain synthetic `AccountRef` minted from `app.runtime.ids` —
+//! here is a plain synthetic `AccountRef` minted from `db.runtime.ids` —
 //! `follows`/`follow_requests`/`mutes`/`blocks` hold only *logical*
 //! `(kind, id)` account references (`migrations/0012_social_graph.sql`'s own
 //! doc comment), so nothing in this repository depends on a real
@@ -19,7 +19,7 @@ use time::Duration;
 use crate::api::pagination::PageParams;
 use crate::domain::AccountRef;
 use crate::social_graph::model::{Block, Follow, FollowRequest, FollowRequestDirection, Mute};
-use crate::test_harness::spawn_test_app;
+use crate::test_harness::db_fixture::spawn_test_db;
 
 use super::{
     blocked_by, blocked_targets, count_followers, count_following, delete_block, delete_follow,
@@ -31,11 +31,11 @@ use super::{
 
 #[tokio::test]
 async fn upsert_follow_inserts_a_new_follow() {
-    let app = spawn_test_app().await;
-    let follower = AccountRef::Local(app.runtime.ids.next_id());
-    let followee = AccountRef::Remote(app.runtime.ids.next_id());
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let follower = AccountRef::Local(db.runtime.ids.next_id());
+    let followee = AccountRef::Remote(db.runtime.ids.next_id());
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
     let follow = Follow {
         follower,
@@ -46,24 +46,24 @@ async fn upsert_follow_inserts_a_new_follow() {
         activity_id: "https://example.test/activities/1".to_string(),
         created_at: now,
     };
-    upsert_follow(&app.pool, id, &follow)
+    upsert_follow(&db.pool, id, &follow)
         .await
         .expect("upsert_follow must succeed for a fresh pair");
 
     assert_eq!(
-        count_followers(&app.pool, &followee)
+        count_followers(&db.pool, &followee)
             .await
             .expect("count_followers must succeed"),
         1
     );
     assert_eq!(
-        count_following(&app.pool, &follower)
+        count_following(&db.pool, &follower)
             .await
             .expect("count_following must succeed"),
         1
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.6: a duplicate `upsert_follow` for the same
@@ -73,12 +73,12 @@ async fn upsert_follow_inserts_a_new_follow() {
 /// keeping stale values.
 #[tokio::test]
 async fn upsert_follow_is_idempotent_and_refreshes_changed_options() {
-    let app = spawn_test_app().await;
-    let follower = AccountRef::Local(app.runtime.ids.next_id());
-    let followee = AccountRef::Remote(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let follower = AccountRef::Local(db.runtime.ids.next_id());
+    let followee = AccountRef::Remote(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
 
-    let first_id = app.runtime.ids.next_id();
+    let first_id = db.runtime.ids.next_id();
     let first = Follow {
         follower,
         followee,
@@ -88,14 +88,14 @@ async fn upsert_follow_is_idempotent_and_refreshes_changed_options() {
         activity_id: "https://example.test/activities/1".to_string(),
         created_at: now,
     };
-    upsert_follow(&app.pool, first_id, &first)
+    upsert_follow(&db.pool, first_id, &first)
         .await
         .expect("first upsert_follow must succeed");
 
     // A second upsert for the same pair, with different options and a
     // different caller-minted id (the caller doesn't know the row already
     // exists) must not duplicate the relationship.
-    let second_id = app.runtime.ids.next_id();
+    let second_id = db.runtime.ids.next_id();
     let second = Follow {
         follower,
         followee,
@@ -105,19 +105,19 @@ async fn upsert_follow_is_idempotent_and_refreshes_changed_options() {
         activity_id: "https://example.test/activities/2".to_string(),
         created_at: now,
     };
-    upsert_follow(&app.pool, second_id, &second)
+    upsert_follow(&db.pool, second_id, &second)
         .await
         .expect("second upsert_follow for the same pair must succeed idempotently");
 
     assert_eq!(
-        count_followers(&app.pool, &followee)
+        count_followers(&db.pool, &followee)
             .await
             .expect("count_followers must succeed"),
         1,
         "a duplicate upsert must not create a second follows row"
     );
 
-    let states = load_states(&app.pool, &follower, &[followee], now)
+    let states = load_states(&db.pool, &follower, &[followee], now)
         .await
         .expect("load_states must succeed");
     let follow = states[0]
@@ -129,16 +129,16 @@ async fn upsert_follow_is_idempotent_and_refreshes_changed_options() {
     assert_eq!(follow.languages, vec!["ja".to_string(), "fr".to_string()]);
     assert_eq!(follow.activity_id, "https://example.test/activities/2");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[tokio::test]
 async fn delete_follow_removes_the_row_and_is_idempotent() {
-    let app = spawn_test_app().await;
-    let follower = AccountRef::Local(app.runtime.ids.next_id());
-    let followee = AccountRef::Remote(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
-    let id = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let follower = AccountRef::Local(db.runtime.ids.next_id());
+    let followee = AccountRef::Remote(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
+    let id = db.runtime.ids.next_id();
     let follow = Follow {
         follower,
         followee,
@@ -148,32 +148,32 @@ async fn delete_follow_removes_the_row_and_is_idempotent() {
         activity_id: "https://example.test/activities/1".to_string(),
         created_at: now,
     };
-    upsert_follow(&app.pool, id, &follow)
+    upsert_follow(&db.pool, id, &follow)
         .await
         .expect("upsert_follow must succeed");
 
-    let deleted = delete_follow(&app.pool, &follower, &followee)
+    let deleted = delete_follow(&db.pool, &follower, &followee)
         .await
         .expect("delete_follow must succeed");
     assert!(deleted, "the just-inserted follow must be deleted");
 
-    let deleted_again = delete_follow(&app.pool, &follower, &followee)
+    let deleted_again = delete_follow(&db.pool, &follower, &followee)
         .await
         .expect("deleting an absent follow must succeed idempotently");
     assert!(!deleted_again, "a second delete must be a no-op");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- follow_requests ------------------------------------------------------
 
 #[tokio::test]
 async fn upsert_request_records_a_pending_request_and_list_inbound_requests_finds_it() {
-    let app = spawn_test_app().await;
-    let requester = AccountRef::Remote(app.runtime.ids.next_id());
-    let target = AccountRef::Local(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
-    let id = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let requester = AccountRef::Remote(db.runtime.ids.next_id());
+    let target = AccountRef::Local(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
+    let id = db.runtime.ids.next_id();
 
     let req = FollowRequest {
         requester,
@@ -182,18 +182,18 @@ async fn upsert_request_records_a_pending_request_and_list_inbound_requests_find
         activity_id: "https://example.test/activities/follow/1".to_string(),
         created_at: now,
     };
-    upsert_request(&app.pool, id, &req)
+    upsert_request(&db.pool, id, &req)
         .await
         .expect("upsert_request must succeed");
 
-    let page = list_inbound_requests(&app.pool, &target, &PageParams::default())
+    let page = list_inbound_requests(&db.pool, &target, &PageParams::default())
         .await
         .expect("list_inbound_requests must succeed");
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].requester, requester);
     assert_eq!(page.items[0].direction, FollowRequestDirection::Inbound);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 2.1: an outbound and an inbound pending request for the same
@@ -201,10 +201,10 @@ async fn upsert_request_records_a_pending_request_and_list_inbound_requests_find
 /// constraint is scoped by `direction`.
 #[tokio::test]
 async fn outbound_and_inbound_requests_for_the_same_pair_coexist() {
-    let app = spawn_test_app().await;
-    let a = AccountRef::Local(app.runtime.ids.next_id());
-    let b = AccountRef::Local(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let a = AccountRef::Local(db.runtime.ids.next_id());
+    let b = AccountRef::Local(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
 
     let outbound = FollowRequest {
         requester: a,
@@ -220,14 +220,14 @@ async fn outbound_and_inbound_requests_for_the_same_pair_coexist() {
         activity_id: "act-in".to_string(),
         created_at: now,
     };
-    upsert_request(&app.pool, app.runtime.ids.next_id(), &outbound)
+    upsert_request(&db.pool, db.runtime.ids.next_id(), &outbound)
         .await
         .expect("upsert_request (outbound) must succeed");
-    upsert_request(&app.pool, app.runtime.ids.next_id(), &inbound)
+    upsert_request(&db.pool, db.runtime.ids.next_id(), &inbound)
         .await
         .expect("upsert_request (inbound) must succeed");
 
-    let page = list_inbound_requests(&app.pool, &b, &PageParams::default())
+    let page = list_inbound_requests(&db.pool, &b, &PageParams::default())
         .await
         .expect("list_inbound_requests must succeed");
     assert_eq!(
@@ -236,17 +236,17 @@ async fn outbound_and_inbound_requests_for_the_same_pair_coexist() {
         "only the inbound-direction row must be listed"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 1.6/idempotency: a duplicate `upsert_request` for the same
 /// (requester, target, direction) must not create a second row.
 #[tokio::test]
 async fn upsert_request_is_idempotent_per_direction() {
-    let app = spawn_test_app().await;
-    let requester = AccountRef::Remote(app.runtime.ids.next_id());
-    let target = AccountRef::Local(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let requester = AccountRef::Remote(db.runtime.ids.next_id());
+    let target = AccountRef::Local(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
 
     let first = FollowRequest {
         requester,
@@ -255,7 +255,7 @@ async fn upsert_request_is_idempotent_per_direction() {
         activity_id: "act-1".to_string(),
         created_at: now,
     };
-    upsert_request(&app.pool, app.runtime.ids.next_id(), &first)
+    upsert_request(&db.pool, db.runtime.ids.next_id(), &first)
         .await
         .expect("first upsert_request must succeed");
 
@@ -266,11 +266,11 @@ async fn upsert_request_is_idempotent_per_direction() {
         activity_id: "act-2".to_string(),
         created_at: now,
     };
-    upsert_request(&app.pool, app.runtime.ids.next_id(), &second)
+    upsert_request(&db.pool, db.runtime.ids.next_id(), &second)
         .await
         .expect("second upsert_request for the same pair+direction must succeed idempotently");
 
-    let page = list_inbound_requests(&app.pool, &target, &PageParams::default())
+    let page = list_inbound_requests(&db.pool, &target, &PageParams::default())
         .await
         .expect("list_inbound_requests must succeed");
     assert_eq!(page.items.len(), 1, "no duplicate row must be created");
@@ -279,15 +279,15 @@ async fn upsert_request_is_idempotent_per_direction() {
         "the activity_id must be refreshed by the duplicate upsert"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[tokio::test]
 async fn delete_request_removes_the_row_and_is_idempotent() {
-    let app = spawn_test_app().await;
-    let requester = AccountRef::Remote(app.runtime.ids.next_id());
-    let target = AccountRef::Local(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let requester = AccountRef::Remote(db.runtime.ids.next_id());
+    let target = AccountRef::Local(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
     let req = FollowRequest {
         requester,
         target,
@@ -295,12 +295,12 @@ async fn delete_request_removes_the_row_and_is_idempotent() {
         activity_id: "act-1".to_string(),
         created_at: now,
     };
-    upsert_request(&app.pool, app.runtime.ids.next_id(), &req)
+    upsert_request(&db.pool, db.runtime.ids.next_id(), &req)
         .await
         .expect("upsert_request must succeed");
 
     let deleted = delete_request(
-        &app.pool,
+        &db.pool,
         &requester,
         &target,
         FollowRequestDirection::Inbound,
@@ -310,7 +310,7 @@ async fn delete_request_removes_the_row_and_is_idempotent() {
     assert!(deleted);
 
     let deleted_again = delete_request(
-        &app.pool,
+        &db.pool,
         &requester,
         &target,
         FollowRequestDirection::Inbound,
@@ -319,18 +319,18 @@ async fn delete_request_removes_the_row_and_is_idempotent() {
     .expect("deleting an absent request must succeed idempotently");
     assert!(!deleted_again);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[tokio::test]
 async fn list_inbound_requests_paginates_and_is_scoped_to_the_target() {
-    let app = spawn_test_app().await;
-    let target = AccountRef::Local(app.runtime.ids.next_id());
-    let other_target = AccountRef::Local(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let target = AccountRef::Local(db.runtime.ids.next_id());
+    let other_target = AccountRef::Local(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
 
     for i in 0..3 {
-        let requester = AccountRef::Remote(app.runtime.ids.next_id());
+        let requester = AccountRef::Remote(db.runtime.ids.next_id());
         let req = FollowRequest {
             requester,
             target,
@@ -338,19 +338,19 @@ async fn list_inbound_requests_paginates_and_is_scoped_to_the_target() {
             activity_id: format!("act-{i}"),
             created_at: now,
         };
-        upsert_request(&app.pool, app.runtime.ids.next_id(), &req)
+        upsert_request(&db.pool, db.runtime.ids.next_id(), &req)
             .await
             .expect("upsert_request must succeed");
     }
     // A request for a different target must not leak into `target`'s page.
     let unrelated = FollowRequest {
-        requester: AccountRef::Remote(app.runtime.ids.next_id()),
+        requester: AccountRef::Remote(db.runtime.ids.next_id()),
         target: other_target,
         direction: FollowRequestDirection::Inbound,
         activity_id: "act-other".to_string(),
         created_at: now,
     };
-    upsert_request(&app.pool, app.runtime.ids.next_id(), &unrelated)
+    upsert_request(&db.pool, db.runtime.ids.next_id(), &unrelated)
         .await
         .expect("upsert_request must succeed");
 
@@ -358,7 +358,7 @@ async fn list_inbound_requests_paginates_and_is_scoped_to_the_target() {
         limit: Some(2),
         ..Default::default()
     };
-    let first_page = list_inbound_requests(&app.pool, &target, &params)
+    let first_page = list_inbound_requests(&db.pool, &target, &params)
         .await
         .expect("list_inbound_requests must succeed");
     assert_eq!(first_page.items.len(), 2);
@@ -369,22 +369,22 @@ async fn list_inbound_requests_paginates_and_is_scoped_to_the_target() {
         limit: Some(2),
         ..Default::default()
     };
-    let second_page = list_inbound_requests(&app.pool, &target, &next_params)
+    let second_page = list_inbound_requests(&db.pool, &target, &next_params)
         .await
         .expect("list_inbound_requests must succeed");
     assert_eq!(second_page.items.len(), 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- mutes ------------------------------------------------------------
 
 #[tokio::test]
 async fn upsert_mute_is_idempotent_and_refreshes_changed_options() {
-    let app = spawn_test_app().await;
-    let muter = AccountRef::Local(app.runtime.ids.next_id());
-    let muted = AccountRef::Remote(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let muter = AccountRef::Local(db.runtime.ids.next_id());
+    let muted = AccountRef::Remote(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
 
     let first = Mute {
         muter,
@@ -393,7 +393,7 @@ async fn upsert_mute_is_idempotent_and_refreshes_changed_options() {
         expires_at: None,
         created_at: now,
     };
-    upsert_mute(&app.pool, app.runtime.ids.next_id(), &first)
+    upsert_mute(&db.pool, db.runtime.ids.next_id(), &first)
         .await
         .expect("first upsert_mute must succeed");
 
@@ -405,11 +405,11 @@ async fn upsert_mute_is_idempotent_and_refreshes_changed_options() {
         expires_at: Some(expires_at),
         created_at: now,
     };
-    upsert_mute(&app.pool, app.runtime.ids.next_id(), &second)
+    upsert_mute(&db.pool, db.runtime.ids.next_id(), &second)
         .await
         .expect("second upsert_mute for the same pair must succeed idempotently");
 
-    let targets = muted_targets(&app.pool, &muter, now, false)
+    let targets = muted_targets(&db.pool, &muter, now, false)
         .await
         .expect("muted_targets must succeed");
     assert_eq!(
@@ -418,7 +418,7 @@ async fn upsert_mute_is_idempotent_and_refreshes_changed_options() {
         "a duplicate upsert must not create a second mutes row"
     );
 
-    let notif_only = muted_targets(&app.pool, &muter, now, true)
+    let notif_only = muted_targets(&db.pool, &muter, now, true)
         .await
         .expect("muted_targets must succeed");
     assert_eq!(
@@ -427,17 +427,17 @@ async fn upsert_mute_is_idempotent_and_refreshes_changed_options() {
         "notifications must have been refreshed to true by the duplicate upsert"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 4.3, 9.3: an expired mute must be excluded from
 /// `muted_targets` and from `load_states`'s derived `mute` field.
 #[tokio::test]
 async fn expired_mute_is_excluded_from_the_filter_set_and_from_load_states() {
-    let app = spawn_test_app().await;
-    let muter = AccountRef::Local(app.runtime.ids.next_id());
-    let muted = AccountRef::Remote(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let muter = AccountRef::Local(db.runtime.ids.next_id());
+    let muted = AccountRef::Remote(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
     let already_expired = now - Duration::seconds(1);
 
     let mute = Mute {
@@ -447,11 +447,11 @@ async fn expired_mute_is_excluded_from_the_filter_set_and_from_load_states() {
         expires_at: Some(already_expired),
         created_at: now - Duration::hours(1),
     };
-    upsert_mute(&app.pool, app.runtime.ids.next_id(), &mute)
+    upsert_mute(&db.pool, db.runtime.ids.next_id(), &mute)
         .await
         .expect("upsert_mute must succeed");
 
-    let targets = muted_targets(&app.pool, &muter, now, false)
+    let targets = muted_targets(&db.pool, &muter, now, false)
         .await
         .expect("muted_targets must succeed");
     assert!(
@@ -459,7 +459,7 @@ async fn expired_mute_is_excluded_from_the_filter_set_and_from_load_states() {
         "an expired mute must not appear in the filter set"
     );
 
-    let states = load_states(&app.pool, &muter, &[muted], now)
+    let states = load_states(&db.pool, &muter, &[muted], now)
         .await
         .expect("load_states must succeed");
     assert!(
@@ -469,20 +469,20 @@ async fn expired_mute_is_excluded_from_the_filter_set_and_from_load_states() {
 
     // Sanity: before expiry, the same mute IS included.
     let before_expiry = already_expired - Duration::seconds(10);
-    let targets_before = muted_targets(&app.pool, &muter, before_expiry, false)
+    let targets_before = muted_targets(&db.pool, &muter, before_expiry, false)
         .await
         .expect("muted_targets must succeed");
     assert_eq!(targets_before.len(), 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[tokio::test]
 async fn mute_with_no_expiry_is_never_excluded() {
-    let app = spawn_test_app().await;
-    let muter = AccountRef::Local(app.runtime.ids.next_id());
-    let muted = AccountRef::Remote(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let muter = AccountRef::Local(db.runtime.ids.next_id());
+    let muted = AccountRef::Remote(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
     let mute = Mute {
         muter,
         muted,
@@ -490,25 +490,25 @@ async fn mute_with_no_expiry_is_never_excluded() {
         expires_at: None,
         created_at: now,
     };
-    upsert_mute(&app.pool, app.runtime.ids.next_id(), &mute)
+    upsert_mute(&db.pool, db.runtime.ids.next_id(), &mute)
         .await
         .expect("upsert_mute must succeed");
 
     let far_future = now + Duration::days(3650);
-    let targets = muted_targets(&app.pool, &muter, far_future, false)
+    let targets = muted_targets(&db.pool, &muter, far_future, false)
         .await
         .expect("muted_targets must succeed");
     assert_eq!(targets.len(), 1, "an unbounded mute never expires");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[tokio::test]
 async fn delete_mute_removes_the_row_and_is_idempotent() {
-    let app = spawn_test_app().await;
-    let muter = AccountRef::Local(app.runtime.ids.next_id());
-    let muted = AccountRef::Remote(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let muter = AccountRef::Local(db.runtime.ids.next_id());
+    let muted = AccountRef::Remote(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
     let mute = Mute {
         muter,
         muted,
@@ -516,30 +516,30 @@ async fn delete_mute_removes_the_row_and_is_idempotent() {
         expires_at: None,
         created_at: now,
     };
-    upsert_mute(&app.pool, app.runtime.ids.next_id(), &mute)
+    upsert_mute(&db.pool, db.runtime.ids.next_id(), &mute)
         .await
         .expect("upsert_mute must succeed");
 
-    let deleted = delete_mute(&app.pool, &muter, &muted)
+    let deleted = delete_mute(&db.pool, &muter, &muted)
         .await
         .expect("delete_mute must succeed");
     assert!(deleted);
-    let deleted_again = delete_mute(&app.pool, &muter, &muted)
+    let deleted_again = delete_mute(&db.pool, &muter, &muted)
         .await
         .expect("deleting an absent mute must succeed idempotently");
     assert!(!deleted_again);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- blocks -----------------------------------------------------------
 
 #[tokio::test]
 async fn upsert_block_is_idempotent_and_blocked_targets_and_blocked_by_agree() {
-    let app = spawn_test_app().await;
-    let blocker = AccountRef::Local(app.runtime.ids.next_id());
-    let blocked = AccountRef::Remote(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let blocker = AccountRef::Local(db.runtime.ids.next_id());
+    let blocked = AccountRef::Remote(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
 
     let first = Block {
         blocker,
@@ -547,7 +547,7 @@ async fn upsert_block_is_idempotent_and_blocked_targets_and_blocked_by_agree() {
         activity_id: "act-1".to_string(),
         created_at: now,
     };
-    upsert_block(&app.pool, app.runtime.ids.next_id(), &first)
+    upsert_block(&db.pool, db.runtime.ids.next_id(), &first)
         .await
         .expect("first upsert_block must succeed");
     let second = Block {
@@ -556,11 +556,11 @@ async fn upsert_block_is_idempotent_and_blocked_targets_and_blocked_by_agree() {
         activity_id: "act-2".to_string(),
         created_at: now,
     };
-    upsert_block(&app.pool, app.runtime.ids.next_id(), &second)
+    upsert_block(&db.pool, db.runtime.ids.next_id(), &second)
         .await
         .expect("second upsert_block for the same pair must succeed idempotently");
 
-    let blocker_view = blocked_targets(&app.pool, &blocker)
+    let blocker_view = blocked_targets(&db.pool, &blocker)
         .await
         .expect("blocked_targets must succeed");
     assert_eq!(
@@ -570,52 +570,52 @@ async fn upsert_block_is_idempotent_and_blocked_targets_and_blocked_by_agree() {
     );
     assert_eq!(blocker_view[0], blocked);
 
-    let blocked_view = blocked_by(&app.pool, &blocked)
+    let blocked_view = blocked_by(&db.pool, &blocked)
         .await
         .expect("blocked_by must succeed");
     assert_eq!(blocked_view.len(), 1);
     assert_eq!(blocked_view[0], blocker);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[tokio::test]
 async fn delete_block_removes_the_row_and_is_idempotent() {
-    let app = spawn_test_app().await;
-    let blocker = AccountRef::Local(app.runtime.ids.next_id());
-    let blocked = AccountRef::Remote(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let blocker = AccountRef::Local(db.runtime.ids.next_id());
+    let blocked = AccountRef::Remote(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
     let block = Block {
         blocker,
         blocked,
         activity_id: "act-1".to_string(),
         created_at: now,
     };
-    upsert_block(&app.pool, app.runtime.ids.next_id(), &block)
+    upsert_block(&db.pool, db.runtime.ids.next_id(), &block)
         .await
         .expect("upsert_block must succeed");
 
-    let deleted = delete_block(&app.pool, &blocker, &blocked)
+    let deleted = delete_block(&db.pool, &blocker, &blocked)
         .await
         .expect("delete_block must succeed");
     assert!(deleted);
-    let deleted_again = delete_block(&app.pool, &blocker, &blocked)
+    let deleted_again = delete_block(&db.pool, &blocker, &blocked)
         .await
         .expect("deleting an absent block must succeed idempotently");
     assert!(!deleted_again);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- following_targets / counts ------------------------------------------
 
 #[tokio::test]
 async fn following_targets_and_counts_reflect_established_follows_only() {
-    let app = spawn_test_app().await;
-    let viewer = AccountRef::Local(app.runtime.ids.next_id());
-    let a = AccountRef::Remote(app.runtime.ids.next_id());
-    let b = AccountRef::Local(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let viewer = AccountRef::Local(db.runtime.ids.next_id());
+    let a = AccountRef::Remote(db.runtime.ids.next_id());
+    let b = AccountRef::Local(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
 
     for followee in [a, b] {
         let follow = Follow {
@@ -627,12 +627,12 @@ async fn following_targets_and_counts_reflect_established_follows_only() {
             activity_id: "act".to_string(),
             created_at: now,
         };
-        upsert_follow(&app.pool, app.runtime.ids.next_id(), &follow)
+        upsert_follow(&db.pool, db.runtime.ids.next_id(), &follow)
             .await
             .expect("upsert_follow must succeed");
     }
 
-    let mut targets = following_targets(&app.pool, &viewer)
+    let mut targets = following_targets(&db.pool, &viewer)
         .await
         .expect("following_targets must succeed");
     targets.sort_by_key(|t| match t {
@@ -647,19 +647,19 @@ async fn following_targets_and_counts_reflect_established_follows_only() {
     assert_eq!(targets, expected);
 
     assert_eq!(
-        count_following(&app.pool, &viewer)
+        count_following(&db.pool, &viewer)
             .await
             .expect("count_following must succeed"),
         2
     );
     assert_eq!(
-        count_followers(&app.pool, &a)
+        count_followers(&db.pool, &a)
             .await
             .expect("count_followers must succeed"),
         1
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- load_states (Requirement 8.4) --------------------------------------
@@ -669,27 +669,27 @@ async fn following_targets_and_counts_reflect_established_follows_only() {
 /// all (must still get a default, all-false/None state, not be omitted).
 #[tokio::test]
 async fn load_states_derives_every_flag_across_a_batch_of_targets() {
-    let app = spawn_test_app().await;
-    let viewer = AccountRef::Local(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let viewer = AccountRef::Local(db.runtime.ids.next_id());
 
     // target_following: viewer follows them, they don't follow back.
-    let target_following = AccountRef::Remote(app.runtime.ids.next_id());
+    let target_following = AccountRef::Remote(db.runtime.ids.next_id());
     // target_mutual: established follow both ways.
-    let target_mutual = AccountRef::Local(app.runtime.ids.next_id());
+    let target_mutual = AccountRef::Local(db.runtime.ids.next_id());
     // target_blocking: viewer blocks them.
-    let target_blocking = AccountRef::Remote(app.runtime.ids.next_id());
+    let target_blocking = AccountRef::Remote(db.runtime.ids.next_id());
     // target_blocked_by: they block viewer.
-    let target_blocked_by = AccountRef::Remote(app.runtime.ids.next_id());
+    let target_blocked_by = AccountRef::Remote(db.runtime.ids.next_id());
     // target_muted: viewer mutes them (with notifications).
-    let target_muted = AccountRef::Remote(app.runtime.ids.next_id());
+    let target_muted = AccountRef::Remote(db.runtime.ids.next_id());
     // target_requested: viewer has an outbound pending request to them.
-    let target_requested = AccountRef::Remote(app.runtime.ids.next_id());
+    let target_requested = AccountRef::Remote(db.runtime.ids.next_id());
     // target_requested_by: they have an inbound pending request to viewer.
-    let target_requested_by = AccountRef::Remote(app.runtime.ids.next_id());
+    let target_requested_by = AccountRef::Remote(db.runtime.ids.next_id());
     // target_none: no relationship rows at all.
-    let target_none = AccountRef::Remote(app.runtime.ids.next_id());
+    let target_none = AccountRef::Remote(db.runtime.ids.next_id());
 
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
 
     let follow = |follower: AccountRef, followee: AccountRef| Follow {
         follower,
@@ -702,31 +702,31 @@ async fn load_states_derives_every_flag_across_a_batch_of_targets() {
     };
 
     upsert_follow(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &follow(viewer, target_following),
     )
     .await
     .expect("upsert_follow must succeed");
 
     upsert_follow(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &follow(viewer, target_mutual),
     )
     .await
     .expect("upsert_follow must succeed");
     upsert_follow(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &follow(target_mutual, viewer),
     )
     .await
     .expect("upsert_follow must succeed");
 
     upsert_block(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &Block {
             blocker: viewer,
             blocked: target_blocking,
@@ -738,8 +738,8 @@ async fn load_states_derives_every_flag_across_a_batch_of_targets() {
     .expect("upsert_block must succeed");
 
     upsert_block(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &Block {
             blocker: target_blocked_by,
             blocked: viewer,
@@ -751,8 +751,8 @@ async fn load_states_derives_every_flag_across_a_batch_of_targets() {
     .expect("upsert_block must succeed");
 
     upsert_mute(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &Mute {
             muter: viewer,
             muted: target_muted,
@@ -765,8 +765,8 @@ async fn load_states_derives_every_flag_across_a_batch_of_targets() {
     .expect("upsert_mute must succeed");
 
     upsert_request(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &FollowRequest {
             requester: viewer,
             target: target_requested,
@@ -779,8 +779,8 @@ async fn load_states_derives_every_flag_across_a_batch_of_targets() {
     .expect("upsert_request must succeed");
 
     upsert_request(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &FollowRequest {
             requester: target_requested_by,
             target: viewer,
@@ -802,7 +802,7 @@ async fn load_states_derives_every_flag_across_a_batch_of_targets() {
         target_requested_by,
         target_none,
     ];
-    let states = load_states(&app.pool, &viewer, &targets, now)
+    let states = load_states(&db.pool, &viewer, &targets, now)
         .await
         .expect("load_states must succeed");
     assert_eq!(states.len(), targets.len());
@@ -860,19 +860,19 @@ async fn load_states_derives_every_flag_across_a_batch_of_targets() {
     assert!(!none.requested);
     assert!(!none.requested_by);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 #[tokio::test]
 async fn load_states_returns_empty_vec_for_an_empty_target_slice() {
-    let app = spawn_test_app().await;
-    let viewer = AccountRef::Local(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let viewer = AccountRef::Local(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
 
-    let states = load_states(&app.pool, &viewer, &[], now)
+    let states = load_states(&db.pool, &viewer, &[], now)
         .await
         .expect("load_states must succeed on an empty target slice");
     assert!(states.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

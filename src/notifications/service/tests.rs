@@ -16,6 +16,8 @@
 //! probe against `127.0.0.1:5432` both refuse the connection) — has no
 //! reachable Postgres, so every `#[tokio::test]` below is written as a real,
 //! executable integration test against `crate::test_harness::spawn_test_app`
+//! (or, for the `RequiredPolls` cases below, the lighter
+//! `crate::test_harness::db_fixture::spawn_test_db`)
 //! but could not be run to completion here; see this task's own status
 //! report for the manual trace of each one.
 //!
@@ -42,6 +44,7 @@ use crate::statuses::model::{Poll, PollOption, Tag};
 use crate::statuses::poll_repository::PollTally;
 use crate::statuses::status_repository::insert_status;
 use crate::statuses::tag_repository::{associate_tag, upsert_tag};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 use crate::test_harness::{TestApp, spawn_test_app};
 
 /// Creates a real owner + local actor row, returning the actor's `Id` — an
@@ -102,10 +105,10 @@ fn sample_status(id: Id, actor_id: Id, created_at: time::OffsetDateTime) -> Stat
     }
 }
 
-async fn create_test_status(app: &TestApp, actor_id: Id) -> Id {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    insert_status(&app.pool, &sample_status(id, actor_id, now))
+async fn create_test_status(pool: &PgPool, runtime: &RuntimeContext, actor_id: Id) -> Id {
+    let id = runtime.ids.next_id();
+    let now = runtime.clock.now();
+    insert_status(pool, &sample_status(id, actor_id, now))
         .await
         .expect("insert_status must succeed");
     id
@@ -350,7 +353,7 @@ async fn list_embeds_related_status_for_post_related_kinds() {
 
     let recipient = create_test_actor(&app, "list_status_recipient").await;
     let origin = create_test_actor(&app, "list_status_origin").await;
-    let status_id = create_test_status(&app, recipient).await;
+    let status_id = create_test_status(&app.pool, &app.runtime, recipient).await;
 
     seed_notification(
         &app,
@@ -1168,11 +1171,11 @@ async fn show_and_list_render_the_same_notification_identically() {
 /// Inserts a `polls` row carrying `titles` as options `idx 0..N`, attached
 /// to a fresh `statuses` row — `polls.status_id` is a real FK, so a genuine
 /// target row is required.
-async fn insert_test_poll(app: &TestApp, titles: &[&str]) -> Poll {
-    let actor_id = app.runtime.ids.next_id();
-    let status_id = create_test_status(app, actor_id).await;
+async fn insert_test_poll(db: &TestDb, titles: &[&str]) -> Poll {
+    let actor_id = db.runtime.ids.next_id();
+    let status_id = create_test_status(&db.pool, &db.runtime, actor_id).await;
     let poll = Poll {
-        id: app.runtime.ids.next_id(),
+        id: db.runtime.ids.next_id(),
         status_id,
         expires_at: None,
         multiple: false,
@@ -1187,7 +1190,7 @@ async fn insert_test_poll(app: &TestApp, titles: &[&str]) -> Poll {
             votes_count: 0,
         })
         .collect();
-    poll_repository::insert_poll(&app.pool, &poll, &options)
+    poll_repository::insert_poll(&db.pool, &poll, &options)
         .await
         .expect("insert_poll must succeed for a fresh poll");
     poll
@@ -1216,12 +1219,12 @@ fn option_titles(tally: &PollTally) -> Vec<&str> {
 /// whether or not a resolvable poll precedes it.
 #[tokio::test]
 async fn resolve_many_raises_this_modules_not_found_for_a_dangling_poll_id() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = RequiredPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let existing = insert_test_poll(&app, &["Yes", "No"]).await;
+    let existing = insert_test_poll(&db, &["Yes", "No"]).await;
     let dangling = Id::from_i64(i64::MAX - 41);
 
     for requested in [[existing.id, dangling], [dangling, existing.id]] {
@@ -1233,7 +1236,7 @@ async fn resolve_many_raises_this_modules_not_found_for_a_dangling_poll_id() {
         assert_eq!(err.public_message, "poll not found");
     }
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The strict resolver is not trivially failing: every id that does resolve
@@ -1243,14 +1246,14 @@ async fn resolve_many_raises_this_modules_not_found_for_a_dangling_poll_id() {
 /// not pass by luck.
 #[tokio::test]
 async fn resolve_many_returns_every_existing_poll_in_the_requested_order() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = RequiredPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let first = insert_test_poll(&app, &["a"]).await;
-    let second = insert_test_poll(&app, &["b"]).await;
-    let third = insert_test_poll(&app, &["c"]).await;
+    let first = insert_test_poll(&db, &["a"]).await;
+    let second = insert_test_poll(&db, &["b"]).await;
+    let third = insert_test_poll(&db, &["c"]).await;
 
     let requested = [third.id, first.id, second.id];
     let resolved = polls
@@ -1263,7 +1266,7 @@ async fn resolve_many_returns_every_existing_poll_in_the_requested_order() {
     assert_eq!(option_titles(&resolved[1].2), vec!["a"]);
     assert_eq!(option_titles(&resolved[2].2), vec!["b"]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `viewer` reaches the tally: their own selections come back in
@@ -1271,14 +1274,14 @@ async fn resolve_many_returns_every_existing_poll_in_the_requested_order() {
 /// seeing the same public `voters_count`.
 #[tokio::test]
 async fn resolve_many_reports_the_viewers_own_votes() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = RequiredPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let poll = insert_test_poll(&app, &["Yes", "No"]).await;
-    let viewer = app.runtime.ids.next_id();
-    poll_repository::record_vote(&app.pool, poll.id, viewer, &[1], app.runtime.clock.now())
+    let poll = insert_test_poll(&db, &["Yes", "No"]).await;
+    let viewer = db.runtime.ids.next_id();
+    poll_repository::record_vote(&db.pool, poll.id, viewer, &[1], db.runtime.clock.now())
         .await
         .expect("record_vote must succeed");
 
@@ -1296,5 +1299,5 @@ async fn resolve_many_reports_the_viewers_own_votes() {
     assert!(anonymous[0].2.own_votes.is_empty());
     assert_eq!(anonymous[0].2.voters_count, 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

@@ -9,15 +9,15 @@
 //!   `check_fetched_host`) — no network, no database, always runnable.
 //! - `#[tokio::test]` integration tests, mirroring
 //!   `crate::accounts::remote_fetcher::tests`'/`crate::statuses::
-//!   ingest_service::tests`' established `spawn_test_app` +
+//!   ingest_service::tests`' established `spawn_test_db` +
 //!   `MockFederationHttpClient` convention: every network call this
 //!   resolver itself makes (`FederationHttpClient::fetch`, twice for the
 //!   URL-actor path — see this module's own doc comment, "Actor URL: a
 //!   deliberate double fetch") is queued deterministically, while
 //!   `RemoteAccountFetcher`/`StatusIngestService`'s own DB-backed
 //!   normalization/ingestion exercises the real, migrated schema
-//!   `spawn_test_app` provides. In this sandbox (no reachable Postgres)
-//!   these `#[tokio::test]` cases fail at `spawn_test_app()` itself (schema
+//!   `spawn_test_db` provides. In this sandbox (no reachable Postgres)
+//!   these `#[tokio::test]` cases fail at `spawn_test_db()` itself (schema
 //!   creation requires a live connection) — see this task's status report,
 //!   `TESTS_RUN`, for the DB-unavailable-vs-logic-failure distinction.
 
@@ -35,7 +35,7 @@ use crate::federation::signatures::{HttpResponse, MockFederationHttpClient};
 use crate::runtime::RuntimeContext;
 use crate::search::model::ParsedQuery;
 use crate::statuses::status_repository;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 // ---- Pure unit tests (no network, no database) -----------------------------
 
@@ -172,7 +172,7 @@ fn check_fetched_host_accepts_a_document_with_no_id() {
     );
 }
 
-// ---- Integration tests (spawn_test_app + MockFederationHttpClient) --------
+// ---- Integration tests (spawn_test_db + MockFederationHttpClient) --------
 
 /// An in-memory [`RemoteActorResolver`] double — mirrors
 /// `crate::statuses::ingest_service::tests::FakeRemoteActors`' identical
@@ -247,22 +247,22 @@ fn note_document(uri: &str, attributed_to: &str) -> serde_json::Value {
 }
 
 fn resolver_for(
-    app: &TestApp,
+    db: &TestDb,
     mock: Arc<MockFederationHttpClient>,
 ) -> RemoteResolver<MockFederationHttpClient, FakeRemoteActors, ActorDirectory> {
     let account_fetcher = Arc::new(RemoteAccountFetcher::new(
-        app.pool.clone(),
+        db.pool.clone(),
         Arc::clone(&mock),
-        app.runtime.clone(),
+        db.runtime.clone(),
         DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
     ));
     let status_ingest = Arc::new(StatusIngestService::new(
-        app.pool.clone(),
+        db.pool.clone(),
         Arc::clone(&mock),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         TEST_DOMAIN,
-        ActorDirectory::new(app.pool.clone()),
+        ActorDirectory::new(db.pool.clone()),
     ));
     RemoteResolver::new(mock, account_fetcher, status_ingest)
 }
@@ -272,22 +272,22 @@ fn resolver_for(
 /// fetch_and_normalize`, to a `Resolved::Account`.
 #[tokio::test]
 async fn resolve_remote_acct_success_returns_normalized_account() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(ok_response(jrd_document(ALICE_ACTOR_URI)));
     mock.queue_fetch_response(ok_response(actor_document(ALICE_ACTOR_URI)));
-    let resolver = resolver_for(&app, mock);
+    let resolver = resolver_for(&db, mock);
 
     let parsed = ParsedQuery::Acct {
         user: "alice".to_string(),
         domain: "remote.example".to_string(),
     };
     let resolved = resolver
-        .resolve_remote(&parsed, app.runtime.ids.next_id())
+        .resolve_remote(&parsed, db.runtime.ids.next_id())
         .await
         .expect("resolve_remote itself never returns Err (Requirement 6.4)");
 
-    let persisted = find_remote_by_uri(&app.pool, ALICE_ACTOR_URI)
+    let persisted = find_remote_by_uri(&db.pool, ALICE_ACTOR_URI)
         .await
         .expect("find_remote_by_uri must succeed")
         .expect("fetch_and_normalize must have upserted the remote account");
@@ -301,17 +301,17 @@ async fn resolve_remote_acct_success_returns_normalized_account() {
 /// rather than propagating an error.
 #[tokio::test]
 async fn resolve_remote_acct_webfinger_fetch_failure_normalizes_to_none() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_error(StatusCode::BAD_GATEWAY, "network unreachable");
-    let resolver = resolver_for(&app, mock);
+    let resolver = resolver_for(&db, mock);
 
     let parsed = ParsedQuery::Acct {
         user: "alice".to_string(),
         domain: "remote.example".to_string(),
     };
     let resolved = resolver
-        .resolve_remote(&parsed, app.runtime.ids.next_id())
+        .resolve_remote(&parsed, db.runtime.ids.next_id())
         .await
         .expect("resolve_remote itself never returns Err (Requirement 6.4)");
     assert_eq!(resolved, Resolved::None);
@@ -321,17 +321,17 @@ async fn resolve_remote_acct_webfinger_fetch_failure_normalizes_to_none() {
 /// `Resolved::None`.
 #[tokio::test]
 async fn resolve_remote_acct_missing_self_link_normalizes_to_none() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(ok_response(json!({"subject": "acct:alice@remote.example"})));
-    let resolver = resolver_for(&app, mock);
+    let resolver = resolver_for(&db, mock);
 
     let parsed = ParsedQuery::Acct {
         user: "alice".to_string(),
         domain: "remote.example".to_string(),
     };
     let resolved = resolver
-        .resolve_remote(&parsed, app.runtime.ids.next_id())
+        .resolve_remote(&parsed, db.runtime.ids.next_id())
         .await
         .expect("resolve_remote itself never returns Err (Requirement 6.4)");
     assert_eq!(resolved, Resolved::None);
@@ -341,18 +341,18 @@ async fn resolve_remote_acct_missing_self_link_normalizes_to_none() {
 /// `StatusIngestService::ingest_document`, to a `Resolved::Status`.
 #[tokio::test]
 async fn resolve_remote_url_note_ingests_and_returns_status() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(ok_response(note_document(NOTE_URI, ALICE_ACTOR_URI)));
-    let resolver = resolver_for(&app, mock);
+    let resolver = resolver_for(&db, mock);
 
     let parsed = ParsedQuery::Url(NOTE_URI.to_string());
     let resolved = resolver
-        .resolve_remote(&parsed, app.runtime.ids.next_id())
+        .resolve_remote(&parsed, db.runtime.ids.next_id())
         .await
         .expect("resolve_remote itself never returns Err (Requirement 6.4)");
 
-    let persisted = status_repository::find_by_uri(&app.pool, NOTE_URI)
+    let persisted = status_repository::find_by_uri(&db.pool, NOTE_URI)
         .await
         .expect("find_by_uri must succeed")
         .expect("ingest_document must have persisted the Note as a Status");
@@ -365,19 +365,19 @@ async fn resolve_remote_url_note_ingests_and_returns_status() {
 /// fetch") for why two fetch responses are queued for this one call.
 #[tokio::test]
 async fn resolve_remote_url_actor_normalizes_and_returns_account() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(ok_response(actor_document(ALICE_ACTOR_URI)));
     mock.queue_fetch_response(ok_response(actor_document(ALICE_ACTOR_URI)));
-    let resolver = resolver_for(&app, mock);
+    let resolver = resolver_for(&db, mock);
 
     let parsed = ParsedQuery::Url(ALICE_ACTOR_URI.to_string());
     let resolved = resolver
-        .resolve_remote(&parsed, app.runtime.ids.next_id())
+        .resolve_remote(&parsed, db.runtime.ids.next_id())
         .await
         .expect("resolve_remote itself never returns Err (Requirement 6.4)");
 
-    let persisted = find_remote_by_uri(&app.pool, ALICE_ACTOR_URI)
+    let persisted = find_remote_by_uri(&db.pool, ALICE_ACTOR_URI)
         .await
         .expect("find_remote_by_uri must succeed")
         .expect("fetch_and_normalize must have upserted the remote account");
@@ -391,18 +391,18 @@ async fn resolve_remote_url_actor_normalizes_and_returns_account() {
 /// normalizes to `Resolved::None`.
 #[tokio::test]
 async fn resolve_remote_url_fetch_failure_normalizes_to_none() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(HttpResponse {
         status: StatusCode::NOT_FOUND,
         headers: HeaderMap::new(),
         body: Vec::new(),
     });
-    let resolver = resolver_for(&app, mock);
+    let resolver = resolver_for(&db, mock);
 
     let parsed = ParsedQuery::Url(NOTE_URI.to_string());
     let resolved = resolver
-        .resolve_remote(&parsed, app.runtime.ids.next_id())
+        .resolve_remote(&parsed, db.runtime.ids.next_id())
         .await
         .expect("resolve_remote itself never returns Err (Requirement 6.4)");
     assert_eq!(resolved, Resolved::None);
@@ -419,7 +419,7 @@ async fn resolve_remote_url_fetch_failure_normalizes_to_none() {
 /// `victim.example`'s own content.
 #[tokio::test]
 async fn resolve_remote_url_note_cross_host_id_normalizes_to_none_and_is_not_persisted() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
     const CROSS_HOST_NOTE_URI: &str = "https://victim.example/notes/1";
     const CROSS_HOST_ATTRIBUTED_TO: &str = "https://victim.example/users/alice";
@@ -427,19 +427,19 @@ async fn resolve_remote_url_note_cross_host_id_normalizes_to_none_and_is_not_per
         CROSS_HOST_NOTE_URI,
         CROSS_HOST_ATTRIBUTED_TO,
     )));
-    let resolver = resolver_for(&app, mock);
+    let resolver = resolver_for(&db, mock);
 
     // Fetched from `remote.example`, but the document's own `id` claims
     // `victim.example` — self-consistent with its own `attributedTo`, but
     // not with the URL actually dereferenced.
     let parsed = ParsedQuery::Url(NOTE_URI.to_string());
     let resolved = resolver
-        .resolve_remote(&parsed, app.runtime.ids.next_id())
+        .resolve_remote(&parsed, db.runtime.ids.next_id())
         .await
         .expect("resolve_remote itself never returns Err (Requirement 6.4)");
     assert_eq!(resolved, Resolved::None);
 
-    let persisted = status_repository::find_by_uri(&app.pool, CROSS_HOST_NOTE_URI)
+    let persisted = status_repository::find_by_uri(&db.pool, CROSS_HOST_NOTE_URI)
         .await
         .expect("find_by_uri must succeed");
     assert!(
@@ -455,13 +455,13 @@ async fn resolve_remote_url_note_cross_host_id_normalizes_to_none_and_is_not_per
 /// panicking on an unreachable arm.
 #[tokio::test]
 async fn resolve_remote_plain_query_returns_none_without_any_network_call() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mock = Arc::new(MockFederationHttpClient::new());
-    let resolver = resolver_for(&app, Arc::clone(&mock));
+    let resolver = resolver_for(&db, Arc::clone(&mock));
 
     let parsed = ParsedQuery::Plain("hello world".to_string());
     let resolved = resolver
-        .resolve_remote(&parsed, app.runtime.ids.next_id())
+        .resolve_remote(&parsed, db.runtime.ids.next_id())
         .await
         .expect("resolve_remote itself never returns Err (Requirement 6.4)");
     assert_eq!(resolved, Resolved::None);

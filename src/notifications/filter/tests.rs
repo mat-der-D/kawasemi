@@ -7,8 +7,8 @@
 //! behind (it wraps a real `PgPool`-backed `FilterQuery`, per design.md),
 //! so — mirroring `src/social_graph/providers/tests.rs`'s own
 //! `filter_query_blocked_set_*` tests for the exact same dependency — these
-//! tests spin up a real, isolated Postgres-backed app via
-//! `crate::test_harness::spawn_test_app` and seed real `blocks`/`mutes`
+//! tests spin up a real, isolated Postgres-backed schema via
+//! `crate::test_harness::db_fixture::spawn_test_db` and seed real `blocks`/`mutes`
 //! rows through `social_graph::repository`'s already-implemented
 //! upsert functions, rather than reimplementing or mocking any block/mute/
 //! expiry logic here (Requirement 7.4).
@@ -19,21 +19,21 @@ use super::*;
 use crate::domain::Id;
 use crate::social_graph::model::{Block, Mute};
 use crate::social_graph::repository as sg_repository;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 /// Mirrors `src/social_graph/providers/tests.rs::upsert_block`'s identical
 /// helper — this module's own tests need the same real-row seeding, and
 /// `social_graph::providers::tests` is a private sibling module this crate
 /// cannot import from.
-async fn upsert_block(app: &TestApp, blocker: AccountRef, blocked: AccountRef) {
+async fn upsert_block(db: &TestDb, blocker: AccountRef, blocked: AccountRef) {
     sg_repository::upsert_block(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &Block {
             blocker,
             blocked,
             activity_id: "https://example.test/activities/block-1".to_string(),
-            created_at: app.runtime.clock.now(),
+            created_at: db.runtime.clock.now(),
         },
     )
     .await
@@ -43,42 +43,42 @@ async fn upsert_block(app: &TestApp, blocker: AccountRef, blocked: AccountRef) {
 /// Mirrors `src/social_graph/providers/tests.rs::upsert_mute`'s identical
 /// helper.
 async fn upsert_mute(
-    app: &TestApp,
+    db: &TestDb,
     muter: AccountRef,
     muted: AccountRef,
     notifications: bool,
     expires_at: Option<time::OffsetDateTime>,
 ) {
     sg_repository::upsert_mute(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &Mute {
             muter,
             muted,
             notifications,
             expires_at,
-            created_at: app.runtime.clock.now(),
+            created_at: db.runtime.clock.now(),
         },
     )
     .await
     .expect("upsert_mute must succeed");
 }
 
-fn fresh_id(app: &TestApp) -> Id {
-    app.runtime.ids.next_id()
+fn fresh_id(db: &TestDb) -> Id {
+    db.runtime.ids.next_id()
 }
 
 // -- Requirement 7.1: origin blocked by recipient -------------------------
 
 #[tokio::test]
 async fn suppresses_when_recipient_has_blocked_origin() {
-    let app = spawn_test_app().await;
-    let recipient = AccountRef::Local(fresh_id(&app));
-    let origin = AccountRef::Remote(fresh_id(&app));
+    let db = spawn_test_db().await;
+    let recipient = AccountRef::Local(fresh_id(&db));
+    let origin = AccountRef::Remote(fresh_id(&db));
 
-    upsert_block(&app, recipient, origin).await;
+    upsert_block(&db, recipient, origin).await;
 
-    let filter = NotificationFilter::new(FilterQuery::new(app.pool.clone(), app.runtime.clone()));
+    let filter = NotificationFilter::new(FilterQuery::new(db.pool.clone(), db.runtime.clone()));
     let suppress = filter
         .should_suppress(&recipient, &origin)
         .await
@@ -89,21 +89,21 @@ async fn suppresses_when_recipient_has_blocked_origin() {
         "recipient having blocked origin must suppress the notification"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- Requirement 7.1: recipient blocked by origin --------------------------
 
 #[tokio::test]
 async fn suppresses_when_recipient_is_blocked_by_origin() {
-    let app = spawn_test_app().await;
-    let recipient = AccountRef::Local(fresh_id(&app));
-    let origin = AccountRef::Remote(fresh_id(&app));
+    let db = spawn_test_db().await;
+    let recipient = AccountRef::Local(fresh_id(&db));
+    let origin = AccountRef::Remote(fresh_id(&db));
 
     // origin blocks recipient -- the mirror direction of Requirement 7.1.
-    upsert_block(&app, origin, recipient).await;
+    upsert_block(&db, origin, recipient).await;
 
-    let filter = NotificationFilter::new(FilterQuery::new(app.pool.clone(), app.runtime.clone()));
+    let filter = NotificationFilter::new(FilterQuery::new(db.pool.clone(), db.runtime.clone()));
     let suppress = filter
         .should_suppress(&recipient, &origin)
         .await
@@ -114,20 +114,20 @@ async fn suppresses_when_recipient_is_blocked_by_origin() {
         "recipient being blocked by origin must suppress the notification"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- Requirement 7.2: notification mute -------------------------------------
 
 #[tokio::test]
 async fn suppresses_when_origin_is_notification_muted_by_recipient() {
-    let app = spawn_test_app().await;
-    let recipient = AccountRef::Local(fresh_id(&app));
-    let origin = AccountRef::Remote(fresh_id(&app));
+    let db = spawn_test_db().await;
+    let recipient = AccountRef::Local(fresh_id(&db));
+    let origin = AccountRef::Remote(fresh_id(&db));
 
-    upsert_mute(&app, recipient, origin, true, None).await;
+    upsert_mute(&db, recipient, origin, true, None).await;
 
-    let filter = NotificationFilter::new(FilterQuery::new(app.pool.clone(), app.runtime.clone()));
+    let filter = NotificationFilter::new(FilterQuery::new(db.pool.clone(), db.runtime.clone()));
     let suppress = filter
         .should_suppress(&recipient, &origin)
         .await
@@ -138,7 +138,7 @@ async fn suppresses_when_origin_is_notification_muted_by_recipient() {
         "a notification mute (muting_notifications) must suppress the notification"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 7.2's own wording restricts suppression to
@@ -146,13 +146,13 @@ async fn suppresses_when_origin_is_notification_muted_by_recipient() {
 /// must NOT, by itself, suppress notification generation.
 #[tokio::test]
 async fn does_not_suppress_on_plain_mute_without_notification_mute() {
-    let app = spawn_test_app().await;
-    let recipient = AccountRef::Local(fresh_id(&app));
-    let origin = AccountRef::Remote(fresh_id(&app));
+    let db = spawn_test_db().await;
+    let recipient = AccountRef::Local(fresh_id(&db));
+    let origin = AccountRef::Remote(fresh_id(&db));
 
-    upsert_mute(&app, recipient, origin, false, None).await;
+    upsert_mute(&db, recipient, origin, false, None).await;
 
-    let filter = NotificationFilter::new(FilterQuery::new(app.pool.clone(), app.runtime.clone()));
+    let filter = NotificationFilter::new(FilterQuery::new(db.pool.clone(), db.runtime.clone()));
     let suppress = filter
         .should_suppress(&recipient, &origin)
         .await
@@ -163,20 +163,20 @@ async fn does_not_suppress_on_plain_mute_without_notification_mute() {
         "a plain mute without muting_notifications must not suppress the notification"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- Requirement 7.3: expired notification mute -----------------------------
 
 #[tokio::test]
 async fn does_not_suppress_on_expired_notification_mute() {
-    let app = spawn_test_app().await;
-    let recipient = AccountRef::Local(fresh_id(&app));
-    let origin = AccountRef::Remote(fresh_id(&app));
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let recipient = AccountRef::Local(fresh_id(&db));
+    let origin = AccountRef::Remote(fresh_id(&db));
+    let now = db.runtime.clock.now();
 
     upsert_mute(
-        &app,
+        &db,
         recipient,
         origin,
         true,
@@ -184,7 +184,7 @@ async fn does_not_suppress_on_expired_notification_mute() {
     )
     .await;
 
-    let filter = NotificationFilter::new(FilterQuery::new(app.pool.clone(), app.runtime.clone()));
+    let filter = NotificationFilter::new(FilterQuery::new(db.pool.clone(), db.runtime.clone()));
     let suppress = filter
         .should_suppress(&recipient, &origin)
         .await
@@ -195,18 +195,18 @@ async fn does_not_suppress_on_expired_notification_mute() {
         "an expired notification mute must not suppress the notification (Requirement 7.3)"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- Baseline: no relationship at all ---------------------------------------
 
 #[tokio::test]
 async fn does_not_suppress_with_no_relationship() {
-    let app = spawn_test_app().await;
-    let recipient = AccountRef::Local(fresh_id(&app));
-    let origin = AccountRef::Remote(fresh_id(&app));
+    let db = spawn_test_db().await;
+    let recipient = AccountRef::Local(fresh_id(&db));
+    let origin = AccountRef::Remote(fresh_id(&db));
 
-    let filter = NotificationFilter::new(FilterQuery::new(app.pool.clone(), app.runtime.clone()));
+    let filter = NotificationFilter::new(FilterQuery::new(db.pool.clone(), db.runtime.clone()));
     let suppress = filter
         .should_suppress(&recipient, &origin)
         .await
@@ -217,5 +217,5 @@ async fn does_not_suppress_with_no_relationship() {
         "with no block/mute relationship, the notification must not be suppressed"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

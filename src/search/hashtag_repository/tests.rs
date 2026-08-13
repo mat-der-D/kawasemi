@@ -5,9 +5,9 @@
 //! `load_watermark` が同じ値を返す統合テストが通る".
 //!
 //! Mirrors `src/statuses/tag_repository/tests.rs`'s established convention:
-//! `crate::test_harness::spawn_test_app` for an isolated, already-migrated
-//! schema and a deterministic `RuntimeContext` (`app.runtime.ids.next_id()`/
-//! `app.runtime.clock.now()` for id minting / `Clock`-sourced timestamps,
+//! `crate::test_harness::db_fixture::spawn_test_db` for an isolated, already-migrated
+//! schema and a deterministic `RuntimeContext` (`db.runtime.ids.next_id()`/
+//! `db.runtime.clock.now()` for id minting / `Clock`-sourced timestamps,
 //! never `OffsetDateTime::now_utc()`/ad-hoc ids). This module never touches
 //! `statuses`/`tags`/`status_tags` (statuses-core's own tables) — every
 //! fixture here is a `search_tags`/`search_status_tags` row built purely
@@ -20,20 +20,20 @@
 use super::{load_watermark, match_hashtags, save_watermark, upsert_tag_usage};
 use crate::domain::Id;
 use crate::search::model::TagView;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 /// Records one use of `name` by a freshly minted status id, returning the
 /// status id used (callers that need a stable, distinguishable status id
 /// across multiple calls get one back rather than having to mint it
 /// themselves twice).
-async fn record_usage(app: &TestApp, name: &str) -> Id {
-    let status_id = app.runtime.ids.next_id();
+async fn record_usage(db: &TestDb, name: &str) -> Id {
+    let status_id = db.runtime.ids.next_id();
     upsert_tag_usage(
-        &app.pool,
+        &db.pool,
         name,
-        app.runtime.ids.next_id(),
+        db.runtime.ids.next_id(),
         status_id,
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("upsert_tag_usage must succeed");
@@ -46,10 +46,10 @@ async fn record_usage(app: &TestApp, name: &str) -> Id {
 /// returned as a `TagView` carrying that name (Requirement 5.1, 5.2).
 #[tokio::test]
 async fn match_hashtags_finds_a_recorded_tag_by_exact_name() {
-    let app = spawn_test_app().await;
-    record_usage(&app, "rustlang").await;
+    let db = spawn_test_db().await;
+    record_usage(&db, "rustlang").await;
 
-    let matches = match_hashtags(&app.pool, "rustlang", 20, 0)
+    let matches = match_hashtags(&db.pool, "rustlang", 20, 0)
         .await
         .expect("match_hashtags must succeed");
 
@@ -62,7 +62,7 @@ async fn match_hashtags_finds_a_recorded_tag_by_exact_name() {
         }]
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `match_hashtags` matches by name *prefix* (Requirement 5.1's "前方...一
@@ -70,33 +70,33 @@ async fn match_hashtags_finds_a_recorded_tag_by_exact_name() {
 /// insensitively, but not a name that merely contains the term elsewhere.
 #[tokio::test]
 async fn match_hashtags_matches_by_case_insensitive_prefix() {
-    let app = spawn_test_app().await;
-    record_usage(&app, "rustlang").await;
-    record_usage(&app, "rustacean").await;
-    record_usage(&app, "mastodon").await;
+    let db = spawn_test_db().await;
+    record_usage(&db, "rustlang").await;
+    record_usage(&db, "rustacean").await;
+    record_usage(&db, "mastodon").await;
     // "oldrust" contains "rust" but does not *start* with it -- must not
     // match a "rust"-prefix query.
-    record_usage(&app, "oldrust").await;
+    record_usage(&db, "oldrust").await;
 
-    let matches = match_hashtags(&app.pool, "RuSt", 20, 0)
+    let matches = match_hashtags(&db.pool, "RuSt", 20, 0)
         .await
         .expect("match_hashtags must succeed");
 
     let names: Vec<&str> = matches.iter().map(|tag| tag.name.as_str()).collect();
     assert_eq!(names, vec!["rustacean", "rustlang"], "name ASC order");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `limit`/`offset` are applied by `match_hashtags` (Requirement 5.5).
 #[tokio::test]
 async fn match_hashtags_applies_limit_and_offset() {
-    let app = spawn_test_app().await;
-    record_usage(&app, "tagalpha").await;
-    record_usage(&app, "tagbeta").await;
-    record_usage(&app, "taggamma").await;
+    let db = spawn_test_db().await;
+    record_usage(&db, "tagalpha").await;
+    record_usage(&db, "tagbeta").await;
+    record_usage(&db, "taggamma").await;
 
-    let page1 = match_hashtags(&app.pool, "tag", 1, 0)
+    let page1 = match_hashtags(&db.pool, "tag", 1, 0)
         .await
         .expect("match_hashtags page 1 must succeed");
     assert_eq!(
@@ -104,7 +104,7 @@ async fn match_hashtags_applies_limit_and_offset() {
         vec!["tagalpha"]
     );
 
-    let page2 = match_hashtags(&app.pool, "tag", 1, 1)
+    let page2 = match_hashtags(&db.pool, "tag", 1, 1)
         .await
         .expect("match_hashtags page 2 must succeed");
     assert_eq!(
@@ -112,26 +112,26 @@ async fn match_hashtags_applies_limit_and_offset() {
         vec!["tagbeta"]
     );
 
-    let beyond = match_hashtags(&app.pool, "tag", 1, 100)
+    let beyond = match_hashtags(&db.pool, "tag", 1, 100)
         .await
         .expect("match_hashtags offset-beyond-end must succeed");
     assert!(beyond.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A query term matching no tag returns an empty Vec, not an error.
 #[tokio::test]
 async fn match_hashtags_returns_empty_for_no_match() {
-    let app = spawn_test_app().await;
-    record_usage(&app, "rustlang").await;
+    let db = spawn_test_db().await;
+    record_usage(&db, "rustlang").await;
 
-    let matches = match_hashtags(&app.pool, "nonexistent", 20, 0)
+    let matches = match_hashtags(&db.pool, "nonexistent", 20, 0)
         .await
         .expect("match_hashtags must succeed even with no matches");
     assert!(matches.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- upsert_tag_usage: id stability + (tag_id, status_id) dedup -----------
@@ -142,16 +142,16 @@ async fn match_hashtags_returns_empty_for_no_match() {
 /// returning exactly one `TagView` for that name after both calls.
 #[tokio::test]
 async fn upsert_tag_usage_reuses_the_same_tag_row_for_repeated_names() {
-    let app = spawn_test_app().await;
-    record_usage(&app, "shared").await;
-    record_usage(&app, "shared").await;
+    let db = spawn_test_db().await;
+    record_usage(&db, "shared").await;
+    record_usage(&db, "shared").await;
 
-    let matches = match_hashtags(&app.pool, "shared", 20, 0)
+    let matches = match_hashtags(&db.pool, "shared", 20, 0)
         .await
         .expect("match_hashtags must succeed");
     assert_eq!(matches.len(), 1, "only one search_tags row for the name");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.2 / this task's own completion condition: re-recording the
@@ -163,26 +163,26 @@ async fn upsert_tag_usage_reuses_the_same_tag_row_for_repeated_names() {
 /// starting empty).
 #[tokio::test]
 async fn upsert_tag_usage_deduplicates_the_same_tag_status_pair() {
-    let app = spawn_test_app().await;
-    let status_id = app.runtime.ids.next_id();
-    let new_tag_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let status_id = db.runtime.ids.next_id();
+    let new_tag_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
 
-    upsert_tag_usage(&app.pool, "idempotent", new_tag_id, status_id, now)
+    upsert_tag_usage(&db.pool, "idempotent", new_tag_id, status_id, now)
         .await
         .expect("first upsert_tag_usage must succeed");
     // A second call for the exact same (name, status_id) pair, with a
     // *different* candidate new_tag_id -- proving the first call's tag id
     // wins and this second candidate id is discarded.
-    let other_candidate_id = app.runtime.ids.next_id();
-    upsert_tag_usage(&app.pool, "idempotent", other_candidate_id, status_id, now)
+    let other_candidate_id = db.runtime.ids.next_id();
+    upsert_tag_usage(&db.pool, "idempotent", other_candidate_id, status_id, now)
         .await
         .expect("second (duplicate) upsert_tag_usage must succeed as a no-op association");
 
     let association_count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM search_status_tags WHERE status_id = $1")
             .bind(status_id.as_i64())
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("counting search_status_tags rows must succeed");
     assert_eq!(
@@ -193,7 +193,7 @@ async fn upsert_tag_usage_deduplicates_the_same_tag_status_pair() {
     let tag_row: (i64, i64) =
         sqlx::query_as("SELECT id, statuses_count FROM search_tags WHERE name = $1")
             .bind("idempotent")
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("fetching the search_tags row must succeed");
     assert_eq!(
@@ -206,26 +206,26 @@ async fn upsert_tag_usage_deduplicates_the_same_tag_status_pair() {
         "statuses_count must not be double-counted by the duplicate call"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Two *different* statuses using the same tag each create their own
 /// `search_status_tags` association and both bump `statuses_count`.
 #[tokio::test]
 async fn upsert_tag_usage_counts_distinct_statuses_for_the_same_tag() {
-    let app = spawn_test_app().await;
-    record_usage(&app, "popular").await;
-    record_usage(&app, "popular").await;
-    record_usage(&app, "popular").await;
+    let db = spawn_test_db().await;
+    record_usage(&db, "popular").await;
+    record_usage(&db, "popular").await;
+    record_usage(&db, "popular").await;
 
     let tag_row: (i64,) = sqlx::query_as("SELECT statuses_count FROM search_tags WHERE name = $1")
         .bind("popular")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("fetching the search_tags row must succeed");
     assert_eq!(tag_row.0, 3);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- load_watermark / save_watermark ---------------------------------------
@@ -234,14 +234,14 @@ async fn upsert_tag_usage_counts_distinct_statuses_for_the_same_tag() {
 /// written (the migration seeds no initial row).
 #[tokio::test]
 async fn load_watermark_returns_none_when_never_saved() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
-    let watermark = load_watermark(&app.pool)
+    let watermark = load_watermark(&db.pool)
         .await
         .expect("load_watermark must succeed even with no row yet");
     assert!(watermark.is_none());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 5.3 / this task's own completion condition: `load_watermark`
@@ -249,15 +249,15 @@ async fn load_watermark_returns_none_when_never_saved() {
 /// pair just saved.
 #[tokio::test]
 async fn save_watermark_then_load_watermark_round_trips() {
-    let app = spawn_test_app().await;
-    let status_id = app.runtime.ids.next_id();
-    let created_at = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let status_id = db.runtime.ids.next_id();
+    let created_at = db.runtime.clock.now();
 
-    save_watermark(&app.pool, created_at, status_id)
+    save_watermark(&db.pool, created_at, status_id)
         .await
         .expect("save_watermark must succeed");
 
-    let loaded = load_watermark(&app.pool)
+    let loaded = load_watermark(&db.pool)
         .await
         .expect("load_watermark must succeed")
         .expect("a watermark was just saved");
@@ -265,7 +265,7 @@ async fn save_watermark_then_load_watermark_round_trips() {
     assert_eq!(loaded.0, created_at);
     assert_eq!(loaded.1, status_id);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A second `save_watermark` call overwrites the first (the singleton row is
@@ -273,20 +273,20 @@ async fn save_watermark_then_load_watermark_round_trips() {
 /// save.
 #[tokio::test]
 async fn save_watermark_upserts_the_singleton_row() {
-    let app = spawn_test_app().await;
-    let first_status = app.runtime.ids.next_id();
-    let first_time = app.runtime.clock.now();
-    save_watermark(&app.pool, first_time, first_status)
+    let db = spawn_test_db().await;
+    let first_status = db.runtime.ids.next_id();
+    let first_time = db.runtime.clock.now();
+    save_watermark(&db.pool, first_time, first_status)
         .await
         .expect("first save_watermark must succeed");
 
-    let second_status = app.runtime.ids.next_id();
+    let second_status = db.runtime.ids.next_id();
     let second_time = first_time + time::Duration::seconds(60);
-    save_watermark(&app.pool, second_time, second_status)
+    save_watermark(&db.pool, second_time, second_status)
         .await
         .expect("second save_watermark must succeed");
 
-    let loaded = load_watermark(&app.pool)
+    let loaded = load_watermark(&db.pool)
         .await
         .expect("load_watermark must succeed")
         .expect("a watermark was saved");
@@ -294,10 +294,10 @@ async fn save_watermark_upserts_the_singleton_row() {
     assert_eq!(loaded.1, second_status);
 
     let row_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM search_index_watermark")
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting search_index_watermark rows must succeed");
     assert_eq!(row_count.0, 1, "the watermark table must stay a singleton");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

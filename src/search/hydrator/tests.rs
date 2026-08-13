@@ -6,7 +6,9 @@
 //! One pure-logic unit test needs no database
 //! ([`account_ref_id_recovers_the_id_regardless_of_local_remote`]). Every
 //! other test is a real, executable DB-backed integration test against
-//! `crate::test_harness::spawn_test_app` — mirroring
+//! `crate::test_harness::spawn_test_app` (or, for the `TolerantPolls`
+//! cases, the lighter `crate::test_harness::db_fixture::spawn_test_db`)
+//! — mirroring
 //! `notifications/service/tests.rs`'s/`hashtag_repository/tests.rs`'s
 //! established convention (`create_test_actor` is an exact copy of
 //! `notifications/service/tests.rs`'s own helper of the same name;
@@ -37,6 +39,7 @@ use crate::statuses::model::{Poll, PollOption, Tag};
 use crate::statuses::poll_repository::PollTally;
 use crate::statuses::status_repository::insert_status;
 use crate::statuses::tag_repository::{associate_tag, upsert_tag};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 use crate::test_harness::{TestApp, spawn_test_app};
 
 // -- pure-logic (no DB) -------------------------------------------------
@@ -123,19 +126,17 @@ fn sample_status(
 }
 
 async fn create_test_status(
-    app: &TestApp,
+    pool: &PgPool,
+    runtime: &RuntimeContext,
     actor_id: Id,
     visibility: Visibility,
     content: &str,
 ) -> Id {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    insert_status(
-        &app.pool,
-        &sample_status(id, actor_id, visibility, content, now),
-    )
-    .await
-    .expect("insert_status must succeed");
+    let id = runtime.ids.next_id();
+    let now = runtime.clock.now();
+    insert_status(pool, &sample_status(id, actor_id, visibility, content, now))
+        .await
+        .expect("insert_status must succeed");
     id
 }
 
@@ -285,8 +286,22 @@ async fn hydrate_statuses_excludes_a_post_invisible_to_the_viewer() {
     let author = create_test_actor(&app, "author").await;
     let viewer = create_test_actor(&app, "viewer").await;
 
-    let public_id = create_test_status(&app, author, Visibility::Public, "hello rustlang").await;
-    let private_id = create_test_status(&app, author, Visibility::Private, "secret rustlang").await;
+    let public_id = create_test_status(
+        &app.pool,
+        &app.runtime,
+        author,
+        Visibility::Public,
+        "hello rustlang",
+    )
+    .await;
+    let private_id = create_test_status(
+        &app.pool,
+        &app.runtime,
+        author,
+        Visibility::Private,
+        "secret rustlang",
+    )
+    .await;
 
     let rendered = hydrator
         .hydrate_statuses(&[public_id, private_id], viewer, 20)
@@ -313,8 +328,14 @@ async fn hydrate_statuses_includes_a_private_post_visible_to_its_own_author() {
     let hydrator = build_hydrator(&app);
 
     let author = create_test_actor(&app, "author2").await;
-    let private_id =
-        create_test_status(&app, author, Visibility::Private, "author's own secret").await;
+    let private_id = create_test_status(
+        &app.pool,
+        &app.runtime,
+        author,
+        Visibility::Private,
+        "author's own secret",
+    )
+    .await;
 
     let rendered = hydrator
         .hydrate_statuses(&[private_id], author, 20)
@@ -343,7 +364,16 @@ async fn hydrate_statuses_truncates_to_the_requested_limit_after_visibility_filt
     let author = create_test_actor(&app, "author3").await;
     let mut ids = Vec::new();
     for i in 0..5 {
-        ids.push(create_test_status(&app, author, Visibility::Public, &format!("post {i}")).await);
+        ids.push(
+            create_test_status(
+                &app.pool,
+                &app.runtime,
+                author,
+                Visibility::Public,
+                &format!("post {i}"),
+            )
+            .await,
+        );
     }
 
     let rendered = hydrator
@@ -365,7 +395,14 @@ async fn hydrate_statuses_skips_an_unknown_id_without_erroring() {
     let hydrator = build_hydrator(&app);
 
     let author = create_test_actor(&app, "author4").await;
-    let real_id = create_test_status(&app, author, Visibility::Public, "real post").await;
+    let real_id = create_test_status(
+        &app.pool,
+        &app.runtime,
+        author,
+        Visibility::Public,
+        "real post",
+    )
+    .await;
     let missing_id = app.runtime.ids.next_id();
 
     let rendered = hydrator
@@ -488,12 +525,18 @@ async fn hydrate_hashtags_renders_multiple_tags_in_order() {
 /// Inserts a `polls` row carrying `titles` as options `idx 0..N`, attached
 /// to a fresh `statuses` row — `polls.status_id` is a real FK, so a genuine
 /// target row is required.
-async fn insert_test_poll(app: &TestApp, titles: &[&str]) -> Poll {
-    let actor_id = app.runtime.ids.next_id();
-    let status_id =
-        create_test_status(app, actor_id, Visibility::Public, "what's for lunch?").await;
+async fn insert_test_poll(db: &TestDb, titles: &[&str]) -> Poll {
+    let actor_id = db.runtime.ids.next_id();
+    let status_id = create_test_status(
+        &db.pool,
+        &db.runtime,
+        actor_id,
+        Visibility::Public,
+        "what's for lunch?",
+    )
+    .await;
     let poll = Poll {
-        id: app.runtime.ids.next_id(),
+        id: db.runtime.ids.next_id(),
         status_id,
         expires_at: None,
         multiple: false,
@@ -508,7 +551,7 @@ async fn insert_test_poll(app: &TestApp, titles: &[&str]) -> Poll {
             votes_count: 0,
         })
         .collect();
-    poll_repository::insert_poll(&app.pool, &poll, &options)
+    poll_repository::insert_poll(&db.pool, &poll, &options)
         .await
         .expect("insert_poll must succeed for a fresh poll");
     poll
@@ -538,13 +581,13 @@ fn option_titles(tally: &PollTally) -> Vec<&str> {
 /// difference between dropping it and raising on it is easiest to get wrong.
 #[tokio::test]
 async fn resolve_many_drops_a_dangling_poll_id_instead_of_failing() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = TolerantPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let first = insert_test_poll(&app, &["Yes", "No"]).await;
-    let second = insert_test_poll(&app, &["Pizza", "Sushi"]).await;
+    let first = insert_test_poll(&db, &["Yes", "No"]).await;
+    let second = insert_test_poll(&db, &["Pizza", "Sushi"]).await;
     let dangling = Id::from_i64(i64::MAX - 41);
 
     let resolved = polls
@@ -560,7 +603,7 @@ async fn resolve_many_drops_a_dangling_poll_id_instead_of_failing() {
     assert_eq!(option_titles(&resolved[0].2), vec!["Yes", "No"]);
     assert_eq!(option_titles(&resolved[1].2), vec!["Pizza", "Sushi"]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The returned `Vec` follows `poll_ids`, not whatever order the rows come
@@ -569,14 +612,14 @@ async fn resolve_many_drops_a_dangling_poll_id_instead_of_failing() {
 /// iteration order through could not pass by luck.
 #[tokio::test]
 async fn resolve_many_returns_polls_in_the_requested_order() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = TolerantPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let first = insert_test_poll(&app, &["a"]).await;
-    let second = insert_test_poll(&app, &["b"]).await;
-    let third = insert_test_poll(&app, &["c"]).await;
+    let first = insert_test_poll(&db, &["a"]).await;
+    let second = insert_test_poll(&db, &["b"]).await;
+    let third = insert_test_poll(&db, &["c"]).await;
 
     let requested = [third.id, first.id, second.id];
     let resolved = polls
@@ -589,7 +632,7 @@ async fn resolve_many_returns_polls_in_the_requested_order() {
     assert_eq!(option_titles(&resolved[1].2), vec!["a"]);
     assert_eq!(option_titles(&resolved[2].2), vec!["b"]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `viewer` reaches the tally: their own selections come back in
@@ -597,14 +640,14 @@ async fn resolve_many_returns_polls_in_the_requested_order() {
 /// seeing the same public `voters_count`.
 #[tokio::test]
 async fn resolve_many_reports_the_viewers_own_votes() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = TolerantPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let poll = insert_test_poll(&app, &["Yes", "No"]).await;
-    let viewer = app.runtime.ids.next_id();
-    poll_repository::record_vote(&app.pool, poll.id, viewer, &[1], app.runtime.clock.now())
+    let poll = insert_test_poll(&db, &["Yes", "No"]).await;
+    let viewer = db.runtime.ids.next_id();
+    poll_repository::record_vote(&db.pool, poll.id, viewer, &[1], db.runtime.clock.now())
         .await
         .expect("record_vote must succeed");
 
@@ -622,7 +665,7 @@ async fn resolve_many_reports_the_viewers_own_votes() {
     assert!(anonymous[0].2.own_votes.is_empty());
     assert_eq!(anonymous[0].2.voters_count, 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- `hydrate_statuses` page characterization ------------------------------
@@ -758,12 +801,25 @@ async fn hydrate_statuses_keeps_every_rendered_material_order_and_truncation() {
     let missing = app.runtime.ids.next_id();
     // Skipped: someone else's `private` post, invisible under the default
     // `NoRelationshipQuery`.
-    let hidden = create_test_status(&app, other, Visibility::Private, "not for you").await;
+    let hidden = create_test_status(
+        &app.pool,
+        &app.runtime,
+        other,
+        Visibility::Private,
+        "not for you",
+    )
+    .await;
 
     // A boost of a visible post, favourited by the viewer so the nested
     // reblog's own interaction state is non-default.
-    let visible_target =
-        create_test_status(&app, other, Visibility::Public, "boosted publicly").await;
+    let visible_target = create_test_status(
+        &app.pool,
+        &app.runtime,
+        other,
+        Visibility::Public,
+        "boosted publicly",
+    )
+    .await;
     add_favourite(&app.pool, viewer, visible_target, app.runtime.clock.now())
         .await
         .expect("add_favourite must succeed");
@@ -778,8 +834,14 @@ async fn hydrate_statuses_keeps_every_rendered_material_order_and_truncation() {
     .await;
 
     // A boost of a post the viewer may not see.
-    let hidden_target =
-        create_test_status(&app, other, Visibility::Private, "boosted privately").await;
+    let hidden_target = create_test_status(
+        &app.pool,
+        &app.runtime,
+        other,
+        Visibility::Private,
+        "boosted privately",
+    )
+    .await;
     let boost_of_hidden = create_special_status(
         &app,
         viewer,
@@ -792,11 +854,18 @@ async fn hydrate_statuses_keeps_every_rendered_material_order_and_truncation() {
 
     // Two by the same author, the first carrying a tag and two shortcodes
     // deliberately out of alphabetical order.
-    let plain_a =
-        create_test_status(&app, viewer, Visibility::Public, "first :zulu: and :alpha:").await;
+    let plain_a = create_test_status(
+        &app.pool,
+        &app.runtime,
+        viewer,
+        Visibility::Public,
+        "first :zulu: and :alpha:",
+    )
+    .await;
     attach_tag(&app, plain_a, "kawasemi").await;
     let plain_b = create_test_status(
-        &app,
+        &app.pool,
+        &app.runtime,
         viewer,
         Visibility::Public,
         "second by the same author",
@@ -841,8 +910,14 @@ async fn hydrate_statuses_keeps_every_rendered_material_order_and_truncation() {
     .expect("insert_poll must succeed");
 
     // The one `limit` has to cut off.
-    let overflow =
-        create_test_status(&app, viewer, Visibility::Public, "one candidate too many").await;
+    let overflow = create_test_status(
+        &app.pool,
+        &app.runtime,
+        viewer,
+        Visibility::Public,
+        "one candidate too many",
+    )
+    .await;
 
     let candidates = [
         missing,
@@ -982,8 +1057,16 @@ async fn hydrate_statuses_renders_nothing_for_a_zero_limit() {
     let hydrator = build_hydrator(&app);
 
     let author = create_test_actor(&app, "zerolimit_author").await;
-    let first = create_test_status(&app, author, Visibility::Public, "first").await;
-    let second = create_test_status(&app, author, Visibility::Public, "second").await;
+    let first =
+        create_test_status(&app.pool, &app.runtime, author, Visibility::Public, "first").await;
+    let second = create_test_status(
+        &app.pool,
+        &app.runtime,
+        author,
+        Visibility::Public,
+        "second",
+    )
+    .await;
 
     let rendered = hydrator
         .hydrate_statuses(&[first, second], author, 0)

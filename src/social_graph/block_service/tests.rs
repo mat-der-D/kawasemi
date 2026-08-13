@@ -4,7 +4,7 @@
 //! 送される状態".
 //!
 //! Mirrors `follow_service/tests.rs`'s established convention
-//! (`crate::test_harness::spawn_test_app`, a `RecordingSink` `DeliverySink`
+//! (`crate::test_harness::db_fixture::spawn_test_db`, a `RecordingSink` `DeliverySink`
 //! double capturing every dispatched Activity, `create_test_actor`/
 //! `create_test_remote` fixtures) — this service needs *real*
 //! `actor`/`remote_accounts`/`follows`/`follow_requests`/`blocks` rows, not
@@ -30,7 +30,7 @@ use crate::runtime::SeqIdGenerator;
 use crate::social_graph::activity_builder::PgRemoteActorLookup;
 use crate::social_graph::model::{FollowOptions, FollowRequest, FollowRequestDirection};
 use crate::social_graph::transitions::Transitions;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 // --- Test fixtures ----------------------------------------------------------
 
@@ -38,14 +38,14 @@ use crate::test_harness::{TestApp, spawn_test_app};
 /// exact copy of `follow_service/tests.rs::create_test_actor` (this module's
 /// own tests need the identical real-actor shape `ActorDirectory` resolves
 /// against).
-async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+async fn create_test_actor(db: &TestDb, handle: &str) -> Id {
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
     let actor = crate::actor::model::LocalActor {
         id: actor_id,
         owner_id,
@@ -57,7 +57,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
         created_at: now,
         updated_at: now,
     };
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -89,10 +89,10 @@ fn sample_remote_account(id: Id, actor_uri: &str, fetched_at: OffsetDateTime) ->
 }
 
 /// Creates a real `remote_accounts` row, returning its `Id`.
-async fn create_test_remote(app: &TestApp, actor_uri: &str) -> Id {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    upsert_remote(&app.pool, &sample_remote_account(id, actor_uri, now))
+async fn create_test_remote(db: &TestDb, actor_uri: &str) -> Id {
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    upsert_remote(&db.pool, &sample_remote_account(id, actor_uri, now))
         .await
         .expect("upsert_remote must succeed");
     id
@@ -150,11 +150,11 @@ type TestService = BlockService<
     Arc<RecordingSink>,
 >;
 
-fn build_service(app: &TestApp) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
+fn build_service(db: &TestDb) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
     let local_sink = Arc::new(RecordingSink::new());
     let http_sink = Arc::new(RecordingSink::new());
     let delivery = DeliveryService::new(
-        RecipientTargetResolver::new(ActorDirectory::new(app.pool.clone())),
+        RecipientTargetResolver::new(ActorDirectory::new(db.pool.clone())),
         Arc::clone(&local_sink),
         Arc::clone(&http_sink),
     );
@@ -163,18 +163,18 @@ fn build_service(app: &TestApp) -> (TestService, Arc<RecordingSink>, Arc<Recordi
     let activity_builder = ActivityBuilder::new(
         urls,
         ids,
-        ActorDirectory::new(app.pool.clone()),
-        PgRemoteActorLookup::new(app.pool.clone()),
+        ActorDirectory::new(db.pool.clone()),
+        PgRemoteActorLookup::new(db.pool.clone()),
     );
 
     let service = BlockService::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        ActorDirectory::new(app.pool.clone()),
+        db.pool.clone(),
+        db.runtime.clone(),
+        ActorDirectory::new(db.pool.clone()),
         activity_builder,
         Transitions::new(
-            app.pool.clone(),
-            app.runtime.clone(),
+            db.pool.clone(),
+            db.runtime.clone(),
             crate::statuses::notification_sink::NotificationSinkRegistry::new(),
         ),
         Arc::new(delivery),
@@ -202,11 +202,11 @@ fn default_opts() -> FollowOptions {
 
 #[tokio::test]
 async fn block_records_the_relationship_and_delivers_block_locally() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "blocker1").await;
-    let target = create_test_actor(&app, "blocked1").await;
+    let viewer = create_test_actor(&db, "blocker1").await;
+    let target = create_test_actor(&db, "blocked1").await;
 
     let relationship = service
         .block(viewer, &target.as_i64().to_string())
@@ -228,18 +228,18 @@ async fn block_records_the_relationship_and_delivers_block_locally() {
 async fn block_clears_bidirectional_follows_and_pending_requests() {
     // Requirement 5.2: blocking clears both-direction established follows
     // and both-direction pending follow requests.
-    let app = spawn_test_app().await;
-    let (service, _local_sink, _http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, _local_sink, _http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "blocker2").await;
-    let target = create_test_actor(&app, "blocked2").await;
+    let viewer = create_test_actor(&db, "blocker2").await;
+    let target = create_test_actor(&db, "blocked2").await;
 
     let viewer_ref = AccountRef::Local(viewer);
     let target_ref = AccountRef::Local(target);
 
     let transitions = Transitions::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         crate::statuses::notification_sink::NotificationSinkRegistry::new(),
     );
     // Mutual follow both directions.
@@ -268,7 +268,7 @@ async fn block_clears_bidirectional_follows_and_pending_requests() {
             target: viewer_ref,
             direction: FollowRequestDirection::Inbound,
             activity_id: "https://local.test/acts/req1".to_string(),
-            created_at: app.runtime.clock.now(),
+            created_at: db.runtime.clock.now(),
         })
         .await
         .expect("record_pending must succeed");
@@ -286,11 +286,11 @@ async fn block_clears_bidirectional_follows_and_pending_requests() {
 
 #[tokio::test]
 async fn block_is_idempotent_and_does_not_redeliver() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, _http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, _http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "blocker3").await;
-    let target = create_test_actor(&app, "blocked3").await;
+    let viewer = create_test_actor(&db, "blocker3").await;
+    let target = create_test_actor(&db, "blocked3").await;
 
     let first = service
         .block(viewer, &target.as_i64().to_string())
@@ -316,10 +316,10 @@ async fn block_is_idempotent_and_does_not_redeliver() {
 
 #[tokio::test]
 async fn block_rejects_a_self_block() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "loner_blocker").await;
+    let viewer = create_test_actor(&db, "loner_blocker").await;
 
     let err = service
         .block(viewer, &viewer.as_i64().to_string())
@@ -334,10 +334,10 @@ async fn block_rejects_a_self_block() {
 
 #[tokio::test]
 async fn block_returns_not_found_for_a_nonexistent_target() {
-    let app = spawn_test_app().await;
-    let (service, _local_sink, _http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, _local_sink, _http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "seeker_blocker").await;
+    let viewer = create_test_actor(&db, "seeker_blocker").await;
 
     let err = service
         .block(viewer, "999999999")
@@ -352,11 +352,11 @@ async fn block_returns_not_found_for_a_nonexistent_target() {
 
 #[tokio::test]
 async fn block_delivers_via_http_for_a_remote_target() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "blocker4").await;
-    let target = create_test_remote(&app, "https://remote.example/users/dave").await;
+    let viewer = create_test_actor(&db, "blocker4").await;
+    let target = create_test_remote(&db, "https://remote.example/users/dave").await;
 
     let relationship = service
         .block(viewer, &target.as_i64().to_string())
@@ -383,11 +383,11 @@ async fn block_delivers_via_http_for_a_remote_target() {
 
 #[tokio::test]
 async fn unblock_removes_an_existing_block_and_delivers_undo() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, _http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, _http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "blocker5").await;
-    let target = create_test_actor(&app, "blocked5").await;
+    let viewer = create_test_actor(&db, "blocker5").await;
+    let target = create_test_actor(&db, "blocked5").await;
 
     service
         .block(viewer, &target.as_i64().to_string())
@@ -412,11 +412,11 @@ async fn unblock_removes_an_existing_block_and_delivers_undo() {
 
 #[tokio::test]
 async fn unblock_is_a_noop_when_no_block_exists() {
-    let app = spawn_test_app().await;
-    let (service, local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "blocker6").await;
-    let target = create_test_actor(&app, "blocked6").await;
+    let viewer = create_test_actor(&db, "blocker6").await;
+    let target = create_test_actor(&db, "blocked6").await;
 
     let relationship = service
         .unblock(viewer, &target.as_i64().to_string())
@@ -430,11 +430,11 @@ async fn unblock_is_a_noop_when_no_block_exists() {
 
 #[tokio::test]
 async fn unblock_removes_an_existing_block_for_a_remote_target_via_http() {
-    let app = spawn_test_app().await;
-    let (service, _local_sink, http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, _local_sink, http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "blocker7").await;
-    let target = create_test_remote(&app, "https://remote.example/users/erin").await;
+    let viewer = create_test_actor(&db, "blocker7").await;
+    let target = create_test_remote(&db, "https://remote.example/users/erin").await;
 
     service
         .block(viewer, &target.as_i64().to_string())
@@ -455,10 +455,10 @@ async fn unblock_removes_an_existing_block_for_a_remote_target_via_http() {
 
 #[tokio::test]
 async fn unblock_returns_not_found_for_a_nonexistent_target() {
-    let app = spawn_test_app().await;
-    let (service, _local_sink, _http_sink) = build_service(&app);
+    let db = spawn_test_db().await;
+    let (service, _local_sink, _http_sink) = build_service(&db);
 
-    let viewer = create_test_actor(&app, "seeker_unblocker").await;
+    let viewer = create_test_actor(&db, "seeker_unblocker").await;
 
     let err = service
         .unblock(viewer, "999999999")

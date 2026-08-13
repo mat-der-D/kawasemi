@@ -4,7 +4,7 @@
 //! では常に偽を返し、解除後に偽へ戻ることを単体/統合で確認できる状態".
 //!
 //! Mirrors `inbound/tests.rs`'s established convention:
-//! `crate::test_harness::spawn_test_app` for an isolated, already-migrated
+//! `crate::test_harness::db_fixture::spawn_test_db` for an isolated, already-migrated
 //! schema; `create_test_actor` for real `local_actors` rows (needed here
 //! because [`BlockPolicyImpl`]'s destination-side resolution goes through a
 //! real [`ActorDirectory`]); a small in-memory `FakeActorUriResolver` (not
@@ -25,20 +25,20 @@ use crate::domain::Id;
 use crate::federation::inbound::block_policy::{BlockPolicy, LocalRecipientContext};
 use crate::social_graph::model::Block;
 use crate::social_graph::repository as sg_repository;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 const TEST_DOMAIN: &str = "kawasemi.example";
 
 /// Creates a real owner + local actor row, returning the actor's `Id` --
 /// mirrors `inbound/tests.rs::create_test_actor` exactly.
-async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+async fn create_test_actor(db: &TestDb, handle: &str) -> Id {
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
     let actor = crate::actor::model::LocalActor {
         id: actor_id,
         owner_id,
@@ -50,7 +50,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
         created_at: now,
         updated_at: now,
     };
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -110,26 +110,26 @@ impl ActorUriResolver for FakeActorUriResolver {
 }
 
 fn build_policy(
-    app: &TestApp,
+    db: &TestDb,
     actor_uris: FakeActorUriResolver,
 ) -> BlockPolicyImpl<FakeActorUriResolver> {
     BlockPolicyImpl::new(
-        app.pool.clone(),
+        db.pool.clone(),
         TEST_DOMAIN,
-        Arc::new(ActorDirectory::new(app.pool.clone())),
+        Arc::new(ActorDirectory::new(db.pool.clone())),
         actor_uris,
     )
 }
 
-async fn upsert_block(app: &TestApp, blocker: AccountRef, blocked: AccountRef) {
+async fn upsert_block(db: &TestDb, blocker: AccountRef, blocked: AccountRef) {
     sg_repository::upsert_block(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &Block {
             blocker,
             blocked,
             activity_id: "https://example.test/activities/block-1".to_string(),
-            created_at: app.runtime.clock.now(),
+            created_at: db.runtime.clock.now(),
         },
     )
     .await
@@ -140,15 +140,15 @@ async fn upsert_block(app: &TestApp, blocker: AccountRef, blocked: AccountRef) {
 /// the destination local actor's own `Actor`-context perspective.
 #[tokio::test]
 async fn actor_context_reports_true_when_destination_has_blocked_the_signer() {
-    let app = spawn_test_app().await;
-    let dest_id = create_test_actor(&app, "dest").await;
+    let db = spawn_test_db().await;
+    let dest_id = create_test_actor(&db, "dest").await;
     let dest = AccountRef::Local(dest_id);
     let signer_uri = "https://remote.example/users/attacker";
-    let signer = AccountRef::Remote(app.runtime.ids.next_id());
+    let signer = AccountRef::Remote(db.runtime.ids.next_id());
 
-    upsert_block(&app, dest, signer).await;
+    upsert_block(&db, dest, signer).await;
 
-    let policy = build_policy(&app, FakeActorUriResolver::new().with(signer_uri, signer));
+    let policy = build_policy(&db, FakeActorUriResolver::new().with(signer_uri, signer));
 
     let blocked = policy
         .is_blocked(
@@ -161,18 +161,18 @@ async fn actor_context_reports_true_when_destination_has_blocked_the_signer() {
         .expect("is_blocked must succeed");
     assert!(blocked, "a blocked signer must be reported as blocked");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 6.1: an unblocked signer is reported not-blocked.
 #[tokio::test]
 async fn actor_context_reports_false_when_no_block_exists() {
-    let app = spawn_test_app().await;
-    create_test_actor(&app, "dest").await;
+    let db = spawn_test_db().await;
+    create_test_actor(&db, "dest").await;
     let signer_uri = "https://remote.example/users/friend";
-    let signer = AccountRef::Remote(app.runtime.ids.next_id());
+    let signer = AccountRef::Remote(db.runtime.ids.next_id());
 
-    let policy = build_policy(&app, FakeActorUriResolver::new().with(signer_uri, signer));
+    let policy = build_policy(&db, FakeActorUriResolver::new().with(signer_uri, signer));
 
     let blocked = policy
         .is_blocked(
@@ -188,7 +188,7 @@ async fn actor_context_reports_false_when_no_block_exists() {
         "an unblocked signer must not be reported as blocked"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 6.1: the judgment is scoped to the *destination* local
@@ -196,18 +196,18 @@ async fn actor_context_reports_false_when_no_block_exists() {
 /// another local actor's own judgment.
 #[tokio::test]
 async fn actor_context_is_scoped_to_the_destination_local_actor() {
-    let app = spawn_test_app().await;
-    let dest_id = create_test_actor(&app, "dest").await;
-    let other_id = create_test_actor(&app, "other").await;
+    let db = spawn_test_db().await;
+    let dest_id = create_test_actor(&db, "dest").await;
+    let other_id = create_test_actor(&db, "other").await;
     let dest = AccountRef::Local(dest_id);
     let other = AccountRef::Local(other_id);
     let signer_uri = "https://remote.example/users/attacker";
-    let signer = AccountRef::Remote(app.runtime.ids.next_id());
+    let signer = AccountRef::Remote(db.runtime.ids.next_id());
 
     // `other` (not `dest`) has blocked the signer.
-    upsert_block(&app, other, signer).await;
+    upsert_block(&db, other, signer).await;
 
-    let policy = build_policy(&app, FakeActorUriResolver::new().with(signer_uri, signer));
+    let policy = build_policy(&db, FakeActorUriResolver::new().with(signer_uri, signer));
 
     let blocked = policy
         .is_blocked(
@@ -225,7 +225,7 @@ async fn actor_context_is_scoped_to_the_destination_local_actor() {
     );
     let _ = dest;
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 6.3: a `SharedInbox` context must always answer `false`,
@@ -233,15 +233,15 @@ async fn actor_context_is_scoped_to_the_destination_local_actor() {
 /// never bulk-reject at this point in the pipeline.
 #[tokio::test]
 async fn shared_inbox_context_always_reports_false_even_when_blocked() {
-    let app = spawn_test_app().await;
-    let dest_id = create_test_actor(&app, "dest").await;
+    let db = spawn_test_db().await;
+    let dest_id = create_test_actor(&db, "dest").await;
     let dest = AccountRef::Local(dest_id);
     let signer_uri = "https://remote.example/users/attacker";
-    let signer = AccountRef::Remote(app.runtime.ids.next_id());
+    let signer = AccountRef::Remote(db.runtime.ids.next_id());
 
-    upsert_block(&app, dest, signer).await;
+    upsert_block(&db, dest, signer).await;
 
-    let policy = build_policy(&app, FakeActorUriResolver::new().with(signer_uri, signer));
+    let policy = build_policy(&db, FakeActorUriResolver::new().with(signer_uri, signer));
 
     let blocked = policy
         .is_blocked(signer_uri, LocalRecipientContext::SharedInbox)
@@ -252,7 +252,7 @@ async fn shared_inbox_context_always_reports_false_even_when_blocked() {
         "SharedInbox must never be bulk-rejected, even for a genuinely blocked signer"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 6.4: once a block is undone (row deleted), the very next
@@ -260,15 +260,15 @@ async fn shared_inbox_context_always_reports_false_even_when_blocked() {
 /// state each call, no cached verdict.
 #[tokio::test]
 async fn returns_false_again_after_unblock() {
-    let app = spawn_test_app().await;
-    let dest_id = create_test_actor(&app, "dest").await;
+    let db = spawn_test_db().await;
+    let dest_id = create_test_actor(&db, "dest").await;
     let dest = AccountRef::Local(dest_id);
     let signer_uri = "https://remote.example/users/attacker";
-    let signer = AccountRef::Remote(app.runtime.ids.next_id());
+    let signer = AccountRef::Remote(db.runtime.ids.next_id());
 
-    upsert_block(&app, dest, signer).await;
+    upsert_block(&db, dest, signer).await;
 
-    let policy = build_policy(&app, FakeActorUriResolver::new().with(signer_uri, signer));
+    let policy = build_policy(&db, FakeActorUriResolver::new().with(signer_uri, signer));
     let destination = LocalRecipientContext::Actor {
         actor_uri: actor_url("dest"),
     };
@@ -281,7 +281,7 @@ async fn returns_false_again_after_unblock() {
         "must be blocked before unblock"
     );
 
-    sg_repository::delete_block(&app.pool, &dest, &signer)
+    sg_repository::delete_block(&db.pool, &dest, &signer)
         .await
         .expect("delete_block must succeed");
 
@@ -293,7 +293,7 @@ async fn returns_false_again_after_unblock() {
         "must not be blocked after unblock"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// This module's own doc comment ("Resolving the destination"): an `Actor`
@@ -301,11 +301,11 @@ async fn returns_false_again_after_unblock() {
 /// not an error.
 #[tokio::test]
 async fn actor_context_reports_false_when_destination_does_not_resolve() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let signer_uri = "https://remote.example/users/attacker";
-    let signer = AccountRef::Remote(app.runtime.ids.next_id());
+    let signer = AccountRef::Remote(db.runtime.ids.next_id());
 
-    let policy = build_policy(&app, FakeActorUriResolver::new().with(signer_uri, signer));
+    let policy = build_policy(&db, FakeActorUriResolver::new().with(signer_uri, signer));
 
     let blocked = policy
         .is_blocked(
@@ -321,7 +321,7 @@ async fn actor_context_reports_false_when_destination_does_not_resolve() {
         "an unresolvable destination actor URI must be a benign false, not an error"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A same-server (local-to-local) block is judged the same way as a
@@ -329,17 +329,17 @@ async fn actor_context_reports_false_when_destination_does_not_resolve() {
 /// special-case the signer's own locality.
 #[tokio::test]
 async fn actor_context_reports_true_for_a_blocked_local_signer() {
-    let app = spawn_test_app().await;
-    let dest_id = create_test_actor(&app, "dest").await;
-    let signer_id = create_test_actor(&app, "signer").await;
+    let db = spawn_test_db().await;
+    let dest_id = create_test_actor(&db, "dest").await;
+    let signer_id = create_test_actor(&db, "signer").await;
     let dest = AccountRef::Local(dest_id);
     let signer = AccountRef::Local(signer_id);
     let signer_uri = actor_url("signer");
 
-    upsert_block(&app, dest, signer).await;
+    upsert_block(&db, dest, signer).await;
 
     let policy = build_policy(
-        &app,
+        &db,
         FakeActorUriResolver::new().with(signer_uri.clone(), signer),
     );
 
@@ -357,7 +357,7 @@ async fn actor_context_reports_true_for_a_blocked_local_signer() {
         "a blocked local-to-local signer must be reported as blocked"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- RelProviderImpl / FilterQuery (task 4.3, Requirements 8.2, 8.3, 8.4, ---
@@ -368,10 +368,10 @@ use time::Duration;
 use crate::accounts::ports::RelationshipStateProvider;
 use crate::social_graph::model::{Follow, Mute};
 
-async fn upsert_follow(app: &TestApp, follower: AccountRef, followee: AccountRef, reblogs: bool) {
+async fn upsert_follow(db: &TestDb, follower: AccountRef, followee: AccountRef, reblogs: bool) {
     sg_repository::upsert_follow(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &Follow {
             follower,
             followee,
@@ -379,7 +379,7 @@ async fn upsert_follow(app: &TestApp, follower: AccountRef, followee: AccountRef
             notify: false,
             languages: Vec::new(),
             activity_id: "https://example.test/activities/follow-1".to_string(),
-            created_at: app.runtime.clock.now(),
+            created_at: db.runtime.clock.now(),
         },
     )
     .await
@@ -387,21 +387,21 @@ async fn upsert_follow(app: &TestApp, follower: AccountRef, followee: AccountRef
 }
 
 async fn upsert_mute(
-    app: &TestApp,
+    db: &TestDb,
     muter: AccountRef,
     muted: AccountRef,
     notifications: bool,
     expires_at: Option<time::OffsetDateTime>,
 ) {
     sg_repository::upsert_mute(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &Mute {
             muter,
             muted,
             notifications,
             expires_at,
-            created_at: app.runtime.clock.now(),
+            created_at: db.runtime.clock.now(),
         },
     )
     .await
@@ -414,16 +414,16 @@ async fn upsert_mute(
 /// (not `NoRelationshipProvider`'s always-false defaults).
 #[tokio::test]
 async fn rel_provider_returns_real_flags_in_target_order() {
-    let app = spawn_test_app().await;
-    let viewer_id = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let viewer_id = db.runtime.ids.next_id();
     let viewer = AccountRef::Local(viewer_id);
-    let followed = AccountRef::Remote(app.runtime.ids.next_id());
-    let blocker = AccountRef::Remote(app.runtime.ids.next_id());
+    let followed = AccountRef::Remote(db.runtime.ids.next_id());
+    let blocker = AccountRef::Remote(db.runtime.ids.next_id());
 
-    upsert_follow(&app, viewer, followed, true).await;
-    upsert_block(&app, blocker, viewer).await;
+    upsert_follow(&db, viewer, followed, true).await;
+    upsert_block(&db, blocker, viewer).await;
 
-    let provider = RelProviderImpl::new(app.pool.clone(), app.runtime.clone());
+    let provider = RelProviderImpl::new(db.pool.clone(), db.runtime.clone());
 
     // Deliberately ordered [blocker, followed] -- the reverse of insertion
     // order -- to prove the output follows the *targets* slice's order, not
@@ -461,7 +461,7 @@ async fn rel_provider_returns_real_flags_in_target_order() {
     assert!(views[1].showing_reblogs);
     assert!(!views[1].blocked_by);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 8.4, 9.3: an expired mute must surface as `muting: false`
@@ -471,15 +471,15 @@ async fn rel_provider_returns_real_flags_in_target_order() {
 /// expired mute.
 #[tokio::test]
 async fn rel_provider_excludes_an_expired_mute() {
-    let app = spawn_test_app().await;
-    let viewer_id = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let viewer_id = db.runtime.ids.next_id();
     let viewer = AccountRef::Local(viewer_id);
-    let muted = AccountRef::Remote(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let muted = AccountRef::Remote(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
 
-    upsert_mute(&app, viewer, muted, true, Some(now - Duration::seconds(1))).await;
+    upsert_mute(&db, viewer, muted, true, Some(now - Duration::seconds(1))).await;
 
-    let provider = RelProviderImpl::new(app.pool.clone(), app.runtime.clone());
+    let provider = RelProviderImpl::new(db.pool.clone(), db.runtime.clone());
     let views = provider
         .relationships(viewer_id, &[muted])
         .await
@@ -491,26 +491,26 @@ async fn rel_provider_excludes_an_expired_mute() {
     );
     assert!(!views[0].muting_notifications);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 9.1: `FilterQuery::blocked_set` must report blocked/
 /// blocked-by/muted/muted-notifications sets from real relationship state.
 #[tokio::test]
 async fn filter_query_blocked_set_reports_real_sets() {
-    let app = spawn_test_app().await;
-    let viewer = AccountRef::Local(app.runtime.ids.next_id());
-    let blocked = AccountRef::Remote(app.runtime.ids.next_id());
-    let blocked_by_account = AccountRef::Remote(app.runtime.ids.next_id());
-    let muted_notif = AccountRef::Remote(app.runtime.ids.next_id());
-    let muted_plain = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let viewer = AccountRef::Local(db.runtime.ids.next_id());
+    let blocked = AccountRef::Remote(db.runtime.ids.next_id());
+    let blocked_by_account = AccountRef::Remote(db.runtime.ids.next_id());
+    let muted_notif = AccountRef::Remote(db.runtime.ids.next_id());
+    let muted_plain = AccountRef::Remote(db.runtime.ids.next_id());
 
-    upsert_block(&app, viewer, blocked).await;
-    upsert_block(&app, blocked_by_account, viewer).await;
-    upsert_mute(&app, viewer, muted_notif, true, None).await;
-    upsert_mute(&app, viewer, muted_plain, false, None).await;
+    upsert_block(&db, viewer, blocked).await;
+    upsert_block(&db, blocked_by_account, viewer).await;
+    upsert_mute(&db, viewer, muted_notif, true, None).await;
+    upsert_mute(&db, viewer, muted_plain, false, None).await;
 
-    let query = FilterQuery::new(app.pool.clone(), app.runtime.clone());
+    let query = FilterQuery::new(db.pool.clone(), db.runtime.clone());
     let sets = query
         .blocked_set(&viewer)
         .await
@@ -529,21 +529,21 @@ async fn filter_query_blocked_set_reports_real_sets() {
     });
     assert_eq!(muted, expected);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 9.3: an expired mute must not appear in
 /// `FilterQuery::blocked_set`'s `muted`/`muted_notifications` sets.
 #[tokio::test]
 async fn filter_query_blocked_set_excludes_expired_mutes() {
-    let app = spawn_test_app().await;
-    let viewer = AccountRef::Local(app.runtime.ids.next_id());
-    let muted = AccountRef::Remote(app.runtime.ids.next_id());
-    let now = app.runtime.clock.now();
+    let db = spawn_test_db().await;
+    let viewer = AccountRef::Local(db.runtime.ids.next_id());
+    let muted = AccountRef::Remote(db.runtime.ids.next_id());
+    let now = db.runtime.clock.now();
 
-    upsert_mute(&app, viewer, muted, true, Some(now - Duration::seconds(1))).await;
+    upsert_mute(&db, viewer, muted, true, Some(now - Duration::seconds(1))).await;
 
-    let query = FilterQuery::new(app.pool.clone(), app.runtime.clone());
+    let query = FilterQuery::new(db.pool.clone(), db.runtime.clone());
     let sets = query
         .blocked_set(&viewer)
         .await
@@ -552,22 +552,22 @@ async fn filter_query_blocked_set_excludes_expired_mutes() {
     assert!(sets.muted.is_empty());
     assert!(sets.muted_notifications.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 9.2: `FilterQuery::following_set` must report the viewer's
 /// established follow targets.
 #[tokio::test]
 async fn filter_query_following_set_reports_follow_targets() {
-    let app = spawn_test_app().await;
-    let viewer = AccountRef::Local(app.runtime.ids.next_id());
-    let followed = AccountRef::Remote(app.runtime.ids.next_id());
-    let not_followed = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let viewer = AccountRef::Local(db.runtime.ids.next_id());
+    let followed = AccountRef::Remote(db.runtime.ids.next_id());
+    let not_followed = AccountRef::Remote(db.runtime.ids.next_id());
     let _ = not_followed;
 
-    upsert_follow(&app, viewer, followed, true).await;
+    upsert_follow(&db, viewer, followed, true).await;
 
-    let query = FilterQuery::new(app.pool.clone(), app.runtime.clone());
+    let query = FilterQuery::new(db.pool.clone(), db.runtime.clone());
     let following = query
         .following_set(&viewer)
         .await
@@ -575,7 +575,7 @@ async fn filter_query_following_set_reports_follow_targets() {
 
     assert_eq!(following, vec![followed]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Task 4.3's own acceptance text: `reblogs_hidden` must return the
@@ -583,15 +583,15 @@ async fn filter_query_following_set_reports_follow_targets() {
 /// follows with reblogs shown.
 #[tokio::test]
 async fn filter_query_reblogs_hidden_set_returns_only_show_reblogs_false_targets() {
-    let app = spawn_test_app().await;
-    let viewer = AccountRef::Local(app.runtime.ids.next_id());
-    let hidden = AccountRef::Remote(app.runtime.ids.next_id());
-    let shown = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let viewer = AccountRef::Local(db.runtime.ids.next_id());
+    let hidden = AccountRef::Remote(db.runtime.ids.next_id());
+    let shown = AccountRef::Remote(db.runtime.ids.next_id());
 
-    upsert_follow(&app, viewer, hidden, false).await;
-    upsert_follow(&app, viewer, shown, true).await;
+    upsert_follow(&db, viewer, hidden, false).await;
+    upsert_follow(&db, viewer, shown, true).await;
 
-    let query = FilterQuery::new(app.pool.clone(), app.runtime.clone());
+    let query = FilterQuery::new(db.pool.clone(), db.runtime.clone());
     let reblogs_hidden = query
         .reblogs_hidden_set(&viewer)
         .await
@@ -599,7 +599,7 @@ async fn filter_query_reblogs_hidden_set_returns_only_show_reblogs_false_targets
 
     assert_eq!(reblogs_hidden, vec![hidden]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- AccountCountsProviderImpl (task 4.4, Requirement 8.2) -----------------
@@ -613,19 +613,19 @@ use crate::accounts::ports::AccountCountsProvider;
 /// counts).
 #[tokio::test]
 async fn account_counts_provider_reports_real_followers_and_following() {
-    let app = spawn_test_app().await;
-    let target = AccountRef::Local(app.runtime.ids.next_id());
-    let follower_a = AccountRef::Remote(app.runtime.ids.next_id());
-    let follower_b = AccountRef::Remote(app.runtime.ids.next_id());
-    let followee = AccountRef::Remote(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let target = AccountRef::Local(db.runtime.ids.next_id());
+    let follower_a = AccountRef::Remote(db.runtime.ids.next_id());
+    let follower_b = AccountRef::Remote(db.runtime.ids.next_id());
+    let followee = AccountRef::Remote(db.runtime.ids.next_id());
 
     // Two accounts follow `target` (followers = 2).
-    upsert_follow(&app, follower_a, target, true).await;
-    upsert_follow(&app, follower_b, target, true).await;
+    upsert_follow(&db, follower_a, target, true).await;
+    upsert_follow(&db, follower_b, target, true).await;
     // `target` follows one account (following = 1).
-    upsert_follow(&app, target, followee, true).await;
+    upsert_follow(&db, target, followee, true).await;
 
-    let provider = AccountCountsProviderImpl::new(app.pool.clone());
+    let provider = AccountCountsProviderImpl::new(db.pool.clone());
     let counts = provider.counts(&target).await.expect("counts must succeed");
 
     assert_eq!(counts.followers, 2);
@@ -636,21 +636,21 @@ async fn account_counts_provider_reports_real_followers_and_following() {
         "last_status_at is out of this spec's scope"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `counts` for an account nobody follows and who follows nobody must
 /// report all-zero followers/following, not error.
 #[tokio::test]
 async fn account_counts_provider_reports_zero_for_an_unconnected_account() {
-    let app = spawn_test_app().await;
-    let target = AccountRef::Local(app.runtime.ids.next_id());
+    let db = spawn_test_db().await;
+    let target = AccountRef::Local(db.runtime.ids.next_id());
 
-    let provider = AccountCountsProviderImpl::new(app.pool.clone());
+    let provider = AccountCountsProviderImpl::new(db.pool.clone());
     let counts = provider.counts(&target).await.expect("counts must succeed");
 
     assert_eq!(counts.followers, 0);
     assert_eq!(counts.following, 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

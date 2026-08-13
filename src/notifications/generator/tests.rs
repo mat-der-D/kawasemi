@@ -19,7 +19,7 @@
 //! constraint (`filter/tests.rs`'s and `repository/tests.rs`'s own doc
 //! comments; `social_graph::providers`'s pre-existing tests fail
 //! identically) — is unavailable here. Those tests are written as real,
-//! executable `#[tokio::test]`s against `spawn_test_app`, not skipped or
+//! executable `#[tokio::test]`s against `spawn_test_db`, not skipped or
 //! stubbed; see this task's own status report for which ones actually ran
 //! versus which failed only on connectivity (`PoolTimedOut`).
 
@@ -37,7 +37,7 @@ use crate::notifications::repository::{ListFilter, list};
 use crate::social_graph::FilterQuery;
 use crate::social_graph::model::Block;
 use crate::social_graph::repository as sg_repository;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 /// A connection URL `sqlx::PgPool::connect_lazy` only parses — never dials
 /// — mirroring `src/state/tests.rs::LAZY_TEST_DB_URL`'s identical constant
@@ -90,20 +90,20 @@ fn sample_event(
     }
 }
 
-fn build_generator(app: &TestApp, sink: Arc<RecordingDeliverySink>) -> NotificationGenerator {
-    let filter = NotificationFilter::new(FilterQuery::new(app.pool.clone(), app.runtime.clone()));
-    NotificationGenerator::new(app.pool.clone(), filter, sink, app.runtime.clone())
+fn build_generator(db: &TestDb, sink: Arc<RecordingDeliverySink>) -> NotificationGenerator {
+    let filter = NotificationFilter::new(FilterQuery::new(db.pool.clone(), db.runtime.clone()));
+    NotificationGenerator::new(db.pool.clone(), filter, sink, db.runtime.clone())
 }
 
-async fn upsert_block(app: &TestApp, blocker: AccountRef, blocked: AccountRef) {
+async fn upsert_block(db: &TestDb, blocker: AccountRef, blocked: AccountRef) {
     sg_repository::upsert_block(
-        &app.pool,
-        app.runtime.ids.next_id(),
+        &db.pool,
+        db.runtime.ids.next_id(),
         &Block {
             blocker,
             blocked,
             activity_id: "https://example.test/activities/generator-block-1".to_string(),
-            created_at: app.runtime.clock.now(),
+            created_at: db.runtime.clock.now(),
         },
     )
     .await
@@ -150,13 +150,13 @@ async fn skipped_non_local_short_circuits_without_touching_the_database() {
 
 #[tokio::test]
 async fn suppressed_when_recipient_has_blocked_origin() {
-    let app = spawn_test_app().await;
-    let recipient = AccountRef::Local(app.runtime.ids.next_id());
-    let origin = AccountRef::Remote(app.runtime.ids.next_id());
-    upsert_block(&app, recipient, origin).await;
+    let db = spawn_test_db().await;
+    let recipient = AccountRef::Local(db.runtime.ids.next_id());
+    let origin = AccountRef::Remote(db.runtime.ids.next_id());
+    upsert_block(&db, recipient, origin).await;
 
     let sink = Arc::new(RecordingDeliverySink::new());
-    let generator = build_generator(&app, sink.clone());
+    let generator = build_generator(&db, sink.clone());
 
     let event = sample_event(recipient, origin, NotificationType::Favourite, None);
     let outcome = generator
@@ -172,7 +172,7 @@ async fn suppressed_when_recipient_has_blocked_origin() {
     );
 
     let page = list(
-        &app.pool,
+        &db.pool,
         match recipient {
             AccountRef::Local(id) => id,
             AccountRef::Remote(_) => unreachable!(),
@@ -187,16 +187,16 @@ async fn suppressed_when_recipient_has_blocked_origin() {
         "a suppressed event must not persist any notification"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- Requirements 6.1-6.6: Created for each required kind ------------------
 
 #[tokio::test]
 async fn created_for_each_of_the_six_required_kinds() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let sink = Arc::new(RecordingDeliverySink::new());
-    let generator = build_generator(&app, sink.clone());
+    let generator = build_generator(&db, sink.clone());
 
     let kinds_with_status = [
         (NotificationType::Favourite, true),
@@ -208,11 +208,11 @@ async fn created_for_each_of_the_six_required_kinds() {
     ];
 
     for (index, (kind, has_status)) in kinds_with_status.into_iter().enumerate() {
-        let recipient_id = app.runtime.ids.next_id();
+        let recipient_id = db.runtime.ids.next_id();
         let recipient = AccountRef::Local(recipient_id);
-        let origin = AccountRef::Remote(app.runtime.ids.next_id());
+        let origin = AccountRef::Remote(db.runtime.ids.next_id());
         let target_status_id = if has_status {
-            Some(app.runtime.ids.next_id())
+            Some(db.runtime.ids.next_id())
         } else {
             None
         };
@@ -229,7 +229,7 @@ async fn created_for_each_of_the_six_required_kinds() {
         );
 
         let page = list(
-            &app.pool,
+            &db.pool,
             recipient_id,
             &crate::api::pagination::PageParams::default(),
             &ListFilter::default(),
@@ -255,21 +255,21 @@ async fn created_for_each_of_the_six_required_kinds() {
         "every Created outcome above must have reached the delivery sink exactly once"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- Requirements 8.1, 8.2: Duplicate on a second identical event ---------
 
 #[tokio::test]
 async fn duplicate_on_a_second_identical_event_and_delivery_only_happens_once() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let sink = Arc::new(RecordingDeliverySink::new());
-    let generator = build_generator(&app, sink.clone());
+    let generator = build_generator(&db, sink.clone());
 
-    let recipient_id = app.runtime.ids.next_id();
+    let recipient_id = db.runtime.ids.next_id();
     let recipient = AccountRef::Local(recipient_id);
-    let origin = AccountRef::Remote(app.runtime.ids.next_id());
-    let target_status_id = Some(app.runtime.ids.next_id());
+    let origin = AccountRef::Remote(db.runtime.ids.next_id());
+    let target_status_id = Some(db.runtime.ids.next_id());
 
     let first_event = sample_event(
         recipient,
@@ -302,7 +302,7 @@ async fn duplicate_on_a_second_identical_event_and_delivery_only_happens_once() 
     );
 
     let page = list(
-        &app.pool,
+        &db.pool,
         recipient_id,
         &crate::api::pagination::PageParams::default(),
         &ListFilter::default(),
@@ -315,7 +315,7 @@ async fn duplicate_on_a_second_identical_event_and_delivery_only_happens_once() 
         "the duplicate event must not have persisted a second row"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.1's "取り消し→再実行" semantics, exercised through the
@@ -324,13 +324,13 @@ async fn duplicate_on_a_second_identical_event_and_delivery_only_happens_once() 
 /// not `Duplicate`.
 #[tokio::test]
 async fn a_fresh_event_after_dismissal_is_created_again_not_duplicate() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let sink = Arc::new(RecordingDeliverySink::new());
-    let generator = build_generator(&app, sink.clone());
+    let generator = build_generator(&db, sink.clone());
 
-    let recipient_id = app.runtime.ids.next_id();
+    let recipient_id = db.runtime.ids.next_id();
     let recipient = AccountRef::Local(recipient_id);
-    let origin = AccountRef::Remote(app.runtime.ids.next_id());
+    let origin = AccountRef::Remote(db.runtime.ids.next_id());
 
     let first_event = sample_event(recipient, origin, NotificationType::Follow, None);
     let first_outcome = generator
@@ -340,7 +340,7 @@ async fn a_fresh_event_after_dismissal_is_created_again_not_duplicate() {
     assert_eq!(first_outcome, GenerateOutcome::Created);
 
     let page = list(
-        &app.pool,
+        &db.pool,
         recipient_id,
         &crate::api::pagination::PageParams::default(),
         &ListFilter::default(),
@@ -348,7 +348,7 @@ async fn a_fresh_event_after_dismissal_is_created_again_not_duplicate() {
     .await
     .expect("list must succeed");
     let created_id = page.items[0].id;
-    let dismissed = crate::notifications::repository::dismiss(&app.pool, created_id, recipient_id)
+    let dismissed = crate::notifications::repository::dismiss(&db.pool, created_id, recipient_id)
         .await
         .expect("dismiss must succeed");
     assert!(dismissed);
@@ -371,5 +371,5 @@ async fn a_fresh_event_after_dismissal_is_created_again_not_duplicate() {
         "both the original and the post-dismissal notification must be delivered"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

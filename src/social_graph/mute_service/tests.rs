@@ -4,7 +4,7 @@
 //! しない状態".
 //!
 //! Mirrors `follow_service/tests.rs`'s established convention
-//! (`crate::test_harness::spawn_test_app`, `create_test_actor`/
+//! (`crate::test_harness::db_fixture::spawn_test_db`, `create_test_actor`/
 //! `create_test_remote`/`sample_remote_account` fixtures) — this service
 //! needs *real* `actor`/`remote_accounts` rows, not mocks, since target
 //! existence resolution is real business logic under test here.
@@ -26,7 +26,7 @@
 //! below reads `RelationshipState` directly via
 //! `repository::load_states` with a caller-supplied `now` (rather than
 //! through `MuteService::mute`'s own return value, whose `now` is always
-//! `runtime.clock.now()` — a `FixedClock` under `spawn_test_app`, so it
+//! `runtime.clock.now()` — a `FixedClock` under `spawn_test_db`, so it
 //! never itself advances) to prove `expires_at` was persisted correctly and
 //! that `RelationshipMapper`/`load_states`'s already-implemented (task 2.4)
 //! expiry filtering correctly treats a past `expires_at` as unmuted. This
@@ -43,20 +43,20 @@ use crate::actor::repository::insert_actor;
 use crate::actor::{ActorDirectory, ActorState, ActorType, Handle};
 use crate::domain::Id;
 use crate::error::ErrorKind;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 // --- Test fixtures ----------------------------------------------------------
 
 /// Creates a real owner + local actor row, returning the actor's `Id` — an
 /// exact copy of `follow_service/tests.rs::create_test_actor`.
-async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
-    let now = app.runtime.clock.now();
-    let owner_id = app.runtime.ids.next_id();
-    create_owner(&app.pool, owner_id, now)
+async fn create_test_actor(db: &TestDb, handle: &str) -> Id {
+    let now = db.runtime.clock.now();
+    let owner_id = db.runtime.ids.next_id();
+    create_owner(&db.pool, owner_id, now)
         .await
         .expect("creating the owner must succeed");
 
-    let actor_id = app.runtime.ids.next_id();
+    let actor_id = db.runtime.ids.next_id();
     let actor = crate::actor::model::LocalActor {
         id: actor_id,
         owner_id,
@@ -68,7 +68,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
         created_at: now,
         updated_at: now,
     };
-    let mut tx = app
+    let mut tx = db
         .pool
         .begin()
         .await
@@ -100,10 +100,10 @@ fn sample_remote_account(id: Id, actor_uri: &str, fetched_at: OffsetDateTime) ->
 }
 
 /// Creates a real `remote_accounts` row, returning its `Id`.
-async fn create_test_remote(app: &TestApp, actor_uri: &str) -> Id {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
-    upsert_remote(&app.pool, &sample_remote_account(id, actor_uri, now))
+async fn create_test_remote(db: &TestDb, actor_uri: &str) -> Id {
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
+    upsert_remote(&db.pool, &sample_remote_account(id, actor_uri, now))
         .await
         .expect("upsert_remote must succeed");
     id
@@ -111,11 +111,11 @@ async fn create_test_remote(app: &TestApp, actor_uri: &str) -> Id {
 
 type TestService = MuteService<ActorDirectory>;
 
-fn build_service(app: &TestApp) -> TestService {
+fn build_service(db: &TestDb) -> TestService {
     MuteService::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        ActorDirectory::new(app.pool.clone()),
+        db.pool.clone(),
+        db.runtime.clone(),
+        ActorDirectory::new(db.pool.clone()),
     )
 }
 
@@ -138,11 +138,11 @@ fn as_bool(value: &serde_json::Value, key: &str) -> bool {
 
 #[tokio::test]
 async fn mute_sets_muting_true_for_a_local_target() {
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter1").await;
-    let target = create_test_actor(&app, "muted1").await;
+    let viewer = create_test_actor(&db, "muter1").await;
+    let target = create_test_actor(&db, "muted1").await;
 
     let relationship = service
         .mute(viewer, &target.as_i64().to_string(), default_opts())
@@ -155,11 +155,11 @@ async fn mute_sets_muting_true_for_a_local_target() {
 
 #[tokio::test]
 async fn mute_with_notifications_sets_muting_notifications_true() {
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter2").await;
-    let target = create_test_actor(&app, "muted2").await;
+    let viewer = create_test_actor(&db, "muter2").await;
+    let target = create_test_actor(&db, "muted2").await;
 
     let opts = MuteOptions {
         notifications: true,
@@ -176,11 +176,11 @@ async fn mute_with_notifications_sets_muting_notifications_true() {
 
 #[tokio::test]
 async fn mute_without_notifications_leaves_muting_notifications_false() {
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter3").await;
-    let target = create_test_actor(&app, "muted3").await;
+    let viewer = create_test_actor(&db, "muter3").await;
+    let target = create_test_actor(&db, "muted3").await;
 
     let relationship = service
         .mute(viewer, &target.as_i64().to_string(), default_opts())
@@ -193,11 +193,11 @@ async fn mute_without_notifications_leaves_muting_notifications_false() {
 
 #[tokio::test]
 async fn mute_records_an_expiry_and_repository_read_reflects_it_as_expired() {
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter4").await;
-    let target = create_test_actor(&app, "muted4").await;
+    let viewer = create_test_actor(&db, "muter4").await;
+    let target = create_test_actor(&db, "muted4").await;
 
     let opts = MuteOptions {
         notifications: false,
@@ -210,11 +210,11 @@ async fn mute_records_an_expiry_and_repository_read_reflects_it_as_expired() {
 
     let viewer_ref = AccountRef::Local(viewer);
     let target_ref = AccountRef::Local(target);
-    let mute_time = app.runtime.clock.now();
+    let mute_time = db.runtime.clock.now();
 
     // Immediately (before the duration elapses): still muted.
     let still_muted = repository::load_states(
-        &app.pool,
+        &db.pool,
         &viewer_ref,
         std::slice::from_ref(&target_ref),
         mute_time + Duration::seconds(1),
@@ -228,7 +228,7 @@ async fn mute_records_an_expiry_and_repository_read_reflects_it_as_expired() {
 
     // 1 hour and 1 second later: expired.
     let after_expiry = repository::load_states(
-        &app.pool,
+        &db.pool,
         &viewer_ref,
         std::slice::from_ref(&target_ref),
         mute_time + Duration::seconds(3601),
@@ -243,11 +243,11 @@ async fn mute_records_an_expiry_and_repository_read_reflects_it_as_expired() {
 
 #[tokio::test]
 async fn mute_without_duration_never_expires() {
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter5").await;
-    let target = create_test_actor(&app, "muted5").await;
+    let viewer = create_test_actor(&db, "muter5").await;
+    let target = create_test_actor(&db, "muted5").await;
 
     service
         .mute(viewer, &target.as_i64().to_string(), default_opts())
@@ -256,10 +256,10 @@ async fn mute_without_duration_never_expires() {
 
     let viewer_ref = AccountRef::Local(viewer);
     let target_ref = AccountRef::Local(target);
-    let far_future = app.runtime.clock.now() + Duration::days(3650);
+    let far_future = db.runtime.clock.now() + Duration::days(3650);
 
     let state = repository::load_states(
-        &app.pool,
+        &db.pool,
         &viewer_ref,
         std::slice::from_ref(&target_ref),
         far_future,
@@ -274,11 +274,11 @@ async fn mute_without_duration_never_expires() {
 
 #[tokio::test]
 async fn mute_is_idempotent_and_repeat_call_updates_flags_and_expiry() {
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter6").await;
-    let target = create_test_actor(&app, "muted6").await;
+    let viewer = create_test_actor(&db, "muter6").await;
+    let target = create_test_actor(&db, "muted6").await;
 
     let first = service
         .mute(
@@ -316,10 +316,10 @@ async fn mute_is_idempotent_and_repeat_call_updates_flags_and_expiry() {
 
 #[tokio::test]
 async fn mute_returns_not_found_for_a_nonexistent_target() {
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter7").await;
+    let viewer = create_test_actor(&db, "muter7").await;
 
     let err = service
         .mute(viewer, "999999999", default_opts())
@@ -334,11 +334,11 @@ async fn mute_returns_not_found_for_a_nonexistent_target() {
 
 #[tokio::test]
 async fn mute_sets_muting_true_for_a_remote_target() {
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter8").await;
-    let target = create_test_remote(&app, "https://remote.example/users/eve").await;
+    let viewer = create_test_actor(&db, "muter8").await;
+    let target = create_test_remote(&db, "https://remote.example/users/eve").await;
 
     let relationship = service
         .mute(viewer, &target.as_i64().to_string(), default_opts())
@@ -352,11 +352,11 @@ async fn mute_sets_muting_true_for_a_remote_target() {
 
 #[tokio::test]
 async fn unmute_clears_muting_and_returns_updated_relationship() {
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter9").await;
-    let target = create_test_actor(&app, "muted9").await;
+    let viewer = create_test_actor(&db, "muter9").await;
+    let target = create_test_actor(&db, "muted9").await;
 
     service
         .mute(viewer, &target.as_i64().to_string(), default_opts())
@@ -374,11 +374,11 @@ async fn unmute_clears_muting_and_returns_updated_relationship() {
 
 #[tokio::test]
 async fn unmute_is_a_noop_when_no_mute_exists() {
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter10").await;
-    let target = create_test_actor(&app, "muted10").await;
+    let viewer = create_test_actor(&db, "muter10").await;
+    let target = create_test_actor(&db, "muted10").await;
 
     let relationship = service
         .unmute(viewer, &target.as_i64().to_string())
@@ -390,10 +390,10 @@ async fn unmute_is_a_noop_when_no_mute_exists() {
 
 #[tokio::test]
 async fn unmute_returns_not_found_for_a_nonexistent_target() {
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter11").await;
+    let viewer = create_test_actor(&db, "muter11").await;
 
     let err = service
         .unmute(viewer, "999999999")
@@ -410,18 +410,18 @@ async fn unmute_returns_not_found_for_a_nonexistent_target() {
 async fn mute_does_not_affect_an_existing_follow_relationship() {
     // Requirement 4's mute/unmute operate purely on the `mutes` table --
     // muting an already-followed target must not disturb `following`.
-    let app = spawn_test_app().await;
-    let service = build_service(&app);
+    let db = spawn_test_db().await;
+    let service = build_service(&db);
 
-    let viewer = create_test_actor(&app, "muter12").await;
-    let target = create_test_actor(&app, "muted12").await;
+    let viewer = create_test_actor(&db, "muter12").await;
+    let target = create_test_actor(&db, "muted12").await;
 
     // Establish a follow directly via the repository (no need to go through
     // `FollowService` -- this test only cares that `MuteService` leaves an
     // existing `follows` row untouched).
     let viewer_ref = AccountRef::Local(viewer);
     let target_ref = AccountRef::Local(target);
-    let now = app.runtime.clock.now();
+    let now = db.runtime.clock.now();
     let follow = crate::social_graph::model::Follow {
         follower: viewer_ref,
         followee: target_ref,
@@ -431,7 +431,7 @@ async fn mute_does_not_affect_an_existing_follow_relationship() {
         activity_id: "test-activity".to_string(),
         created_at: now,
     };
-    repository::upsert_follow(&app.pool, app.runtime.ids.next_id(), &follow)
+    repository::upsert_follow(&db.pool, db.runtime.ids.next_id(), &follow)
         .await
         .expect("upsert_follow must succeed");
 
