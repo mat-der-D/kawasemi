@@ -118,6 +118,12 @@ mod tests;
 /// crate's own unit tests get.
 pub(crate) mod reaper;
 
+/// Startup reclaim of schemas earlier runs left behind (test-infrastructure
+/// Requirements 1.2, 3.1-3.4). Not `#[cfg(test)]` for the same reason
+/// [`reaper`] is not: `tests/*.rs` integration binaries spawn fixtures too,
+/// and the safety net has to cover the residue they leave.
+pub(crate) mod sweep;
+
 /// SQL-statement counting for this crate's own unit tests. `#[cfg(test)]`
 /// because it exists only to measure the lib's tests and must not reach the
 /// shipped library, unlike the rest of this module — which `tests/*.rs`
@@ -257,6 +263,12 @@ fn unique_media_storage_root() -> std::path::PathBuf {
 /// plus wall-clock nanoseconds, so concurrently-running `#[tokio::test]`
 /// functions (and repeated `cargo test` invocations) never collide. Mirrors
 /// `src/migrate/tests.rs`'s `unique_schema_name` convention.
+///
+/// The embedded nanosecond timestamp is not decoration: it is the only
+/// evidence [`sweep::is_reclaimable`] has for deciding whether an abandoned
+/// schema is stale residue or a live process's workspace. The prefix is taken
+/// from [`sweep::HARNESS_SCHEMA_PREFIX`] rather than spelled here so that the
+/// two sides of that convention cannot drift apart silently.
 fn unique_schema_name() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
@@ -264,7 +276,7 @@ fn unique_schema_name() -> String {
         .expect("system clock is after the Unix epoch")
         .as_nanos();
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("kawasemi_test_harness_{nanos}_{seq}")
+    format!("{}{nanos}_{seq}", sweep::HARNESS_SCHEMA_PREFIX)
 }
 
 /// Builds a `DatabaseConfig` pointed at the shared test database, with no
