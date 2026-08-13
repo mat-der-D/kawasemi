@@ -31,7 +31,7 @@
   - _Requirements: 3.2_
   - _Boundary: OrphanSchemaSweeper_
 
-- [ ] 2.2 起動時スイープを実装し初回フィクスチャ生成に接続する
+- [x] 2.2 起動時スイープを実装し初回フィクスチャ生成に接続する
   - プロセス内で最初にフィクスチャが生成されたときに 1 度だけ実行する
   - 回収失敗はログに留め、テスト実行を止めない
   - 完了状態: 古い孤立スキーマを人工的に作った状態でテストを実行すると回収され、
@@ -140,6 +140,15 @@
 - 1.1: `src/test_harness.rs` の `mod reaper;` に付けた `#[allow(dead_code)]` は 1.1/1.2 分割による
   過渡的なもの。`src/lib.rs` が `pub mod test_harness` を無ゲートで公開しているため、production
   caller（`Drop for TestApp`）が来る 1.2 まで全項目が未使用警告になる。**1.2 でこの属性を外すこと。**
+- 2.2: 回収閾値は 2 時間（フルスイート 891 秒の約 8 倍）。誤射しても被害は「そのプロセスの以後の
+  クエリが `relation does not exist` で大きな音を立てて落ちる」であって静かな破壊ではないが、
+  過剰回収は不可逆なので長めに倒してある。
+- 2.2: スキーマ一覧に `LIKE 'kawasemi_test_harness_%'` を使わないこと。**`_` は LIKE の
+  ワイルドカード**なので、このパターンは見た目より広く一致する。全件列挙して Rust 側の
+  `is_reclaimable` で絞る。
+- 2.2 申し送り（4.2 の完了条件に含めること）: `pub mod sweep` と `sweep_orphans_now` /
+  `startup_sweeps_performed` は統合テストから駆動するために design のインターフェースを超えて
+  公開している。`test-harness` feature ゲートの内側に確実に入れること（Requirement 5.2）。
 - 2.1: 回収述語の失敗様式は非対称。過剰保持は安いが過剰回収は実行中の別プロセスの DB 状態を
   破壊する。パース不能・未来時刻・桁溢れはすべて「保持」に倒す。特に `duration_since` を
   `Result` で受けること（`Duration` の減算 underflow は「巨大な age＝回収対象」に化ける）。

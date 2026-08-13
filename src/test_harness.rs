@@ -122,7 +122,15 @@ pub(crate) mod reaper;
 /// Requirements 1.2, 3.1-3.4). Not `#[cfg(test)]` for the same reason
 /// [`reaper`] is not: `tests/*.rs` integration binaries spawn fixtures too,
 /// and the safety net has to cover the residue they leave.
-pub(crate) mod sweep;
+///
+/// `pub` rather than `pub(crate)` (unlike [`reaper`]) only because
+/// `tests/harness_sweep_it.rs` has to make a sweep happen on demand and count
+/// the ones that happened by themselves; both entry points it needs are
+/// documented as the harness's own test surface. The module's internals —
+/// [`sweep::is_reclaimable`], the prefix, the threshold — stay crate-private,
+/// and the whole of `test_harness` leaves the shipped library together once
+/// task 4.2 gates it.
+pub mod sweep;
 
 /// SQL-statement counting for this crate's own unit tests. `#[cfg(test)]`
 /// because it exists only to measure the lib's tests and must not reach the
@@ -570,6 +578,14 @@ impl Drop for TestApp {
 /// `should_run_against_real_database` convention), since this function's
 /// design.md-specified signature returns `TestApp` directly, not a `Result`.
 pub async fn spawn_test_app() -> TestApp {
+    // Before anything else in the process's first fixture: reclaim what
+    // earlier runs abandoned, so a suite never has to be preceded by a manual
+    // cleanup step (Requirement 1.2). Subsequent calls return immediately —
+    // the once-per-process guard (Requirement 3.4) lives inside
+    // `sweep_orphans` so that `spawn_test_db` (task 3.1) inherits it by
+    // calling the same function rather than by repeating the trigger.
+    sweep::sweep_orphans().await;
+
     let schema = unique_schema_name();
     create_schema(&schema).await;
 
