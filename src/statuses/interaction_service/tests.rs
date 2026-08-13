@@ -1006,3 +1006,166 @@ async fn self_reblog_does_not_emit_a_notification_event() {
 
     app.cleanup().await;
 }
+
+// -- atomicity of the record/counter pair (task 5.3, Requirements 6.2, 6.3,
+// 6.4, 6.5) ---------------------------------------------------------------
+
+/// Installs a `BEFORE UPDATE` trigger on this test instance's own `statuses`
+/// table that unconditionally raises, so the counter half of a composite
+/// write (`status_repository::adjust_counts`, always an `UPDATE statuses`)
+/// fails *after* the record half (the boost row `INSERT`, the `favourites`
+/// `INSERT`/`DELETE`) has already run.
+///
+/// This is the mid-operation failure injection task 5.3's completion
+/// condition calls for: without a shared transaction the record half stays
+/// committed while the counter never moves (exactly the
+/// "レコードとカウンタのいずれか一方だけが更新された状態" Requirement 6.2
+/// forbids); with one, both roll back together. The trigger is created inside
+/// `spawn_test_app`'s own isolated schema (`search_path`-pinned), so it can
+/// never affect a concurrently running test.
+async fn fail_every_counter_update(app: &TestApp) {
+    sqlx::query(
+        "CREATE FUNCTION kawasemi_test_fail_counter_update() RETURNS trigger \
+         LANGUAGE plpgsql AS $fn$ \
+         BEGIN RAISE EXCEPTION 'injected counter-update failure'; END; \
+         $fn$",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("creating the failure-injection trigger function must succeed");
+
+    sqlx::query(
+        "CREATE TRIGGER kawasemi_test_fail_counter_update \
+         BEFORE UPDATE ON statuses FOR EACH ROW \
+         EXECUTE FUNCTION kawasemi_test_fail_counter_update()",
+    )
+    .execute(&app.pool)
+    .await
+    .expect("creating the failure-injection trigger must succeed");
+}
+
+/// Requirements 6.2, 6.4: when the `reblogs_count` update fails mid-operation,
+/// the boost row must not survive — neither the record nor the counter may be
+/// left changed on its own, and the caller must see the error.
+#[tokio::test]
+async fn reblog_leaves_neither_boost_row_nor_counter_changed_when_the_counter_update_fails() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let booster = app.runtime.ids.next_id();
+    let (service, local_sink, http_sink, notifications) =
+        service_with_notifications(&app, &[(author, "alice"), (booster, "bob")], false);
+
+    let target = insert_test_status(&app, author, Visibility::Public).await;
+    fail_every_counter_update(&app).await;
+
+    let err = service
+        .reblog(booster, target.id)
+        .await
+        .expect_err("a failed counter update must surface as an error (Requirement 6.4)");
+    assert_eq!(err.kind, ErrorKind::Server);
+
+    assert!(
+        interaction_repository::find_reblog(&app.pool, booster, target.id)
+            .await
+            .expect("find_reblog must succeed")
+            .is_none(),
+        "the boost row must have rolled back with the counter update"
+    );
+    let reloaded = status_repository::find_by_id(&app.pool, target.id)
+        .await
+        .expect("find_by_id must succeed")
+        .expect("target must still exist");
+    assert_eq!(reloaded.reblogs_count, 0);
+
+    assert_eq!(
+        deliveries(&local_sink, &http_sink),
+        0,
+        "delivery happens strictly after commit, so a rolled-back reblog dispatches nothing"
+    );
+    assert_eq!(notifications.events().len(), 0);
+
+    app.cleanup().await;
+}
+
+/// Requirements 6.2, 6.4: when the `favourites_count` update fails
+/// mid-operation, the `favourites` row must not survive.
+#[tokio::test]
+async fn favourite_leaves_neither_row_nor_counter_changed_when_the_counter_update_fails() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let fan = app.runtime.ids.next_id();
+    let (service, local_sink, http_sink, notifications) =
+        service_with_notifications(&app, &[(author, "alice"), (fan, "carol")], false);
+
+    let target = insert_test_status(&app, author, Visibility::Public).await;
+    fail_every_counter_update(&app).await;
+
+    let err = service
+        .favourite(fan, target.id)
+        .await
+        .expect_err("a failed counter update must surface as an error (Requirement 6.4)");
+    assert_eq!(err.kind, ErrorKind::Server);
+
+    assert!(
+        !interaction_repository::exists_favourite(&app.pool, fan, target.id)
+            .await
+            .expect("exists_favourite must succeed"),
+        "the favourites row must have rolled back with the counter update"
+    );
+    let reloaded = status_repository::find_by_id(&app.pool, target.id)
+        .await
+        .expect("find_by_id must succeed")
+        .expect("target must still exist");
+    assert_eq!(reloaded.favourites_count, 0);
+
+    assert_eq!(deliveries(&local_sink, &http_sink), 0);
+    assert_eq!(notifications.events().len(), 0);
+
+    app.cleanup().await;
+}
+
+/// Requirements 6.2, 6.4: the un-favourite direction is symmetric — a failed
+/// counter decrement must not leave the `favourites` row deleted.
+#[tokio::test]
+async fn unfavourite_leaves_neither_row_nor_counter_changed_when_the_counter_update_fails() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let fan = app.runtime.ids.next_id();
+    let (service, local_sink, http_sink) =
+        service(&app, &[(author, "alice"), (fan, "carol")], false);
+
+    let target = insert_test_status(&app, author, Visibility::Public).await;
+    service
+        .favourite(fan, target.id)
+        .await
+        .expect("the initial favourite must succeed");
+    local_sink.calls.lock().unwrap().clear();
+    http_sink.calls.lock().unwrap().clear();
+
+    fail_every_counter_update(&app).await;
+
+    let err = service
+        .unfavourite(fan, target.id)
+        .await
+        .expect_err("a failed counter update must surface as an error (Requirement 6.4)");
+    assert_eq!(err.kind, ErrorKind::Server);
+
+    assert!(
+        interaction_repository::exists_favourite(&app.pool, fan, target.id)
+            .await
+            .expect("exists_favourite must succeed"),
+        "the favourites row deletion must have rolled back with the counter update"
+    );
+    let reloaded = status_repository::find_by_id(&app.pool, target.id)
+        .await
+        .expect("find_by_id must succeed")
+        .expect("target must still exist");
+    assert_eq!(
+        reloaded.favourites_count, 1,
+        "counter and row must stay consistent (Requirement 6.3)"
+    );
+
+    assert_eq!(deliveries(&local_sink, &http_sink), 0);
+
+    app.cleanup().await;
+}

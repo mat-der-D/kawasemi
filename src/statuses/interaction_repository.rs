@@ -589,11 +589,23 @@ pub async fn exists_pin(pool: &PgPool, actor_id: Id, status_id: Id) -> Result<bo
 /// boosted post — see this module's doc comment ("Reblog scope") for why
 /// recording/revoking that row itself is `StatusRepository`'s job, not
 /// this function's.
-pub async fn find_reblog(
-    pool: &PgPool,
+///
+/// Generic over `executor` (structural-refactor task 5.3, Requirements 6.2,
+/// 6.3) for the same reason [`add_favourite`]/[`remove_favourite`] are (task
+/// 5.1): `InteractionService::reblog`'s "has this actor already boosted?"
+/// branch decides whether the boost row is inserted and `reblogs_count`
+/// incremented at all, so it has to be read *inside* the same transaction
+/// those two writes run in — otherwise the branch is taken against a snapshot
+/// the transaction never sees. Every pre-existing caller keeps passing a bare
+/// `&PgPool` unchanged.
+pub async fn find_reblog<'e, E>(
+    executor: E,
     actor_id: Id,
     status_id: Id,
-) -> Result<Option<Status>, AppError> {
+) -> Result<Option<Status>, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let row: Option<StatusRow> = sqlx::query_as(concat!(
         "SELECT ",
         status_columns!(),
@@ -601,7 +613,7 @@ pub async fn find_reblog(
     ))
     .bind(actor_id.as_i64())
     .bind(status_id.as_i64())
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
     .map_err(map_server_error)?;
 
