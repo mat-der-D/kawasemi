@@ -310,20 +310,26 @@ async fn list_notifications_returns_recipient_notifications_newest_first() {
 
     let app_id = register_test_app(&app).await;
     let recipient = create_test_actor(&app, "list_ok_recipient").await;
-    let origin_actor = create_test_actor(&app, "list_ok_origin").await;
+    // Two *distinct* origins: `insert_dedup`'s `ON CONFLICT` target is
+    // (`recipient_id`, `kind`, `origin_kind`, `origin_id`,
+    // `COALESCE(status_id, 0)`), so two `Follow` notifications sharing one
+    // origin collapse into a single row and this test's own newest-first
+    // assertion would have nothing to order.
+    let older_origin = create_test_actor(&app, "list_ok_origin_older").await;
+    let newer_origin = create_test_actor(&app, "list_ok_origin_newer").await;
 
     let older = seed_notification(
         &app,
         recipient,
         NotificationType::Follow,
-        AccountRef::Local(origin_actor),
+        AccountRef::Local(older_origin),
     )
     .await;
     let newer = seed_notification(
         &app,
         recipient,
         NotificationType::Follow,
-        AccountRef::Local(origin_actor),
+        AccountRef::Local(newer_origin),
     )
     .await;
 
