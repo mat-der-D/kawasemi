@@ -27,7 +27,20 @@ tower-service = "0.3.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
+# `test-harness` gates the test-only harness out of release artifacts. It stays out of
+# `default` on purpose: the harness carries fixed keys, a fixed passphrase and the test
+# database URL, none of which may reach a distributed binary.
+[features]
+test-harness = []
+
 [dev-dependencies]
+# Self-referential dev-dependency. Integration tests under `tests/` are separate crates that
+# link the library as an ordinary dependency, so without this edge they would see the library
+# built with default features -- i.e. without the harness. Naming ourselves here with
+# `test-harness` enabled turns the feature on for every build that includes test targets
+# (`cargo test`, `cargo build --tests`) while leaving `cargo build` untouched. A dependency
+# cycle through dev-dependencies is legal in Cargo precisely because it cannot recurse.
+kawasemi = { path = ".", features = ["test-harness"] }
 time = { version = "0.3.53", features = ["macros"] }
 tower = { version = "0.5.3", features = ["util"] }
 
