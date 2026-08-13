@@ -416,11 +416,18 @@ async fn establish_isolated_db() -> IsolatedDb {
     // Not 1: at a single connection
     // `federation::outbound::worker::tests::run_once_marks_a_job_failed_
     // immediately_when_sender_no_longer_resolves` deterministically claims
-    // zero jobs, even though `DbDeliveryQueue::claim_due` is a single
-    // `FOR UPDATE SKIP LOCKED` statement that should not depend on pool
-    // size. That interaction is unexplained and out of scope here, so this
-    // mitigation stops at the largest reduction that provably changes no
-    // test outcome.
+    // zero jobs. That is not a `claim_due` defect: this fixture also starts
+    // the real delivery-worker loop (`federation_background.spawn()` below,
+    // polling every `TEST_DELIVERY_POLL_INTERVAL`), so two workers compete
+    // for the same `delivery_jobs` rows and `FOR UPDATE SKIP LOCKED` hands
+    // the row to whichever claims first — exactly its contract. Pool size
+    // only decides who wins: at 2 the background loop's first poll gets its
+    // own connection immediately and runs against a still-empty table,
+    // whereas at 1 its already-queued `acquire` is served the moment the
+    // test's `enqueue` releases the sole connection, i.e. always just
+    // before the test's own claim. The race exists at 2 as well, only far
+    // more rarely (measured 1 failure in 34 runs). Full evidence:
+    // `.kiro/specs/test-infrastructure/worker-claim-investigation.md`.
     let db_config = DatabaseConfig {
         url: Secret::new(schema_scoped_url(&base_test_db_url(), &schema)),
         max_connections: 2,
