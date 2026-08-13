@@ -525,9 +525,28 @@ pub async fn spawn_test_app() -> TestApp {
     let schema = unique_schema_name();
     create_schema(&schema).await;
 
+    // `max_connections: 2` rather than 5: every connection here is opened
+    // eagerly, and `Drop` releases none of them (only [`TestApp::cleanup`]
+    // does), so each `TestApp` a test forgets to clean up holds its full
+    // pool open for the rest of the process. At 5 the shared server's ~97
+    // usable slots are exhausted after ~19 leaked instances, which is what
+    // makes a single-process `cargo test --lib` run fail en masse with
+    // `PoolTimedOut`.
+    //
+    // Not 1: at a single connection
+    // `federation::outbound::worker::tests::run_once_marks_a_job_failed_
+    // immediately_when_sender_no_longer_resolves` deterministically claims
+    // zero jobs, even though `DbDeliveryQueue::claim_due` is a single
+    // `FOR UPDATE SKIP LOCKED` statement that should not depend on pool
+    // size. That interaction is unexplained and out of scope here, so this
+    // mitigation stops at the largest reduction that provably changes no
+    // test outcome.
+    //
+    // This is a mitigation, not a fix — the leak itself lives in the release
+    // path (see this module's doc comment).
     let db_config = DatabaseConfig {
         url: Secret::new(schema_scoped_url(&base_test_db_url(), &schema)),
-        max_connections: 5,
+        max_connections: 2,
         acquire_timeout: Duration::from_secs(5),
     };
     let pool = db::establish_pool(&db_config)
