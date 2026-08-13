@@ -79,6 +79,19 @@
 #[cfg(test)]
 mod tests;
 
+/// The resident reclaim executor every `TestApp`/`TestDb` destructor hands
+/// its pool and isolated schema to (test-infrastructure Requirements 2.1-2.5).
+/// Not `#[cfg(test)]`: `tests/*.rs` integration binaries drop harness
+/// fixtures too, and their destructors need the same release path this
+/// crate's own unit tests get.
+///
+/// `allow(dead_code)`: the reaper's only production caller is `Drop for
+/// TestApp`, which task 1.2 rewrites to delegate here. Until then the module
+/// is exercised solely by its own `#[cfg(test)]` suite, so a non-test lib
+/// build sees every item as unused. Remove this attribute once 1.2 lands.
+#[allow(dead_code)]
+pub(crate) mod reaper;
+
 /// SQL-statement counting for this crate's own unit tests. `#[cfg(test)]`
 /// because it exists only to measure the lib's tests and must not reach the
 /// shipped library, unlike the rest of this module — which `tests/*.rs`

@@ -38,8 +38,10 @@ fn default_test_db_reachable() -> bool {
 }
 
 /// Returns `true` if the caller should proceed, `false` if it should skip
-/// (having already printed a diagnostic).
-fn should_run_against_real_database(test_name: &str) -> bool {
+/// (having already printed a diagnostic). `pub(super)` so sibling suites
+/// under `src/test_harness/` (e.g. `reaper::tests`) reuse this one probe
+/// instead of keeping their own copy of the same convention.
+pub(super) fn should_run_against_real_database(test_name: &str) -> bool {
     let overridden = std::env::var(TEST_DB_URL_ENV).is_ok();
     if !overridden && !default_test_db_reachable() {
         eprintln!(
