@@ -552,3 +552,6 @@
      テストを追加するか、構造的保証で十分とみなすか）。
   2. `notification_contract_it`（9 件）/`notification_generation_it`（1 件）/
      `notification_list_it`（1 件）は本 spec のスコープ外の既存不具合と確定。修正は別 spec で。
+- **task 3.7 のカバレッジについてユーザー判断：現状（2経路の直接比較＋構造的保証）を受け入れる。**
+  5経路すべてが単一の `StatusRenderAssembler` へ委譲していることはコード構造で確認済み。
+  5経路横断の契約テストは追加しない。
