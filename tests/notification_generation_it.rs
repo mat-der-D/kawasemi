@@ -409,6 +409,33 @@ async fn emit_follow_event(app: &TestApp, recipient: Id, origin: Id) {
         .expect("emit must succeed and reach the real NotificationGenerator");
 }
 
+/// Emits a `Favourite` `NotificationEvent` for `status_id` directly through
+/// the same single generation point [`emit_follow_event`] uses.
+///
+/// Needed because a favourite *cannot* be driven through `POST /api/v1/
+/// statuses/{id}/favourite` once the recipient has blocked the origin: a
+/// local favourite is turned into an Activity and processed through the same
+/// inbound pipeline as a remote one (the "意味論は対称・物理配送のみ最適化"
+/// invariant), so `InboundService::process_verified`'s own block judgment
+/// rejects the request with `403` before any `NotificationEvent` is emitted
+/// at all. `tests/notification_filter_it.rs` drives its own block scenarios
+/// through this same seam for the same reason.
+async fn emit_favourite_event(app: &TestApp, recipient: Id, origin: Id, status_id: Id) {
+    let now = app.runtime.clock.now();
+    app.state
+        .notifications()
+        .ports()
+        .emit(NotificationEvent {
+            recipient: AccountRef::Local(recipient),
+            origin: AccountRef::Local(origin),
+            kind: NotificationType::Favourite,
+            target_status_id: Some(status_id),
+            occurred_at: now,
+        })
+        .await
+        .expect("emit must succeed regardless of whether the event is ultimately suppressed");
+}
+
 /// Reads `notifications.id` directly for every row matching the exact
 /// dedup-key column shape `src/notifications/repository.rs::insert_dedup`'s
 /// own `ON CONFLICT` target uses (`recipient_id`, `kind`, `origin_kind`,
@@ -889,6 +916,12 @@ async fn dismiss_then_resend_the_identical_event_creates_a_new_notification() {
 /// coverage (Requirements 7.1-7.4); this test's own concern is narrower:
 /// proving the delivery-sink hand-off condition itself (new-only) holds
 /// even when the "not new" reason is suppression rather than duplication.
+///
+/// The two halves deliberately use different drivers: the created half runs
+/// through the real `POST /api/v1/statuses/{id}/favourite`, while the
+/// suppressed half emits its event through
+/// [`emit_favourite_event`] — see that helper's own doc comment for why the
+/// REST surface cannot express "blocked origin favourites" at all.
 #[tokio::test]
 async fn delivery_sink_is_called_exactly_once_per_created_notification_and_never_for_a_suppressed_event()
  {
@@ -913,7 +946,6 @@ async fn delivery_sink_is_called_exactly_once_per_created_notification_and_never
     )
     .await;
     let bob_token = issue_test_token(&app, app_id, bob.id, &["write:favourites"]).await;
-    let carol_token = issue_test_token(&app, app_id, carol.id, &["write:favourites"]).await;
 
     // Created: bob favourites alice's post -> handed to the sink exactly
     // once.
@@ -956,7 +988,7 @@ async fn delivery_sink_is_called_exactly_once_per_created_notification_and_never
         StatusCode::OK,
         "block must succeed: {block_body:?}"
     );
-    trigger_favourite(&router, &carol_token, &post2_id).await;
+    emit_favourite_event(&app, alice.id, carol.id, id_domain_of(&post2_id)).await;
 
     assert_eq!(
         sink.count(),
