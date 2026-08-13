@@ -826,6 +826,71 @@ async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_pol
     app.cleanup().await;
 }
 
+// -- counter/record agreement on the success path (task 5.4, Requirement
+// 6.3) ---------------------------------------------------------------------
+
+/// Requirement 6.3: after successful `create_status` composite writes, the
+/// parent's cached `replies_count` equals the real number of reply rows, and
+/// the status's tag associations match the tags actually extracted. The two
+/// rollback tests above pin the failure side; the existing success tests
+/// assert response shape but never reconcile a counter against the rows it
+/// summarises, so a counter that drifted free of its records would pass them.
+#[tokio::test]
+async fn reply_counter_matches_the_actual_reply_row_count_after_successful_creates() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let (service, _local, _http) = service(&app, author, "alice", false);
+
+    let parent = service
+        .create_status(
+            author,
+            create_input("parent post", Visibility::Public),
+            None,
+        )
+        .await
+        .expect("the parent post must be created");
+
+    for n in 1..=3 {
+        let mut input = create_input(&format!("reply {n} with #tagged"), Visibility::Public);
+        input.in_reply_to_id = Some(parent.id);
+        service
+            .create_status(author, input, None)
+            .await
+            .unwrap_or_else(|e| panic!("reply {n} must be created: {e:?}"));
+
+        let (replies_count,): (i64,) =
+            sqlx::query_as("SELECT replies_count FROM statuses WHERE id = $1")
+                .bind(parent.id.as_i64())
+                .fetch_one(&app.pool)
+                .await
+                .expect("reading the parent's replies_count must succeed");
+        let (rows,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM statuses WHERE in_reply_to_id = $1")
+                .bind(parent.id.as_i64())
+                .fetch_one(&app.pool)
+                .await
+                .expect("counting reply rows must succeed");
+
+        assert_eq!(
+            (replies_count, rows),
+            (n, n),
+            "after reply {n}, the parent's replies_count and the real reply row count must \
+             agree (Requirement 6.3)"
+        );
+    }
+
+    // The tag half of the same composite write: every reply carried one
+    // hashtag, so the association rows must number exactly one per reply.
+    assert_eq!(
+        count_rows(&app, "SELECT COUNT(*) FROM status_tags").await,
+        3,
+        "each committed reply must have contributed exactly one tag association \
+         (Requirement 6.3)"
+    );
+
+    app.cleanup().await;
+}
+
 // -- show / context ---------------------------------------------------------
 
 /// Requirement 6.4: an unauthenticated viewer only sees `public` posts —

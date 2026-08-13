@@ -1169,3 +1169,88 @@ async fn unfavourite_leaves_neither_row_nor_counter_changed_when_the_counter_upd
 
     app.cleanup().await;
 }
+
+// -- counter/record agreement on the success path (task 5.4, Requirement
+// 6.3) ---------------------------------------------------------------------
+//
+// The rollback tests above pin the *failure* side of Requirement 6. Its 6.3
+// clause — 「複合書き込みが成功した ... カウンタの値と実体レコードの数が
+// 一致する」 — is a claim about the success path, and the existing success
+// tests only ever assert the counter (e.g. `favourites_count == 1`) without
+// ever counting the rows that counter is supposed to summarise. A counter
+// that drifted to a value no row backs would sail straight through them.
+
+/// Asserts that `statuses.favourites_count` and the real number of
+/// `favourites` rows for `status_id` are both `expected`.
+async fn assert_favourite_counter_matches_rows(
+    app: &TestApp,
+    status_id: Id,
+    expected: i64,
+    step: &str,
+) {
+    let reloaded = status_repository::find_by_id(&app.pool, status_id)
+        .await
+        .expect("find_by_id must succeed")
+        .expect("the target status must still exist");
+    let (rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM favourites WHERE status_id = $1")
+        .bind(status_id.as_i64())
+        .fetch_one(&app.pool)
+        .await
+        .expect("counting favourites rows must succeed");
+
+    assert_eq!(
+        (reloaded.favourites_count, rows),
+        (expected, expected),
+        "after {step}, favourites_count and the real row count must agree (Requirement 6.3)"
+    );
+}
+
+/// Requirement 6.3: after successful favourite composite writes, the cached
+/// `favourites_count` equals the real number of `favourites` rows — checked
+/// across a first favourite, a duplicate (the idempotent no-op branch, which
+/// must move neither half), a second distinct favouriter, and an
+/// un-favourite.
+#[tokio::test]
+async fn favourite_counter_matches_the_actual_favourite_row_count_at_every_step() {
+    let app = spawn_test_app().await;
+    let author = app.runtime.ids.next_id();
+    let fan = app.runtime.ids.next_id();
+    let other_fan = app.runtime.ids.next_id();
+    let (service, _local, _http) = service(
+        &app,
+        &[(author, "alice"), (fan, "carol"), (other_fan, "dave")],
+        false,
+    );
+
+    let target = insert_test_status(&app, author, Visibility::Public).await;
+    assert_favourite_counter_matches_rows(&app, target.id, 0, "no favourite yet").await;
+
+    service
+        .favourite(fan, target.id)
+        .await
+        .expect("the first favourite must succeed");
+    assert_favourite_counter_matches_rows(&app, target.id, 1, "the first favourite").await;
+
+    // The idempotent repeat takes `add_favourite`'s `is_new == false` branch
+    // inside the transaction, so it must leave both halves alone.
+    service
+        .favourite(fan, target.id)
+        .await
+        .expect("a duplicate favourite must be an accepted no-op");
+    assert_favourite_counter_matches_rows(&app, target.id, 1, "a duplicate favourite").await;
+
+    service
+        .favourite(other_fan, target.id)
+        .await
+        .expect("a second actor's favourite must succeed");
+    assert_favourite_counter_matches_rows(&app, target.id, 2, "a second distinct favouriter").await;
+
+    service
+        .unfavourite(fan, target.id)
+        .await
+        .expect("the un-favourite must succeed");
+    assert_favourite_counter_matches_rows(&app, target.id, 1, "un-favouriting one of the two")
+        .await;
+
+    app.cleanup().await;
+}

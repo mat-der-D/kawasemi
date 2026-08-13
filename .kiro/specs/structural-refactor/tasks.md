@@ -208,7 +208,7 @@
   - _Depends: 5.1_
   - _Boundary: InteractionService_
 
-- [ ] 5.4 原子性の検証テストを追加する
+- [x] 5.4 原子性の検証テストを追加する
   - 投稿作成とお気に入りの少なくとも 2 つについて、複合書き込みの途中で失敗させ、カウンタと実体レコードの両方が変化していないことを検証する
   - 完了状態：上記の検証が通り、トランザクションを外すと落ちる状態になっている
   - _Requirements: 6.1, 6.2, 6.3, 6.4_
@@ -459,3 +459,13 @@
 - **task 6.1: `compose_modules` はまだどこからも呼ばれていない（未配線）。** `src/bootstrap/wiring.rs`
   として単独コンパイルするのみ。`dead_code` の `#[allow]` は `bootstrap.rs` の `mod wiring;` 宣言
   1 行にのみ範囲を絞ってある（task 6.2 で最初の呼び出し元ができたら削除する）。
+- **task 5.4: ロールバック側は 5.2/5.3 で追加した 3 テストが既にカバー済みだった。** 実装者・レビュアー
+  双方が独立にトランザクションを外して（`pool.begin()`→`pool.acquire()`+`drop(tx)`）3 テストが
+  実測で落ちることを確認済み。**Requirement 6.3（成功パスでカウンタと実体レコード数が一致）は
+  未検証のまま残っていた実在のギャップ**で、既存の成功系テストはカウンタしか見ておらず実体行数を
+  数えていなかった。2 本の新規テスト（`favourite_counter_matches_the_actual_favourite_row_count_at_every_step` /
+  `reply_counter_matches_the_actual_reply_row_count_after_successful_creates`）で埋めた。
+  変異テスト（カウンタ加算量を書き換える等）で非空虚性も実測確認済み。
+- **フルスイート実行はこの環境で複数エージェントが同時に DB を使うと信頼できない。**
+  `--test-threads=2` でも同時実行が重なると `PoolTimedOut` が数百件単位で出る（コードの問題ではない）。
+  対処：モジュール単位（`statuses::` 等）で実行し、フルスイートは全並行作業が止まっている時にのみ判定材料にする。
