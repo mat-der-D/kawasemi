@@ -1,0 +1,30 @@
+{
+  "account": {
+    "acct": "notif_contract_remote@remote.notif-contract.example",
+    "avatar": "https://test-harness.kawasemi.internal/avatars/original/missing.png",
+    "avatar_static": "https://test-harness.kawasemi.internal/avatars/original/missing.png",
+    "bot": false,
+    "created_at": "1970-01-05T21:50:42Z",
+    "discoverable": false,
+    "display_name": "Notification Contract IT Remote Actor",
+    "emojis": [],
+    "fields": [],
+    "followers_count": 0,
+    "following_count": 0,
+    "group": false,
+    "header": "https://test-harness.kawasemi.internal/headers/original/missing.png",
+    "header_static": "https://test-harness.kawasemi.internal/headers/original/missing.png",
+    "id": "424247",
+    "last_status_at": null,
+    "locked": false,
+    "note": "",
+    "statuses_count": 0,
+    "uri": "https://remote.notif-contract.example/actors/notif_contract_requester",
+    "url": "https://remote.notif-contract.example/actors/notif_contract_requester",
+    "username": "notif_contract_remote"
+  },
+  "created_at": "1970-01-05T21:50:42Z",
+  "id": "424249",
+  "status": null,
+  "type": "follow_request"
+}
