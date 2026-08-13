@@ -3,7 +3,7 @@
 //! の再送が記録済み status_id を返す（リポジトリ単体テストがグリーン）".
 //!
 //! Mirrors `poll_repository/tests.rs`'s established convention: reuses
-//! `crate::test_harness::spawn_test_app`, and inserts a real target
+//! `crate::test_harness::db_fixture::spawn_test_db`, and inserts a real target
 //! `statuses` row via `status_repository::insert_status`
 //! (`status_idempotency_keys.status_id` carries a real FK to `statuses(id)`,
 //! so `bind` requires a genuine, already-persisted status row).
@@ -11,7 +11,7 @@
 use crate::domain::{Id, Visibility};
 use crate::statuses::model::Status;
 use crate::statuses::status_repository::insert_status;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 use super::{IdempotencyLookup, bind, check_or_reserve};
 
@@ -21,9 +21,9 @@ use super::{IdempotencyLookup, bind, check_or_reserve};
 /// helper (this task's Boundary forbids modifying `status_repository.rs`,
 /// including loosening its private items' visibility, just to share a test
 /// helper).
-fn sample_status(app: &TestApp, actor_id: Id) -> Status {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+fn sample_status(db: &TestDb, actor_id: Id) -> Status {
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     Status {
         id,
         actor_id,
@@ -47,9 +47,9 @@ fn sample_status(app: &TestApp, actor_id: Id) -> Status {
     }
 }
 
-async fn insert_target_status(app: &TestApp, actor_id: Id) -> Status {
-    let status = sample_status(app, actor_id);
-    insert_status(&app.pool, &status)
+async fn insert_target_status(db: &TestDb, actor_id: Id) -> Status {
+    let status = sample_status(db, actor_id);
+    insert_status(&db.pool, &status)
         .await
         .expect("insert_status must succeed for a fresh id/uri");
     status
@@ -59,15 +59,15 @@ async fn insert_target_status(app: &TestApp, actor_id: Id) -> Status {
 /// (no existing binding), then `bind` records it.
 #[tokio::test]
 async fn check_or_reserve_reports_reserved_for_a_fresh_key() {
-    let app = spawn_test_app().await;
-    let actor_id = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let actor_id = db.runtime.ids.next_id();
 
-    let lookup = check_or_reserve(&app.pool, actor_id, "client-key-1")
+    let lookup = check_or_reserve(&db.pool, actor_id, "client-key-1")
         .await
         .expect("check_or_reserve must succeed");
     assert_eq!(lookup, IdempotencyLookup::Reserved);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 5.2: after `bind`, a subsequent `check_or_reserve` for the
@@ -76,26 +76,26 @@ async fn check_or_reserve_reports_reserved_for_a_fresh_key() {
 /// task's own observable-completion text names directly.
 #[tokio::test]
 async fn check_or_reserve_resolves_to_the_bound_status_after_bind() {
-    let app = spawn_test_app().await;
-    let actor_id = app.runtime.ids.next_id();
-    let status = insert_target_status(&app, actor_id).await;
+    let db = spawn_test_db().await;
+    let actor_id = db.runtime.ids.next_id();
+    let status = insert_target_status(&db, actor_id).await;
 
     bind(
-        &app.pool,
+        &db.pool,
         actor_id,
         "client-key-2",
         status.id,
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("bind must succeed");
 
-    let lookup = check_or_reserve(&app.pool, actor_id, "client-key-2")
+    let lookup = check_or_reserve(&db.pool, actor_id, "client-key-2")
         .await
         .expect("check_or_reserve must succeed");
     assert_eq!(lookup, IdempotencyLookup::Existing(status.id));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A resend simulated end-to-end: `check_or_reserve` -> `Reserved` -> create
@@ -104,29 +104,29 @@ async fn check_or_reserve_resolves_to_the_bound_status_after_bind() {
 /// not consumed by reading it).
 #[tokio::test]
 async fn repeated_check_or_reserve_after_bind_is_stable() {
-    let app = spawn_test_app().await;
-    let actor_id = app.runtime.ids.next_id();
-    let status = insert_target_status(&app, actor_id).await;
+    let db = spawn_test_db().await;
+    let actor_id = db.runtime.ids.next_id();
+    let status = insert_target_status(&db, actor_id).await;
     let key = "client-key-3";
 
     assert_eq!(
-        check_or_reserve(&app.pool, actor_id, key).await.unwrap(),
+        check_or_reserve(&db.pool, actor_id, key).await.unwrap(),
         IdempotencyLookup::Reserved
     );
 
-    bind(&app.pool, actor_id, key, status.id, app.runtime.clock.now())
+    bind(&db.pool, actor_id, key, status.id, db.runtime.clock.now())
         .await
         .expect("bind must succeed");
 
     for _ in 0..3 {
         assert_eq!(
-            check_or_reserve(&app.pool, actor_id, key).await.unwrap(),
+            check_or_reserve(&db.pool, actor_id, key).await.unwrap(),
             IdempotencyLookup::Existing(status.id),
             "repeated resends must keep resolving to the same recorded status_id"
         );
     }
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The idempotency ledger is scoped per-actor: the same literal key string
@@ -134,46 +134,46 @@ async fn repeated_check_or_reserve_after_bind_is_stable() {
 /// establishes its own independent binding.
 #[tokio::test]
 async fn idempotency_key_is_scoped_per_actor() {
-    let app = spawn_test_app().await;
-    let actor_a = app.runtime.ids.next_id();
-    let actor_b = app.runtime.ids.next_id();
-    let status_a = insert_target_status(&app, actor_a).await;
-    let status_b = insert_target_status(&app, actor_b).await;
+    let db = spawn_test_db().await;
+    let actor_a = db.runtime.ids.next_id();
+    let actor_b = db.runtime.ids.next_id();
+    let status_a = insert_target_status(&db, actor_a).await;
+    let status_b = insert_target_status(&db, actor_b).await;
     let shared_key = "shared-literal-key";
 
     bind(
-        &app.pool,
+        &db.pool,
         actor_a,
         shared_key,
         status_a.id,
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("actor_a's bind must succeed");
     bind(
-        &app.pool,
+        &db.pool,
         actor_b,
         shared_key,
         status_b.id,
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("actor_b's bind must succeed independently");
 
     assert_eq!(
-        check_or_reserve(&app.pool, actor_a, shared_key)
+        check_or_reserve(&db.pool, actor_a, shared_key)
             .await
             .unwrap(),
         IdempotencyLookup::Existing(status_a.id)
     );
     assert_eq!(
-        check_or_reserve(&app.pool, actor_b, shared_key)
+        check_or_reserve(&db.pool, actor_b, shared_key)
             .await
             .unwrap(),
         IdempotencyLookup::Existing(status_b.id)
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A losing racer's `bind` for an already-bound `(actor_id, key)` is a
@@ -183,18 +183,18 @@ async fn idempotency_key_is_scoped_per_actor() {
 /// this as the mechanism `ON CONFLICT ... DO NOTHING` provides.
 #[tokio::test]
 async fn bind_does_not_overwrite_an_existing_binding() {
-    let app = spawn_test_app().await;
-    let actor_id = app.runtime.ids.next_id();
-    let first_status = insert_target_status(&app, actor_id).await;
-    let second_status = insert_target_status(&app, actor_id).await;
+    let db = spawn_test_db().await;
+    let actor_id = db.runtime.ids.next_id();
+    let first_status = insert_target_status(&db, actor_id).await;
+    let second_status = insert_target_status(&db, actor_id).await;
     let key = "client-key-race";
 
     bind(
-        &app.pool,
+        &db.pool,
         actor_id,
         key,
         first_status.id,
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("first bind must succeed");
@@ -202,63 +202,59 @@ async fn bind_does_not_overwrite_an_existing_binding() {
     // A second bind for the same (actor_id, key), pointing at a *different*
     // status_id, must not error and must not overwrite the first binding.
     bind(
-        &app.pool,
+        &db.pool,
         actor_id,
         key,
         second_status.id,
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("a losing racer's bind must succeed silently, not error");
 
     assert_eq!(
-        check_or_reserve(&app.pool, actor_id, key).await.unwrap(),
+        check_or_reserve(&db.pool, actor_id, key).await.unwrap(),
         IdempotencyLookup::Existing(first_status.id),
         "the ledger must keep resolving to the first-bound status_id"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Two distinct keys used by the same actor are independent bindings.
 #[tokio::test]
 async fn distinct_keys_for_the_same_actor_are_independent() {
-    let app = spawn_test_app().await;
-    let actor_id = app.runtime.ids.next_id();
-    let status_a = insert_target_status(&app, actor_id).await;
-    let status_b = insert_target_status(&app, actor_id).await;
+    let db = spawn_test_db().await;
+    let actor_id = db.runtime.ids.next_id();
+    let status_a = insert_target_status(&db, actor_id).await;
+    let status_b = insert_target_status(&db, actor_id).await;
 
     bind(
-        &app.pool,
+        &db.pool,
         actor_id,
         "key-a",
         status_a.id,
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("bind for key-a must succeed");
     bind(
-        &app.pool,
+        &db.pool,
         actor_id,
         "key-b",
         status_b.id,
-        app.runtime.clock.now(),
+        db.runtime.clock.now(),
     )
     .await
     .expect("bind for key-b must succeed");
 
     assert_eq!(
-        check_or_reserve(&app.pool, actor_id, "key-a")
-            .await
-            .unwrap(),
+        check_or_reserve(&db.pool, actor_id, "key-a").await.unwrap(),
         IdempotencyLookup::Existing(status_a.id)
     );
     assert_eq!(
-        check_or_reserve(&app.pool, actor_id, "key-b")
-            .await
-            .unwrap(),
+        check_or_reserve(&db.pool, actor_id, "key-b").await.unwrap(),
         IdempotencyLookup::Existing(status_b.id)
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

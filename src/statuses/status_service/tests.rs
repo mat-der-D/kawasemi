@@ -5,7 +5,7 @@
 //! される".
 //!
 //! Mirrors `status_repository/tests.rs`'s established convention
-//! (`crate::test_harness::spawn_test_app` for an isolated, migrated schema
+//! (`crate::test_harness::db_fixture::spawn_test_db` for an isolated, migrated schema
 //! plus a deterministic `RuntimeContext`) for every DB-touching operation,
 //! and `activity_builder/tests.rs`'s established convention (in-memory
 //! `ActorHandleLookup`/`LocalActorLookup`/`DeliverySink` test doubles plus a
@@ -32,7 +32,7 @@ use crate::media::model::{Focus, Media, MediaState, MediaType};
 use crate::runtime::{DeterministicSeed, SeqIdGenerator};
 use crate::statuses::notification_sink::NotificationEventSink;
 use crate::statuses::visibility::ViewerRelation;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 // --- Test doubles --------------------------------------------------------
 
@@ -236,7 +236,7 @@ impl NotificationEventSink for RecordingNotificationSink {
     }
 }
 
-/// Builds a ready-to-use `StatusService` against `app`'s own pool/runtime,
+/// Builds a ready-to-use `StatusService` against `db`'s own pool/runtime,
 /// with `author_id` pre-registered under `author_handle` (so
 /// `deliver_create`/`deliver_delete`/`deliver_update` can resolve a sender),
 /// plus every `(Id, handle)` in `extra_actors` also registered (task 9.2's
@@ -247,7 +247,7 @@ impl NotificationEventSink for RecordingNotificationSink {
 /// [`RecordingNotificationSink`] handle lets a test assert on emitted
 /// [`NotificationEvent`]s (task 9.2); most tests ignore it (`_notifications`).
 fn build_service(
-    app: &TestApp,
+    db: &TestDb,
     author_id: Id,
     author_handle: &str,
     extra_actors: &[(Id, &str)],
@@ -290,8 +290,8 @@ fn build_service(
     notification_registry.set_sink(Arc::clone(&notifications) as Arc<dyn NotificationEventSink>);
 
     let service = StatusService::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         "kawasemi.example",
         urls,
         activity_builder,
@@ -306,13 +306,13 @@ fn build_service(
 /// notification handle most tests do not need and with no extra
 /// mention-target actors.
 fn service(
-    app: &TestApp,
+    db: &TestDb,
     author_id: Id,
     author_handle: &str,
     is_follower: bool,
 ) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
     let (service, local_sink, http_sink, _notifications) =
-        build_service(app, author_id, author_handle, &[], is_follower);
+        build_service(db, author_id, author_handle, &[], is_follower);
     (service, local_sink, http_sink)
 }
 
@@ -320,7 +320,7 @@ fn service(
 /// additionally registering `extra_actors` (task 9.2's own mention target)
 /// and returning the notification handle.
 fn service_with_mentions(
-    app: &TestApp,
+    db: &TestDb,
     author_id: Id,
     author_handle: &str,
     extra_actors: &[(Id, &str)],
@@ -331,7 +331,7 @@ fn service_with_mentions(
     Arc<RecordingSink>,
     Arc<RecordingNotificationSink>,
 ) {
-    build_service(app, author_id, author_handle, extra_actors, is_follower)
+    build_service(db, author_id, author_handle, extra_actors, is_follower)
 }
 
 fn create_input(content: &str, visibility: Visibility) -> CreateStatus {
@@ -356,9 +356,9 @@ fn create_input(content: &str, visibility: Visibility) -> CreateStatus {
 /// `replace_media`'s successful path with a genuinely valid, owned media id
 /// rather than only the *rejection* path
 /// (`media_not_owned_by_actor_is_rejected` above exercises only that half).
-async fn insert_test_media(app: &TestApp, actor_id: Id) -> Id {
-    let media_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+async fn insert_test_media(db: &TestDb, actor_id: Id) -> Id {
+    let media_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let media = Media {
         id: media_id,
         actor_id,
@@ -370,7 +370,7 @@ async fn insert_test_media(app: &TestApp, actor_id: Id) -> Id {
         blurhash: None,
         created_at: now,
     };
-    media_repository::insert_media(&app.pool, &media, "1/original", "image/png")
+    media_repository::insert_media(&db.pool, &media, "1/original", "image/png")
         .await
         .expect("insert_media must succeed for a fresh id/actor");
     media_id
@@ -393,9 +393,9 @@ fn deliveries(local: &RecordingSink, http: &RecordingSink) -> usize {
 /// `Status` and dispatches a canonical `Create` Activity.
 #[tokio::test]
 async fn create_status_persists_and_dispatches_create_activity() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, local_sink, http_sink) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, local_sink, http_sink) = service(&db, author, "alice", false);
 
     let created = service
         .create_status(
@@ -409,7 +409,7 @@ async fn create_status_persists_and_dispatches_create_activity() {
     assert_eq!(created.content, "hello world");
     assert_eq!(created.actor_id, author);
 
-    let fetched = status_repository::find_by_id(&app.pool, created.id)
+    let fetched = status_repository::find_by_id(&db.pool, created.id)
         .await
         .expect("find_by_id must succeed")
         .expect("the created status must be persisted");
@@ -420,16 +420,16 @@ async fn create_status_persists_and_dispatches_create_activity() {
     let (_, activity, _) = &calls[0];
     assert_eq!(activity_type(activity.as_value()), "Create");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 5.1, 5.2: a resend under the same `(actor, idempotency key)`
 /// returns the *same* status rather than creating a second one.
 #[tokio::test]
 async fn idempotent_resubmission_returns_the_same_status() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, local_sink, http_sink) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, local_sink, http_sink) = service(&db, author, "alice", false);
 
     let first = service
         .create_status(
@@ -455,16 +455,16 @@ async fn idempotent_resubmission_returns_the_same_status() {
     // Only the first request actually created a post + dispatched Create.
     assert_eq!(deliveries(&local_sink, &http_sink), 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.2: content-less, media-less, poll-less create requests are
 /// rejected as a client (422) error.
 #[tokio::test]
 async fn empty_status_is_rejected() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
     let err = service
         .create_status(author, create_input("   ", Visibility::Public), None)
@@ -474,7 +474,7 @@ async fn empty_status_is_rejected() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.4: a media id not owned by the requesting actor (here:
@@ -482,12 +482,12 @@ async fn empty_status_is_rejected() {
 /// than silently attached.
 #[tokio::test]
 async fn media_not_owned_by_actor_is_rejected() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
     let mut input = create_input("look at this", Visibility::Public);
-    input.media_ids = vec![app.runtime.ids.next_id()]; // no such media row exists
+    input.media_ids = vec![db.runtime.ids.next_id()]; // no such media row exists
 
     let err = service
         .create_status(author, input, None)
@@ -497,7 +497,7 @@ async fn media_not_owned_by_actor_is_rejected() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 3.4, 8.1 (the successful counterpart to
@@ -507,12 +507,12 @@ async fn media_not_owned_by_actor_is_rejected() {
 /// given order.
 #[tokio::test]
 async fn create_status_attaches_owned_media_in_given_order() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
-    let media_a = insert_test_media(&app, author).await;
-    let media_b = insert_test_media(&app, author).await;
+    let media_a = insert_test_media(&db, author).await;
+    let media_b = insert_test_media(&db, author).await;
 
     let mut input = create_input("look at these", Visibility::Public);
     input.media_ids = vec![media_a, media_b];
@@ -522,7 +522,7 @@ async fn create_status_attaches_owned_media_in_given_order() {
         .await
         .expect("create_status must succeed with valid, actor-owned media");
 
-    let attached = status_repository::media_ids_for_status(&app.pool, created.id)
+    let attached = status_repository::media_ids_for_status(&db.pool, created.id)
         .await
         .expect("media_ids_for_status must succeed");
     assert_eq!(
@@ -531,19 +531,19 @@ async fn create_status_attaches_owned_media_in_given_order() {
         "attach_media must persist the given media ids, in the given order"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 13.1: a poll and media attachments together are rejected as
 /// mutually exclusive.
 #[tokio::test]
 async fn poll_and_media_together_are_rejected() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
     let mut input = create_input("pick one", Visibility::Public);
-    input.media_ids = vec![app.runtime.ids.next_id()];
+    input.media_ids = vec![db.runtime.ids.next_id()];
     input.poll = Some(CreateStatusPoll {
         options: vec!["yes".to_string(), "no".to_string()],
         multiple: false,
@@ -557,7 +557,7 @@ async fn poll_and_media_together_are_rejected() {
 
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 13.1: a caller-supplied poll (without media) is genuinely
@@ -565,9 +565,9 @@ async fn poll_and_media_together_are_rejected() {
 /// row exists afterward, not silently dropped and not rejected.
 #[tokio::test]
 async fn poll_without_media_is_created_and_associated_with_the_post() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, local_sink, http_sink) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, local_sink, http_sink) = service(&db, author, "alice", false);
 
     let mut input = create_input("pick one", Visibility::Public);
     input.poll = Some(CreateStatusPoll {
@@ -585,14 +585,14 @@ async fn poll_without_media_is_created_and_associated_with_the_post() {
         .poll_id
         .expect("the created status must carry a poll_id");
 
-    let poll = crate::statuses::poll_repository::find_poll_by_id(&app.pool, poll_id)
+    let poll = crate::statuses::poll_repository::find_poll_by_id(&db.pool, poll_id)
         .await
         .expect("find_poll_by_id must succeed")
         .expect("the poll row must actually exist");
     assert_eq!(poll.status_id, created.id);
     assert!(!poll.multiple);
 
-    let tally = crate::statuses::poll_repository::tally(&app.pool, poll_id, Some(author))
+    let tally = crate::statuses::poll_repository::tally(&db.pool, poll_id, Some(author))
         .await
         .expect("tally must succeed for a freshly-created poll");
     let titles: Vec<&str> = tally
@@ -608,7 +608,7 @@ async fn poll_without_media_is_created_and_associated_with_the_post() {
     // comment, "Poll handling").
     assert_eq!(deliveries(&local_sink, &http_sink), 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 13.1 (implied by 13.4's "範囲外の選択肢インデックス" only
@@ -616,9 +616,9 @@ async fn poll_without_media_is_created_and_associated_with_the_post() {
 /// comment, "Poll creation validation"): fewer than 2 options is rejected.
 #[tokio::test]
 async fn poll_with_fewer_than_two_options_is_rejected() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
     let mut input = create_input("pick one", Visibility::Public);
     input.poll = Some(CreateStatusPoll {
@@ -635,16 +635,16 @@ async fn poll_with_fewer_than_two_options_is_rejected() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A blank (whitespace-only) option title is rejected, matching the same
 /// "degenerate poll" reasoning as the too-few-options case above.
 #[tokio::test]
 async fn poll_with_a_blank_option_is_rejected() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
     let mut input = create_input("pick one", Visibility::Public);
     input.poll = Some(CreateStatusPoll {
@@ -661,7 +661,7 @@ async fn poll_with_a_blank_option_is_rejected() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- create_status atomicity ----------------------------------------------
@@ -695,29 +695,29 @@ struct WriteFootprint {
 
 /// `sql` is always one of this module's own literal `SELECT COUNT(*)`
 /// statements (sqlx 0.9 only accepts `&'static str` here anyway).
-async fn count_rows(app: &TestApp, sql: &'static str) -> i64 {
+async fn count_rows(db: &TestDb, sql: &'static str) -> i64 {
     let (n,): (i64,) = sqlx::query_as(sql)
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .unwrap_or_else(|e| panic!("`{sql}` must succeed: {e}"));
     n
 }
 
-async fn write_footprint(app: &TestApp, parent_id: Id) -> WriteFootprint {
+async fn write_footprint(db: &TestDb, parent_id: Id) -> WriteFootprint {
     let (parent_replies_count,): (i64,) =
         sqlx::query_as("SELECT replies_count FROM statuses WHERE id = $1")
             .bind(parent_id.as_i64())
-            .fetch_one(&app.pool)
+            .fetch_one(&db.pool)
             .await
             .expect("the parent status row must exist");
 
     WriteFootprint {
-        statuses: count_rows(app, "SELECT COUNT(*) FROM statuses").await,
-        status_media: count_rows(app, "SELECT COUNT(*) FROM status_media").await,
-        polls: count_rows(app, "SELECT COUNT(*) FROM polls").await,
-        poll_options: count_rows(app, "SELECT COUNT(*) FROM poll_options").await,
-        tags: count_rows(app, "SELECT COUNT(*) FROM tags").await,
-        status_tags: count_rows(app, "SELECT COUNT(*) FROM status_tags").await,
+        statuses: count_rows(db, "SELECT COUNT(*) FROM statuses").await,
+        status_media: count_rows(db, "SELECT COUNT(*) FROM status_media").await,
+        polls: count_rows(db, "SELECT COUNT(*) FROM polls").await,
+        poll_options: count_rows(db, "SELECT COUNT(*) FROM poll_options").await,
+        tags: count_rows(db, "SELECT COUNT(*) FROM tags").await,
+        status_tags: count_rows(db, "SELECT COUNT(*) FROM status_tags").await,
         parent_replies_count,
     }
 }
@@ -725,7 +725,7 @@ async fn write_footprint(app: &TestApp, parent_id: Id) -> WriteFootprint {
 /// Creates a real parent post and saturates its `replies_count`, so the
 /// reply-count increment at the end of `create_status`'s composite write is
 /// guaranteed to fail. Returns the parent's id.
-async fn parent_with_saturated_reply_count(app: &TestApp, service: &TestService, author: Id) -> Id {
+async fn parent_with_saturated_reply_count(db: &TestDb, service: &TestService, author: Id) -> Id {
     let parent = service
         .create_status(
             author,
@@ -738,7 +738,7 @@ async fn parent_with_saturated_reply_count(app: &TestApp, service: &TestService,
     sqlx::query("UPDATE statuses SET replies_count = $1 WHERE id = $2")
         .bind(i64::MAX)
         .bind(parent.id.as_i64())
-        .execute(&app.pool)
+        .execute(&db.pool)
         .await
         .expect("saturating the parent's replies_count must succeed");
 
@@ -750,13 +750,13 @@ async fn parent_with_saturated_reply_count(app: &TestApp, service: &TestService,
 /// count are all left exactly as they were.
 #[tokio::test]
 async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_media() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, local_sink, http_sink) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, local_sink, http_sink) = service(&db, author, "alice", false);
 
-    let parent_id = parent_with_saturated_reply_count(&app, &service, author).await;
-    let media_id = insert_test_media(&app, author).await;
-    let before = write_footprint(&app, parent_id).await;
+    let parent_id = parent_with_saturated_reply_count(&db, &service, author).await;
+    let media_id = insert_test_media(&db, author).await;
+    let before = write_footprint(&db, parent_id).await;
     let deliveries_before = deliveries(&local_sink, &http_sink);
 
     let mut input = create_input("a reply with #rollback and media", Visibility::Public);
@@ -770,7 +770,7 @@ async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_med
     assert_eq!(err.kind, ErrorKind::Server);
 
     assert_eq!(
-        write_footprint(&app, parent_id).await,
+        write_footprint(&db, parent_id).await,
         before,
         "no status row, media attachment, tag, or reply-count change may survive a failed \
          create_status"
@@ -781,7 +781,7 @@ async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_med
         "a failed create must not have dispatched a Create Activity"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The poll half of the same guarantee — a poll (and
@@ -789,12 +789,12 @@ async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_med
 /// too. Polls and media are mutually exclusive, hence the separate test.
 #[tokio::test]
 async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_poll() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, local_sink, http_sink) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, local_sink, http_sink) = service(&db, author, "alice", false);
 
-    let parent_id = parent_with_saturated_reply_count(&app, &service, author).await;
-    let before = write_footprint(&app, parent_id).await;
+    let parent_id = parent_with_saturated_reply_count(&db, &service, author).await;
+    let before = write_footprint(&db, parent_id).await;
     let deliveries_before = deliveries(&local_sink, &http_sink);
 
     let mut input = create_input("a reply with #rollback and a poll", Visibility::Public);
@@ -812,7 +812,7 @@ async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_pol
     assert_eq!(err.kind, ErrorKind::Server);
 
     assert_eq!(
-        write_footprint(&app, parent_id).await,
+        write_footprint(&db, parent_id).await,
         before,
         "no status row, poll, poll option, tag, or reply-count change may survive a failed \
          create_status"
@@ -823,7 +823,7 @@ async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_pol
         "a failed create must not have dispatched a Create Activity"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- counter/record agreement on the success path -------------------------
@@ -836,9 +836,9 @@ async fn create_status_leaves_no_partial_write_when_a_later_write_fails_with_pol
 /// summarises, so a counter that drifted free of its records would pass them.
 #[tokio::test]
 async fn reply_counter_matches_the_actual_reply_row_count_after_successful_creates() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
     let parent = service
         .create_status(
@@ -860,13 +860,13 @@ async fn reply_counter_matches_the_actual_reply_row_count_after_successful_creat
         let (replies_count,): (i64,) =
             sqlx::query_as("SELECT replies_count FROM statuses WHERE id = $1")
                 .bind(parent.id.as_i64())
-                .fetch_one(&app.pool)
+                .fetch_one(&db.pool)
                 .await
                 .expect("reading the parent's replies_count must succeed");
         let (rows,): (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM statuses WHERE in_reply_to_id = $1")
                 .bind(parent.id.as_i64())
-                .fetch_one(&app.pool)
+                .fetch_one(&db.pool)
                 .await
                 .expect("counting reply rows must succeed");
 
@@ -881,12 +881,12 @@ async fn reply_counter_matches_the_actual_reply_row_count_after_successful_creat
     // The tag half of the same composite write: every reply carried one
     // hashtag, so the association rows must number exactly one per reply.
     assert_eq!(
-        count_rows(&app, "SELECT COUNT(*) FROM status_tags").await,
+        count_rows(&db, "SELECT COUNT(*) FROM status_tags").await,
         3,
         "each committed reply must have contributed exactly one tag association"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- show / context ---------------------------------------------------------
@@ -897,9 +897,9 @@ async fn reply_counter_matches_the_actual_reply_row_count_after_successful_creat
 /// provisional stand-in which incorrectly admits `unlisted` here).
 #[tokio::test]
 async fn unauthenticated_viewer_sees_only_public_not_unlisted() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
     let public = service
         .create_status(
@@ -934,18 +934,18 @@ async fn unauthenticated_viewer_sees_only_public_not_unlisted() {
         "unauthenticated viewers must not see unlisted posts (Requirement 6.4)"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 6.1: a `private` post is invisible to a non-follower viewer,
 /// visible to a follower, and always visible to its own author.
 #[tokio::test]
 async fn private_status_is_visible_to_follower_and_author_only() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let other_viewer = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let other_viewer = db.runtime.ids.next_id();
 
-    let (service_stranger, _l1, _h1) = service(&app, author, "alice", false);
+    let (service_stranger, _l1, _h1) = service(&db, author, "alice", false);
     let private = service_stranger
         .create_status(
             author,
@@ -974,7 +974,7 @@ async fn private_status_is_visible_to_follower_and_author_only() {
     );
 
     // A follower: visible.
-    let (service_follower, _l2, _h2) = service(&app, author, "alice", true);
+    let (service_follower, _l2, _h2) = service(&db, author, "alice", true);
     assert!(
         service_follower
             .show(Some(other_viewer), private.id)
@@ -983,18 +983,18 @@ async fn private_status_is_visible_to_follower_and_author_only() {
             .is_some()
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 6.1: an unknown id returns `None` (404-equivalent), same as
 /// an invisible one.
 #[tokio::test]
 async fn show_returns_none_for_unknown_id() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
-    let unknown_id = app.runtime.ids.next_id();
+    let unknown_id = db.runtime.ids.next_id();
     assert!(
         service
             .show(None, unknown_id)
@@ -1003,16 +1003,16 @@ async fn show_returns_none_for_unknown_id() {
             .is_none()
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 6.2, 6.3: `context` returns ancestors/descendants filtered
 /// to what the viewer may see.
 #[tokio::test]
 async fn context_returns_ancestors_and_descendants_filtered_by_visibility() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
     let root = service
         .create_status(author, create_input("root", Visibility::Public), None)
@@ -1046,7 +1046,7 @@ async fn context_returns_ancestors_and_descendants_filtered_by_visibility() {
     );
     assert_eq!(context.descendants[0].id, reply.id);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- delete_status ----------------------------------------------------------
@@ -1054,10 +1054,10 @@ async fn context_returns_ancestors_and_descendants_filtered_by_visibility() {
 /// Requirement 7.2: deleting someone else's post is rejected.
 #[tokio::test]
 async fn delete_requires_ownership() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let stranger = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let stranger = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
     let status = service
         .create_status(author, create_input("mine", Visibility::Public), None)
@@ -1072,22 +1072,22 @@ async fn delete_requires_ownership() {
 
     // Still there afterwards.
     assert!(
-        status_repository::find_by_id(&app.pool, status.id)
+        status_repository::find_by_id(&db.pool, status.id)
             .await
             .expect("find_by_id must succeed")
             .is_some()
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 7.1, 7.3: a successful delete removes the row and
 /// dispatches a canonical `Delete` Activity.
 #[tokio::test]
 async fn delete_removes_status_and_dispatches_delete_activity() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, local_sink, http_sink) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, local_sink, http_sink) = service(&db, author, "alice", false);
 
     let status = service
         .create_status(author, create_input("temporary", Visibility::Public), None)
@@ -1105,7 +1105,7 @@ async fn delete_removes_status_and_dispatches_delete_activity() {
     assert_eq!(deleted.content, "temporary");
 
     assert!(
-        status_repository::find_by_id(&app.pool, status.id)
+        status_repository::find_by_id(&db.pool, status.id)
             .await
             .expect("find_by_id must succeed")
             .is_none(),
@@ -1116,7 +1116,7 @@ async fn delete_removes_status_and_dispatches_delete_activity() {
     let calls = local_sink.calls();
     assert_eq!(activity_type(calls[0].1.as_value()), "Delete");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Cross-task boundary fix (Group 5 remediation, see this module's doc
@@ -1133,12 +1133,12 @@ async fn delete_removes_status_and_dispatches_delete_activity() {
 /// post's `reblogs_count` untouched, and dispatches no Activity at all.
 #[tokio::test]
 async fn delete_status_rejects_a_reblog_row() {
-    let app = spawn_test_app().await;
-    let original_author = app.runtime.ids.next_id();
-    let booster = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let original_author = db.runtime.ids.next_id();
+    let booster = db.runtime.ids.next_id();
     let (author_service, _author_local, _author_http) =
-        service(&app, original_author, "alice", false);
-    let (booster_service, local_sink, http_sink) = service(&app, booster, "bob", false);
+        service(&db, original_author, "alice", false);
+    let (booster_service, local_sink, http_sink) = service(&db, booster, "bob", false);
 
     let original = author_service
         .create_status(
@@ -1152,8 +1152,8 @@ async fn delete_status_rejects_a_reblog_row() {
     // Build the boost row exactly the way `InteractionService::reblog` does
     // (see `interaction_service.rs::reblog`), without going through
     // `InteractionService` itself.
-    let reblog_id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let reblog_id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let uri = format!("https://kawasemi.example/statuses/{}", reblog_id.as_i64());
     let reblog = Status {
         id: reblog_id,
@@ -1176,10 +1176,10 @@ async fn delete_status_rejects_a_reblog_row() {
         created_at: now,
         edited_at: None,
     };
-    status_repository::insert_status(&app.pool, &reblog)
+    status_repository::insert_status(&db.pool, &reblog)
         .await
         .expect("insert reblog row");
-    status_repository::adjust_counts(&app.pool, original.id, CountKind::Reblogs, 1)
+    status_repository::adjust_counts(&db.pool, original.id, CountKind::Reblogs, 1)
         .await
         .expect("bump the original's reblogs_count, mirroring InteractionService::reblog");
 
@@ -1195,7 +1195,7 @@ async fn delete_status_rejects_a_reblog_row() {
 
     // The boost row itself must still be there.
     assert!(
-        status_repository::find_by_id(&app.pool, reblog.id)
+        status_repository::find_by_id(&db.pool, reblog.id)
             .await
             .expect("find_by_id must succeed")
             .is_some(),
@@ -1203,7 +1203,7 @@ async fn delete_status_rejects_a_reblog_row() {
     );
 
     // The original post's reblogs_count must be untouched.
-    let refetched_original = status_repository::find_by_id(&app.pool, original.id)
+    let refetched_original = status_repository::find_by_id(&db.pool, original.id)
         .await
         .expect("find_by_id must succeed")
         .expect("original status must still exist");
@@ -1219,7 +1219,7 @@ async fn delete_status_rejects_a_reblog_row() {
         "a rejected delete must not dispatch any Activity"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- edit_status / history / source ------------------------------------------
@@ -1228,9 +1228,9 @@ async fn delete_status_rejects_a_reblog_row() {
 /// and dispatches a canonical `Update` Activity.
 #[tokio::test]
 async fn edit_updates_edited_at_and_creates_history_and_dispatches_update() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, local_sink, http_sink) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, local_sink, http_sink) = service(&db, author, "alice", false);
 
     let status = service
         .create_status(
@@ -1272,16 +1272,16 @@ async fn edit_updates_edited_at_and_creates_history_and_dispatches_update() {
     let calls = local_sink.calls();
     assert_eq!(activity_type(calls[0].1.as_value()), "Update");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.5: editing someone else's post is rejected.
 #[tokio::test]
 async fn edit_requires_ownership() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let stranger = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let stranger = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
     let status = service
         .create_status(author, create_input("mine", Visibility::Public), None)
@@ -1303,7 +1303,7 @@ async fn edit_requires_ownership() {
         .expect_err("a non-owner must not be able to edit another actor's post");
     assert_eq!(err.status, StatusCode::NOT_FOUND);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.1: editing a post's media set fully *replaces* the prior
@@ -1312,13 +1312,13 @@ async fn edit_requires_ownership() {
 /// attachment — not merely appended to on top of the old set.
 #[tokio::test]
 async fn edit_status_fully_replaces_media_set_including_clearing_to_empty() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
-    let media_a = insert_test_media(&app, author).await;
-    let media_b = insert_test_media(&app, author).await;
-    let media_c = insert_test_media(&app, author).await;
+    let media_a = insert_test_media(&db, author).await;
+    let media_b = insert_test_media(&db, author).await;
+    let media_c = insert_test_media(&db, author).await;
 
     let mut input = create_input("original body", Visibility::Public);
     input.media_ids = vec![media_a, media_b];
@@ -1327,7 +1327,7 @@ async fn edit_status_fully_replaces_media_set_including_clearing_to_empty() {
         .await
         .expect("create status with an initial media set");
 
-    let initial = status_repository::media_ids_for_status(&app.pool, status.id)
+    let initial = status_repository::media_ids_for_status(&db.pool, status.id)
         .await
         .expect("media_ids_for_status must succeed");
     assert_eq!(initial, vec![media_a, media_b]);
@@ -1349,7 +1349,7 @@ async fn edit_status_fully_replaces_media_set_including_clearing_to_empty() {
         .expect("edit_status must succeed with a different, valid media set");
     assert_eq!(edited.content, "edited body");
 
-    let after_replace = status_repository::media_ids_for_status(&app.pool, status.id)
+    let after_replace = status_repository::media_ids_for_status(&db.pool, status.id)
         .await
         .expect("media_ids_for_status must succeed");
     assert_eq!(
@@ -1373,7 +1373,7 @@ async fn edit_status_fully_replaces_media_set_including_clearing_to_empty() {
         .await
         .expect("edit_status must succeed clearing media to empty");
 
-    let after_clear = status_repository::media_ids_for_status(&app.pool, status.id)
+    let after_clear = status_repository::media_ids_for_status(&db.pool, status.id)
         .await
         .expect("media_ids_for_status must succeed");
     assert!(
@@ -1381,17 +1381,17 @@ async fn edit_status_fully_replaces_media_set_including_clearing_to_empty() {
         "an empty media_ids on edit must clear all attachments, not leave the prior set intact"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 8.3: `source` returns the raw text + spoiler_text, and is
 /// owner-scoped.
 #[tokio::test]
 async fn source_returns_raw_text_and_spoiler_and_is_owner_scoped() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let stranger = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, author, "alice", false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let stranger = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, author, "alice", false);
 
     let mut input = create_input("body text", Visibility::Public);
     input.spoiler_text = "cw text".to_string();
@@ -1413,7 +1413,7 @@ async fn source_returns_raw_text_and_spoiler_and_is_owner_scoped() {
         .expect_err("a non-owner must not be able to fetch another actor's source");
     assert_eq!(err.status, StatusCode::NOT_FOUND);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- NotificationEvent emit (task 9.2) ---------------------------------------
@@ -1424,11 +1424,11 @@ async fn source_returns_raw_text_and_spoiler_and_is_owner_scoped() {
 /// new status as `target_status_id`.
 #[tokio::test]
 async fn create_status_with_a_local_mention_emits_a_mention_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let mentioned = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let mentioned = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_mentions(&app, author, "alice", &[(mentioned, "bob")], false);
+        service_with_mentions(&db, author, "alice", &[(mentioned, "bob")], false);
 
     let status = service
         .create_status(
@@ -1446,19 +1446,19 @@ async fn create_status_with_a_local_mention_emits_a_mention_notification_event()
     assert_eq!(events[0].origin, AccountRef::Local(author));
     assert_eq!(events[0].target_status_id, Some(status.id));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A post mentioning two distinct registered local actors emits one
 /// `Mention` `NotificationEvent` per mentioned actor.
 #[tokio::test]
 async fn create_status_with_two_local_mentions_emits_two_mention_notification_events() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let bob = app.runtime.ids.next_id();
-    let carol = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let bob = db.runtime.ids.next_id();
+    let carol = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) = service_with_mentions(
-        &app,
+        &db,
         author,
         "alice",
         &[(bob, "bob"), (carol, "carol")],
@@ -1482,7 +1482,7 @@ async fn create_status_with_two_local_mentions_emits_two_mention_notification_ev
     assert!(recipients.contains(&AccountRef::Local(carol)));
     assert!(events.iter().all(|e| e.kind == NotificationType::Mention));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 5.1's own "Mention resolution: local only" gap: a mention
@@ -1491,10 +1491,10 @@ async fn create_status_with_two_local_mentions_emits_two_mention_notification_ev
 /// with).
 #[tokio::test]
 async fn create_status_with_a_remote_domain_mention_emits_no_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_mentions(&app, author, "alice", &[], false);
+        service_with_mentions(&db, author, "alice", &[], false);
 
     service
         .create_status(
@@ -1510,7 +1510,7 @@ async fn create_status_with_a_remote_domain_mention_emits_no_notification_event(
         "a remote-domain mention must not emit a NotificationEvent (never resolved to an Id)"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A self-mention (mentioning your own handle) does not emit a
@@ -1518,10 +1518,10 @@ async fn create_status_with_a_remote_domain_mention_emits_no_notification_event(
 /// comment, "Notification emit (task 9.2)").
 #[tokio::test]
 async fn create_status_with_a_self_mention_emits_no_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_mentions(&app, author, "alice", &[], false);
+        service_with_mentions(&db, author, "alice", &[], false);
 
     service
         .create_status(
@@ -1537,7 +1537,7 @@ async fn create_status_with_a_self_mention_emits_no_notification_event() {
         "a self-mention must not emit a NotificationEvent"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// task 9.2's own idempotency requirement: a resend under the same
@@ -1546,11 +1546,11 @@ async fn create_status_with_a_self_mention_emits_no_notification_event() {
 /// early, before `create_status`'s mention-emit loop is ever reached.
 #[tokio::test]
 async fn idempotent_resubmission_does_not_re_emit_a_mention_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let mentioned = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let mentioned = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_mentions(&app, author, "alice", &[(mentioned, "bob")], false);
+        service_with_mentions(&db, author, "alice", &[(mentioned, "bob")], false);
 
     service
         .create_status(
@@ -1575,7 +1575,7 @@ async fn idempotent_resubmission_does_not_re_emit_a_mention_notification_event()
         "an idempotent resend must not re-emit a Mention NotificationEvent"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `delete_status`/`edit_status` never emit a `NotificationEvent` (delete:
@@ -1584,10 +1584,10 @@ async fn idempotent_resubmission_does_not_re_emit_a_mention_notification_event()
 /// 9.2)").
 #[tokio::test]
 async fn delete_and_edit_do_not_emit_notification_events() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_mentions(&app, author, "alice", &[], false);
+        service_with_mentions(&db, author, "alice", &[], false);
 
     let status = service
         .create_status(
@@ -1629,7 +1629,7 @@ async fn delete_and_edit_do_not_emit_notification_events() {
         "delete_status must not emit a NotificationEvent"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- runtime sanity: deterministic seed is exercised (no behavior asserted) --

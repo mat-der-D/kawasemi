@@ -4,7 +4,7 @@
 //! bookmark/pin は連合せず状態が反映される、direct 投稿の pin が拒否される".
 //!
 //! Mirrors `status_service/tests.rs`'s established convention
-//! (`crate::test_harness::spawn_test_app` for an isolated, migrated schema
+//! (`crate::test_harness::db_fixture::spawn_test_db` for an isolated, migrated schema
 //! plus a deterministic `RuntimeContext`, in-memory `ActorHandleLookup`/
 //! `LocalActorLookup`/`DeliverySink` test doubles, a `RecordingSink` that
 //! captures every dispatched Activity, and a configurable
@@ -30,7 +30,7 @@ use crate::statuses::model::Status;
 use crate::statuses::notification_sink::NotificationEventSink;
 use crate::statuses::status_repository;
 use crate::statuses::visibility::ViewerRelation;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 // --- Test doubles (mirrors status_service/tests.rs) -----------------------
 
@@ -205,7 +205,7 @@ impl NotificationEventSink for RecordingNotificationSink {
     }
 }
 
-/// Builds a ready-to-use `InteractionService` against `app`'s own
+/// Builds a ready-to-use `InteractionService` against `db`'s own
 /// pool/runtime. `known_actors` pre-registers every `(Id, handle)` this
 /// test needs `ActorHandleLookup`/`LocalActorLookup` to resolve (both the
 /// acting actor and any target-post author whose `ActorRef` this service
@@ -214,7 +214,7 @@ impl NotificationEventSink for RecordingNotificationSink {
 /// [`RecordingNotificationSink`] handle lets a test assert on emitted
 /// [`NotificationEvent`]s (task 9.2); most tests ignore it (`_notifications`).
 fn build_service(
-    app: &TestApp,
+    db: &TestDb,
     known_actors: &[(Id, &str)],
     is_follower: bool,
 ) -> (
@@ -256,8 +256,8 @@ fn build_service(
     notification_registry.set_sink(Arc::clone(&notifications) as Arc<dyn NotificationEventSink>);
 
     let service = InteractionService::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         urls,
         activity_builder,
         actor_lookup,
@@ -270,19 +270,19 @@ fn build_service(
 /// Existing-tests-facing wrapper: identical to `build_service`, minus the
 /// notification handle most tests do not need.
 fn service(
-    app: &TestApp,
+    db: &TestDb,
     known_actors: &[(Id, &str)],
     is_follower: bool,
 ) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
     let (service, local_sink, http_sink, _notifications) =
-        build_service(app, known_actors, is_follower);
+        build_service(db, known_actors, is_follower);
     (service, local_sink, http_sink)
 }
 
 /// Task-9.2-facing wrapper: identical to `build_service`, returning the
 /// notification handle for tests that assert on emitted events.
 fn service_with_notifications(
-    app: &TestApp,
+    db: &TestDb,
     known_actors: &[(Id, &str)],
     is_follower: bool,
 ) -> (
@@ -291,7 +291,7 @@ fn service_with_notifications(
     Arc<RecordingSink>,
     Arc<RecordingNotificationSink>,
 ) {
-    build_service(app, known_actors, is_follower)
+    build_service(db, known_actors, is_follower)
 }
 
 fn deliveries(local: &RecordingSink, http: &RecordingSink) -> usize {
@@ -308,9 +308,9 @@ fn activity_type(activity: &serde_json::Value) -> &str {
 /// Inserts a real `statuses` row directly (bypassing `StatusService`, a
 /// separate boundary this task does not depend on), owned by `actor_id`,
 /// with the given `visibility`.
-async fn insert_test_status(app: &TestApp, actor_id: Id, visibility: Visibility) -> Status {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+async fn insert_test_status(db: &TestDb, actor_id: Id, visibility: Visibility) -> Status {
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let status = Status {
         id,
         actor_id,
@@ -332,7 +332,7 @@ async fn insert_test_status(app: &TestApp, actor_id: Id, visibility: Visibility)
         created_at: now,
         edited_at: None,
     };
-    status_repository::insert_status(&app.pool, &status)
+    status_repository::insert_status(&db.pool, &status)
         .await
         .expect("insert_status must succeed for a fresh id/uri");
     status
@@ -345,13 +345,13 @@ async fn insert_test_status(app: &TestApp, actor_id: Id, visibility: Visibility)
 /// `Announce`.
 #[tokio::test]
 async fn reblog_increments_count_and_dispatches_announce() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let booster = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let booster = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (booster, "bob")], false);
+        service(&db, &[(author, "alice"), (booster, "bob")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
 
     let reblog = service
         .reblog(booster, target.id)
@@ -361,7 +361,7 @@ async fn reblog_increments_count_and_dispatches_announce() {
     assert_eq!(reblog.reblog_of_id, Some(target.id));
     assert_eq!(reblog.actor_id, booster);
 
-    let updated_target = status_repository::find_by_id(&app.pool, target.id)
+    let updated_target = status_repository::find_by_id(&db.pool, target.id)
         .await
         .expect("find_by_id must succeed")
         .expect("target must still exist");
@@ -371,7 +371,7 @@ async fn reblog_increments_count_and_dispatches_announce() {
     let calls = local_sink.calls();
     assert_eq!(activity_type(calls[0].1.as_value()), "Announce");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 9.3: reblogging an already-reblogged status does not create a
@@ -379,13 +379,13 @@ async fn reblog_increments_count_and_dispatches_announce() {
 /// second `Announce`.
 #[tokio::test]
 async fn reblogging_twice_does_not_duplicate_or_double_count() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let booster = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let booster = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (booster, "bob")], false);
+        service(&db, &[(author, "alice"), (booster, "bob")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
 
     let first = service
         .reblog(booster, target.id)
@@ -398,7 +398,7 @@ async fn reblogging_twice_does_not_duplicate_or_double_count() {
 
     assert_eq!(first.id, second.id, "must return the same existing boost");
 
-    let updated_target = status_repository::find_by_id(&app.pool, target.id)
+    let updated_target = status_repository::find_by_id(&db.pool, target.id)
         .await
         .expect("find_by_id must succeed")
         .expect("target must still exist");
@@ -413,23 +413,23 @@ async fn reblogging_twice_does_not_duplicate_or_double_count() {
         "a duplicate reblog request must not dispatch a second Announce"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 9.5: reblogging a `private` status invisible to the acting
 /// actor (a non-follower) is rejected.
 #[tokio::test]
 async fn reblogging_an_invisible_private_status_is_rejected() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let booster = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let booster = db.runtime.ids.next_id();
     let (service, _local, _http) = service(
-        &app,
+        &db,
         &[(author, "alice"), (booster, "bob")],
         false, // booster is not a follower of author
     );
 
-    let target = insert_test_status(&app, author, Visibility::Private).await;
+    let target = insert_test_status(&db, author, Visibility::Private).await;
 
     let err = service
         .reblog(booster, target.id)
@@ -438,26 +438,26 @@ async fn reblogging_an_invisible_private_status_is_rejected() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::NOT_FOUND);
 
-    let updated_target = status_repository::find_by_id(&app.pool, target.id)
+    let updated_target = status_repository::find_by_id(&db.pool, target.id)
         .await
         .expect("find_by_id must succeed")
         .expect("target must still exist");
     assert_eq!(updated_target.reblogs_count, 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 9.4: unreblog decrements `reblogs_count` and dispatches a
 /// canonical `Undo(Announce)`.
 #[tokio::test]
 async fn unreblog_decrements_count_and_dispatches_undo_announce() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let booster = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let booster = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (booster, "bob")], false);
+        service(&db, &[(author, "alice"), (booster, "bob")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
     service
         .reblog(booster, target.id)
         .await
@@ -479,26 +479,26 @@ async fn unreblog_decrements_count_and_dispatches_undo_announce() {
 
     // The boost row itself must be gone.
     assert!(
-        interaction_repository::find_reblog(&app.pool, booster, target.id)
+        interaction_repository::find_reblog(&db.pool, booster, target.id)
             .await
             .expect("find_reblog must succeed")
             .is_none()
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Un-reblogging a status that was never reblogged by this actor is a
 /// no-op: no error, no dispatch, target unchanged.
 #[tokio::test]
 async fn unreblog_without_a_prior_reblog_is_a_no_op() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let booster = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let booster = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (booster, "bob")], false);
+        service(&db, &[(author, "alice"), (booster, "bob")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
 
     let result = service
         .unreblog(booster, target.id)
@@ -507,7 +507,7 @@ async fn unreblog_without_a_prior_reblog_is_a_no_op() {
     assert_eq!(result.reblogs_count, 0);
     assert_eq!(deliveries(&local_sink, &http_sink), 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- favourite / unfavourite --------------------------------------------------
@@ -516,13 +516,13 @@ async fn unreblog_without_a_prior_reblog_is_a_no_op() {
 /// `favourites_count` and dispatches a canonical `Like`.
 #[tokio::test]
 async fn favourite_increments_count_and_dispatches_like() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let fan = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let fan = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (fan, "carol")], false);
+        service(&db, &[(author, "alice"), (fan, "carol")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
 
     let favourited = service
         .favourite(fan, target.id)
@@ -534,20 +534,20 @@ async fn favourite_increments_count_and_dispatches_like() {
     let calls = local_sink.calls();
     assert_eq!(activity_type(calls[0].1.as_value()), "Like");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 10.4: favouriting an already-favourited status does not
 /// double-count `favourites_count` or dispatch a second `Like`.
 #[tokio::test]
 async fn favouriting_twice_does_not_double_count() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let fan = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let fan = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (fan, "carol")], false);
+        service(&db, &[(author, "alice"), (fan, "carol")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
 
     service
         .favourite(fan, target.id)
@@ -565,20 +565,20 @@ async fn favouriting_twice_does_not_double_count() {
         "a duplicate favourite must not dispatch a second Like"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 10.3: unfavourite decrements `favourites_count` and
 /// dispatches a canonical `Undo(Like)`.
 #[tokio::test]
 async fn unfavourite_decrements_count_and_dispatches_undo_like() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let fan = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let fan = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (fan, "carol")], false);
+        service(&db, &[(author, "alice"), (fan, "carol")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
     service
         .favourite(fan, target.id)
         .await
@@ -596,7 +596,7 @@ async fn unfavourite_decrements_count_and_dispatches_undo_like() {
     let calls = local_sink.calls();
     assert_eq!(activity_type(calls[0].1.as_value()), "Undo");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- bookmark / list_bookmarks ------------------------------------------------
@@ -606,20 +606,20 @@ async fn unfavourite_decrements_count_and_dispatches_undo_like() {
 /// (Requirement 11.4).
 #[tokio::test]
 async fn bookmark_and_unbookmark_persist_state_with_no_federation_dispatch() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let reader = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let reader = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (reader, "dave")], false);
+        service(&db, &[(author, "alice"), (reader, "dave")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
 
     service
         .bookmark(reader, target.id, true)
         .await
         .expect("bookmarking a visible status must succeed");
     assert!(
-        interaction_repository::exists_bookmark(&app.pool, reader, target.id)
+        interaction_repository::exists_bookmark(&db.pool, reader, target.id)
             .await
             .expect("exists_bookmark must succeed")
     );
@@ -629,7 +629,7 @@ async fn bookmark_and_unbookmark_persist_state_with_no_federation_dispatch() {
         .await
         .expect("unbookmarking must succeed");
     assert!(
-        !interaction_repository::exists_bookmark(&app.pool, reader, target.id)
+        !interaction_repository::exists_bookmark(&db.pool, reader, target.id)
             .await
             .expect("exists_bookmark must succeed")
     );
@@ -640,21 +640,21 @@ async fn bookmark_and_unbookmark_persist_state_with_no_federation_dispatch() {
         "bookmark/unbookmark must never dispatch any federation Activity"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 11.3: `list_bookmarks` returns the actor's bookmarked
 /// statuses, paginated.
 #[tokio::test]
 async fn list_bookmarks_returns_bookmarked_statuses() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let reader = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, &[(author, "alice"), (reader, "dave")], false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let reader = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, &[(author, "alice"), (reader, "dave")], false);
 
-    let first = insert_test_status(&app, author, Visibility::Public).await;
-    let second = insert_test_status(&app, author, Visibility::Public).await;
-    let _not_bookmarked = insert_test_status(&app, author, Visibility::Public).await;
+    let first = insert_test_status(&db, author, Visibility::Public).await;
+    let second = insert_test_status(&db, author, Visibility::Public).await;
+    let _not_bookmarked = insert_test_status(&db, author, Visibility::Public).await;
 
     service
         .bookmark(reader, first.id, true)
@@ -675,7 +675,7 @@ async fn list_bookmarks_returns_bookmarked_statuses() {
     assert!(ids.contains(&first.id));
     assert!(ids.contains(&second.id));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- pin ----------------------------------------------------------------------
@@ -684,18 +684,18 @@ async fn list_bookmarks_returns_bookmarked_statuses() {
 /// be reversed; no federation dispatch either way.
 #[tokio::test]
 async fn pin_and_unpin_own_status_with_no_federation_dispatch() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, local_sink, http_sink) = service(&app, &[(author, "alice")], false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, local_sink, http_sink) = service(&db, &[(author, "alice")], false);
 
-    let status = insert_test_status(&app, author, Visibility::Public).await;
+    let status = insert_test_status(&db, author, Visibility::Public).await;
 
     service
         .pin(author, status.id, true)
         .await
         .expect("pinning one's own status must succeed");
     assert!(
-        interaction_repository::exists_pin(&app.pool, author, status.id)
+        interaction_repository::exists_pin(&db.pool, author, status.id)
             .await
             .expect("exists_pin must succeed")
     );
@@ -705,7 +705,7 @@ async fn pin_and_unpin_own_status_with_no_federation_dispatch() {
         .await
         .expect("unpinning must succeed");
     assert!(
-        !interaction_repository::exists_pin(&app.pool, author, status.id)
+        !interaction_repository::exists_pin(&db.pool, author, status.id)
             .await
             .expect("exists_pin must succeed")
     );
@@ -716,19 +716,19 @@ async fn pin_and_unpin_own_status_with_no_federation_dispatch() {
         "pin/unpin must never dispatch any federation Activity"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 12.3: pinning a status not owned by the requesting actor is
 /// rejected.
 #[tokio::test]
 async fn pinning_a_non_owned_status_is_rejected() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let stranger = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, &[(author, "alice"), (stranger, "eve")], false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let stranger = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, &[(author, "alice"), (stranger, "eve")], false);
 
-    let status = insert_test_status(&app, author, Visibility::Public).await;
+    let status = insert_test_status(&db, author, Visibility::Public).await;
 
     let err = service
         .pin(stranger, status.id, true)
@@ -737,23 +737,23 @@ async fn pinning_a_non_owned_status_is_rejected() {
     assert_eq!(err.kind, ErrorKind::Client);
 
     assert!(
-        !interaction_repository::exists_pin(&app.pool, stranger, status.id)
+        !interaction_repository::exists_pin(&db.pool, stranger, status.id)
             .await
             .expect("exists_pin must succeed")
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 12.4: pinning a `direct`-visibility status is rejected, even
 /// for its own owner.
 #[tokio::test]
 async fn pinning_a_direct_status_is_rejected() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, &[(author, "alice")], false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, &[(author, "alice")], false);
 
-    let status = insert_test_status(&app, author, Visibility::Direct).await;
+    let status = insert_test_status(&db, author, Visibility::Direct).await;
 
     let err = service
         .pin(author, status.id, true)
@@ -763,12 +763,12 @@ async fn pinning_a_direct_status_is_rejected() {
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
     assert!(
-        !interaction_repository::exists_pin(&app.pool, author, status.id)
+        !interaction_repository::exists_pin(&db.pool, author, status.id)
             .await
             .expect("exists_pin must succeed")
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- NotificationEvent emit (task 9.2) ---------------------------------------
@@ -779,13 +779,13 @@ async fn pinning_a_direct_status_is_rejected() {
 /// `target_status_id`.
 #[tokio::test]
 async fn favourite_emits_a_favourite_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let fan = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let fan = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_notifications(&app, &[(author, "alice"), (fan, "carol")], false);
+        service_with_notifications(&db, &[(author, "alice"), (fan, "carol")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
 
     service
         .favourite(fan, target.id)
@@ -799,7 +799,7 @@ async fn favourite_emits_a_favourite_notification_event() {
     assert_eq!(events[0].origin, AccountRef::Local(fan));
     assert_eq!(events[0].target_status_id, Some(target.id));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 10.4 / task 9.2's own idempotency requirement: favouriting
@@ -809,13 +809,13 @@ async fn favourite_emits_a_favourite_notification_event() {
 /// branch.
 #[tokio::test]
 async fn favouriting_twice_emits_only_one_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let fan = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let fan = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_notifications(&app, &[(author, "alice"), (fan, "carol")], false);
+        service_with_notifications(&db, &[(author, "alice"), (fan, "carol")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
 
     service
         .favourite(fan, target.id)
@@ -832,20 +832,20 @@ async fn favouriting_twice_emits_only_one_notification_event() {
         "a duplicate favourite must not re-emit a NotificationEvent"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Unfavouriting never emits a `NotificationEvent` (task 9.2's own emit
 /// list names favourite/reblog/mention/edit — not their inverses).
 #[tokio::test]
 async fn unfavourite_does_not_emit_a_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let fan = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let fan = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_notifications(&app, &[(author, "alice"), (fan, "carol")], false);
+        service_with_notifications(&db, &[(author, "alice"), (fan, "carol")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
     service
         .favourite(fan, target.id)
         .await
@@ -863,7 +863,7 @@ async fn unfavourite_does_not_emit_a_notification_event() {
         "unfavourite must not emit a NotificationEvent"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A self-favourite (favouriting your own post) does not emit a
@@ -871,12 +871,12 @@ async fn unfavourite_does_not_emit_a_notification_event() {
 /// comment, "Notification emit (task 9.2)").
 #[tokio::test]
 async fn self_favourite_does_not_emit_a_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_notifications(&app, &[(author, "alice")], false);
+        service_with_notifications(&db, &[(author, "alice")], false);
 
-    let own_status = insert_test_status(&app, author, Visibility::Public).await;
+    let own_status = insert_test_status(&db, author, Visibility::Public).await;
 
     service
         .favourite(author, own_status.id)
@@ -889,7 +889,7 @@ async fn self_favourite_does_not_emit_a_notification_event() {
         "a self-favourite must not emit a NotificationEvent"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirements 9.1, 9.2: a new reblog emits exactly one `Reblog`
@@ -897,13 +897,13 @@ async fn self_favourite_does_not_emit_a_notification_event() {
 /// booster as `origin`, and the target status as `target_status_id`.
 #[tokio::test]
 async fn reblog_emits_a_reblog_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let booster = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let booster = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_notifications(&app, &[(author, "alice"), (booster, "bob")], false);
+        service_with_notifications(&db, &[(author, "alice"), (booster, "bob")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
 
     service
         .reblog(booster, target.id)
@@ -917,20 +917,20 @@ async fn reblog_emits_a_reblog_notification_event() {
     assert_eq!(events[0].origin, AccountRef::Local(booster));
     assert_eq!(events[0].target_status_id, Some(target.id));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 9.3 / task 9.2's own idempotency requirement: reblogging the
 /// same status twice by the same actor emits exactly one `NotificationEvent`.
 #[tokio::test]
 async fn reblogging_twice_emits_only_one_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let booster = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let booster = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_notifications(&app, &[(author, "alice"), (booster, "bob")], false);
+        service_with_notifications(&db, &[(author, "alice"), (booster, "bob")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
 
     service
         .reblog(booster, target.id)
@@ -947,20 +947,20 @@ async fn reblogging_twice_emits_only_one_notification_event() {
         "a duplicate reblog must not re-emit a NotificationEvent"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Un-reblogging never emits a `NotificationEvent` (same rationale as
 /// `unfavourite_does_not_emit_a_notification_event`).
 #[tokio::test]
 async fn unreblog_does_not_emit_a_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let booster = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let booster = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_notifications(&app, &[(author, "alice"), (booster, "bob")], false);
+        service_with_notifications(&db, &[(author, "alice"), (booster, "bob")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
     service
         .reblog(booster, target.id)
         .await
@@ -978,7 +978,7 @@ async fn unreblog_does_not_emit_a_notification_event() {
         "unreblog must not emit a NotificationEvent"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A self-reblog (boosting your own post) does not emit a
@@ -986,12 +986,12 @@ async fn unreblog_does_not_emit_a_notification_event() {
 /// `self_favourite_does_not_emit_a_notification_event`.
 #[tokio::test]
 async fn self_reblog_does_not_emit_a_notification_event() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
     let (service, _local, _http, notifications) =
-        service_with_notifications(&app, &[(author, "alice")], false);
+        service_with_notifications(&db, &[(author, "alice")], false);
 
-    let own_status = insert_test_status(&app, author, Visibility::Public).await;
+    let own_status = insert_test_status(&db, author, Visibility::Public).await;
 
     service
         .reblog(author, own_status.id)
@@ -1004,7 +1004,7 @@ async fn self_reblog_does_not_emit_a_notification_event() {
         "a self-reblog must not emit a NotificationEvent"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- atomicity of the record/counter pair ---------------------------------
@@ -1019,16 +1019,16 @@ async fn self_reblog_does_not_emit_a_notification_event() {
 /// to be tested against: without a shared transaction the record half stays
 /// committed while the counter never moves; with one, both roll back
 /// together. The trigger is created inside
-/// `spawn_test_app`'s own isolated schema (`search_path`-pinned), so it can
+/// `spawn_test_db`'s own isolated schema (`search_path`-pinned), so it can
 /// never affect a concurrently running test.
-async fn fail_every_counter_update(app: &TestApp) {
+async fn fail_every_counter_update(db: &TestDb) {
     sqlx::query(
         "CREATE FUNCTION kawasemi_test_fail_counter_update() RETURNS trigger \
          LANGUAGE plpgsql AS $fn$ \
          BEGIN RAISE EXCEPTION 'injected counter-update failure'; END; \
          $fn$",
     )
-    .execute(&app.pool)
+    .execute(&db.pool)
     .await
     .expect("creating the failure-injection trigger function must succeed");
 
@@ -1037,7 +1037,7 @@ async fn fail_every_counter_update(app: &TestApp) {
          BEFORE UPDATE ON statuses FOR EACH ROW \
          EXECUTE FUNCTION kawasemi_test_fail_counter_update()",
     )
-    .execute(&app.pool)
+    .execute(&db.pool)
     .await
     .expect("creating the failure-injection trigger must succeed");
 }
@@ -1047,14 +1047,14 @@ async fn fail_every_counter_update(app: &TestApp) {
 /// left changed on its own, and the caller must see the error.
 #[tokio::test]
 async fn reblog_leaves_neither_boost_row_nor_counter_changed_when_the_counter_update_fails() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let booster = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let booster = db.runtime.ids.next_id();
     let (service, local_sink, http_sink, notifications) =
-        service_with_notifications(&app, &[(author, "alice"), (booster, "bob")], false);
+        service_with_notifications(&db, &[(author, "alice"), (booster, "bob")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
-    fail_every_counter_update(&app).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
+    fail_every_counter_update(&db).await;
 
     let err = service
         .reblog(booster, target.id)
@@ -1063,13 +1063,13 @@ async fn reblog_leaves_neither_boost_row_nor_counter_changed_when_the_counter_up
     assert_eq!(err.kind, ErrorKind::Server);
 
     assert!(
-        interaction_repository::find_reblog(&app.pool, booster, target.id)
+        interaction_repository::find_reblog(&db.pool, booster, target.id)
             .await
             .expect("find_reblog must succeed")
             .is_none(),
         "the boost row must have rolled back with the counter update"
     );
-    let reloaded = status_repository::find_by_id(&app.pool, target.id)
+    let reloaded = status_repository::find_by_id(&db.pool, target.id)
         .await
         .expect("find_by_id must succeed")
         .expect("target must still exist");
@@ -1082,21 +1082,21 @@ async fn reblog_leaves_neither_boost_row_nor_counter_changed_when_the_counter_up
     );
     assert_eq!(notifications.events().len(), 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// When the `favourites_count` update fails mid-operation, the `favourites`
 /// row must not survive.
 #[tokio::test]
 async fn favourite_leaves_neither_row_nor_counter_changed_when_the_counter_update_fails() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let fan = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let fan = db.runtime.ids.next_id();
     let (service, local_sink, http_sink, notifications) =
-        service_with_notifications(&app, &[(author, "alice"), (fan, "carol")], false);
+        service_with_notifications(&db, &[(author, "alice"), (fan, "carol")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
-    fail_every_counter_update(&app).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
+    fail_every_counter_update(&db).await;
 
     let err = service
         .favourite(fan, target.id)
@@ -1105,12 +1105,12 @@ async fn favourite_leaves_neither_row_nor_counter_changed_when_the_counter_updat
     assert_eq!(err.kind, ErrorKind::Server);
 
     assert!(
-        !interaction_repository::exists_favourite(&app.pool, fan, target.id)
+        !interaction_repository::exists_favourite(&db.pool, fan, target.id)
             .await
             .expect("exists_favourite must succeed"),
         "the favourites row must have rolled back with the counter update"
     );
-    let reloaded = status_repository::find_by_id(&app.pool, target.id)
+    let reloaded = status_repository::find_by_id(&db.pool, target.id)
         .await
         .expect("find_by_id must succeed")
         .expect("target must still exist");
@@ -1119,20 +1119,20 @@ async fn favourite_leaves_neither_row_nor_counter_changed_when_the_counter_updat
     assert_eq!(deliveries(&local_sink, &http_sink), 0);
     assert_eq!(notifications.events().len(), 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The un-favourite direction is symmetric — a failed
 /// counter decrement must not leave the `favourites` row deleted.
 #[tokio::test]
 async fn unfavourite_leaves_neither_row_nor_counter_changed_when_the_counter_update_fails() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let fan = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let fan = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (fan, "carol")], false);
+        service(&db, &[(author, "alice"), (fan, "carol")], false);
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
     service
         .favourite(fan, target.id)
         .await
@@ -1140,7 +1140,7 @@ async fn unfavourite_leaves_neither_row_nor_counter_changed_when_the_counter_upd
     local_sink.calls.lock().unwrap().clear();
     http_sink.calls.lock().unwrap().clear();
 
-    fail_every_counter_update(&app).await;
+    fail_every_counter_update(&db).await;
 
     let err = service
         .unfavourite(fan, target.id)
@@ -1149,12 +1149,12 @@ async fn unfavourite_leaves_neither_row_nor_counter_changed_when_the_counter_upd
     assert_eq!(err.kind, ErrorKind::Server);
 
     assert!(
-        interaction_repository::exists_favourite(&app.pool, fan, target.id)
+        interaction_repository::exists_favourite(&db.pool, fan, target.id)
             .await
             .expect("exists_favourite must succeed"),
         "the favourites row deletion must have rolled back with the counter update"
     );
-    let reloaded = status_repository::find_by_id(&app.pool, target.id)
+    let reloaded = status_repository::find_by_id(&db.pool, target.id)
         .await
         .expect("find_by_id must succeed")
         .expect("target must still exist");
@@ -1165,7 +1165,7 @@ async fn unfavourite_leaves_neither_row_nor_counter_changed_when_the_counter_upd
 
     assert_eq!(deliveries(&local_sink, &http_sink), 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- counter/record agreement on the success path -------------------------
@@ -1180,18 +1180,18 @@ async fn unfavourite_leaves_neither_row_nor_counter_changed_when_the_counter_upd
 /// Asserts that `statuses.favourites_count` and the real number of
 /// `favourites` rows for `status_id` are both `expected`.
 async fn assert_favourite_counter_matches_rows(
-    app: &TestApp,
+    db: &TestDb,
     status_id: Id,
     expected: i64,
     step: &str,
 ) {
-    let reloaded = status_repository::find_by_id(&app.pool, status_id)
+    let reloaded = status_repository::find_by_id(&db.pool, status_id)
         .await
         .expect("find_by_id must succeed")
         .expect("the target status must still exist");
     let (rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM favourites WHERE status_id = $1")
         .bind(status_id.as_i64())
-        .fetch_one(&app.pool)
+        .fetch_one(&db.pool)
         .await
         .expect("counting favourites rows must succeed");
 
@@ -1209,24 +1209,24 @@ async fn assert_favourite_counter_matches_rows(
 /// un-favourite.
 #[tokio::test]
 async fn favourite_counter_matches_the_actual_favourite_row_count_at_every_step() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let fan = app.runtime.ids.next_id();
-    let other_fan = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let fan = db.runtime.ids.next_id();
+    let other_fan = db.runtime.ids.next_id();
     let (service, _local, _http) = service(
-        &app,
+        &db,
         &[(author, "alice"), (fan, "carol"), (other_fan, "dave")],
         false,
     );
 
-    let target = insert_test_status(&app, author, Visibility::Public).await;
-    assert_favourite_counter_matches_rows(&app, target.id, 0, "no favourite yet").await;
+    let target = insert_test_status(&db, author, Visibility::Public).await;
+    assert_favourite_counter_matches_rows(&db, target.id, 0, "no favourite yet").await;
 
     service
         .favourite(fan, target.id)
         .await
         .expect("the first favourite must succeed");
-    assert_favourite_counter_matches_rows(&app, target.id, 1, "the first favourite").await;
+    assert_favourite_counter_matches_rows(&db, target.id, 1, "the first favourite").await;
 
     // The idempotent repeat takes `add_favourite`'s `is_new == false` branch
     // inside the transaction, so it must leave both halves alone.
@@ -1234,20 +1234,19 @@ async fn favourite_counter_matches_the_actual_favourite_row_count_at_every_step(
         .favourite(fan, target.id)
         .await
         .expect("a duplicate favourite must be an accepted no-op");
-    assert_favourite_counter_matches_rows(&app, target.id, 1, "a duplicate favourite").await;
+    assert_favourite_counter_matches_rows(&db, target.id, 1, "a duplicate favourite").await;
 
     service
         .favourite(other_fan, target.id)
         .await
         .expect("a second actor's favourite must succeed");
-    assert_favourite_counter_matches_rows(&app, target.id, 2, "a second distinct favouriter").await;
+    assert_favourite_counter_matches_rows(&db, target.id, 2, "a second distinct favouriter").await;
 
     service
         .unfavourite(fan, target.id)
         .await
         .expect("the un-favourite must succeed");
-    assert_favourite_counter_matches_rows(&app, target.id, 1, "un-favouriting one of the two")
-        .await;
+    assert_favourite_counter_matches_rows(&db, target.id, 1, "un-favouriting one of the two").await;
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

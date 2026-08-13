@@ -4,7 +4,7 @@
 //! グリーン）。受信ハンドラ経路と同一結果になる".
 //!
 //! Mirrors `inbound_handlers/tests.rs`'s established convention
-//! (`crate::test_harness::spawn_test_app` for an isolated, migrated schema
+//! (`crate::test_harness::db_fixture::spawn_test_db` for an isolated, migrated schema
 //! plus a deterministic `RuntimeContext`), paired with
 //! `MockFederationHttpClient` (mirroring `remote_fetcher/tests.rs`'s
 //! identical use of that same mock for a URL-fetching service) so
@@ -30,7 +30,7 @@ use crate::federation::signatures::{HttpResponse, MockFederationHttpClient};
 use crate::statuses::inbound_handlers::CreateNoteHandler;
 use crate::statuses::notification_sink::NotificationSinkRegistry;
 use crate::statuses::status_repository;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 /// An in-memory [`RemoteActorResolver`]: hands out a stable [`Id`] per
 /// `actor_uri`, minting a fresh one on first sight and remembering it
@@ -120,17 +120,17 @@ fn note_document(uri: &str) -> Value {
 const TEST_DOMAIN: &str = "kawasemi.example";
 
 fn service_for(
-    app: &TestApp,
+    db: &TestDb,
     http_client: Arc<MockFederationHttpClient>,
     remote_actors: Arc<FakeRemoteActors>,
 ) -> StatusIngestService<MockFederationHttpClient, FakeRemoteActors, ActorDirectory> {
     StatusIngestService::new(
-        app.pool.clone(),
+        db.pool.clone(),
         http_client,
-        app.runtime.clone(),
+        db.runtime.clone(),
         remote_actors,
         TEST_DOMAIN,
-        ActorDirectory::new(app.pool.clone()),
+        ActorDirectory::new(db.pool.clone()),
     )
 }
 
@@ -139,15 +139,15 @@ fn service_for(
 /// 14.2) — for tests exercising mention *persistence* without needing to
 /// insert a real `local_actors` row.
 fn service_with_mentions_for(
-    app: &TestApp,
+    db: &TestDb,
     http_client: Arc<MockFederationHttpClient>,
     remote_actors: Arc<FakeRemoteActors>,
     mentions: FakeMentionLookup,
 ) -> StatusIngestService<MockFederationHttpClient, FakeRemoteActors, FakeMentionLookup> {
     StatusIngestService::new(
-        app.pool.clone(),
+        db.pool.clone(),
         http_client,
-        app.runtime.clone(),
+        db.runtime.clone(),
         remote_actors,
         TEST_DOMAIN,
         mentions,
@@ -158,10 +158,10 @@ fn service_with_mentions_for(
 /// document into a persisted `Status` with the expected content/visibility.
 #[tokio::test]
 async fn ingest_document_ingests_a_standalone_note() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let service = service_for(
-        &app,
+        &db,
         Arc::new(MockFederationHttpClient::new()),
         remote_actors,
     );
@@ -176,7 +176,7 @@ async fn ingest_document_ingests_a_standalone_note() {
     assert_eq!(status.visibility, Visibility::Public);
     assert!(!status.local);
 
-    let persisted = status_repository::find_by_uri(&app.pool, NOTE_URI)
+    let persisted = status_repository::find_by_uri(&db.pool, NOTE_URI)
         .await
         .expect("find_by_uri must succeed")
         .expect("the ingested Note must be persisted and readable back");
@@ -189,13 +189,13 @@ async fn ingest_document_ingests_a_standalone_note() {
 /// populated, identical to `CreateNoteHandler`'s own reply handling.
 #[tokio::test]
 async fn ingest_document_reflects_a_reply_to_a_known_status() {
-    let app = spawn_test_app().await;
-    let local_author = app.runtime.ids.next_id();
-    let parent = insert_test_status(&app, local_author, Visibility::Public).await;
+    let db = spawn_test_db().await;
+    let local_author = db.runtime.ids.next_id();
+    let parent = insert_test_status(&db, local_author, Visibility::Public).await;
 
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let service = service_for(
-        &app,
+        &db,
         Arc::new(MockFederationHttpClient::new()),
         remote_actors,
     );
@@ -217,10 +217,10 @@ async fn ingest_document_reflects_a_reply_to_a_known_status() {
 /// same persisted row rather than inserting a duplicate.
 #[tokio::test]
 async fn ingest_document_is_idempotent_on_repeated_uri() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let service = service_for(
-        &app,
+        &db,
         Arc::new(MockFederationHttpClient::new()),
         remote_actors,
     );
@@ -241,10 +241,10 @@ async fn ingest_document_is_idempotent_on_repeated_uri() {
 /// not silently ingested as a Status.
 #[tokio::test]
 async fn ingest_document_rejects_a_non_note_type() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let service = service_for(
-        &app,
+        &db,
         Arc::new(MockFederationHttpClient::new()),
         remote_actors,
     );
@@ -266,10 +266,10 @@ async fn ingest_document_rejects_a_non_note_type() {
 /// actor and must be rejected with a `422`.
 #[tokio::test]
 async fn ingest_document_rejects_a_note_missing_attributed_to() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let service = service_for(
-        &app,
+        &db,
         Arc::new(MockFederationHttpClient::new()),
         remote_actors,
     );
@@ -295,10 +295,10 @@ async fn ingest_document_rejects_a_note_missing_attributed_to() {
 /// if `evil.example` had genuine authority to vouch for that authorship.
 #[tokio::test]
 async fn ingest_document_rejects_a_note_whose_id_host_differs_from_attributed_to_host() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let service = service_for(
-        &app,
+        &db,
         Arc::new(MockFederationHttpClient::new()),
         Arc::clone(&remote_actors),
     );
@@ -320,7 +320,7 @@ async fn ingest_document_rejects_a_note_whose_id_host_differs_from_attributed_to
     assert_eq!(error.kind, ErrorKind::Client);
     assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let persisted = status_repository::find_by_uri(&app.pool, forged_uri)
+    let persisted = status_repository::find_by_uri(&db.pool, forged_uri)
         .await
         .expect("find_by_uri must succeed");
     assert!(
@@ -341,8 +341,8 @@ async fn ingest_document_rejects_a_note_whose_id_host_differs_from_attributed_to
 /// host, and must be rejected identically to the `ingest_document` case.
 #[tokio::test]
 async fn ingest_url_rejects_a_note_whose_id_host_differs_from_attributed_to_host() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let forged_uri = "https://evil.example/notes/forged";
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(ok_response(json!({
@@ -353,14 +353,14 @@ async fn ingest_url_rejects_a_note_whose_id_host_differs_from_attributed_to_host
         "content": "evil.example claims this was written by remote.example/alice",
         "to": ["https://www.w3.org/ns/activitystreams#Public"],
     })));
-    let service = service_for(&app, mock, remote_actors);
+    let service = service_for(&db, mock, remote_actors);
 
     let error = service.ingest_url(forged_uri).await.expect_err(
         "a fetched Note whose id host differs from its attributedTo host must be rejected",
     );
     assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let persisted = status_repository::find_by_uri(&app.pool, forged_uri)
+    let persisted = status_repository::find_by_uri(&db.pool, forged_uri)
         .await
         .expect("find_by_uri must succeed");
     assert!(
@@ -383,8 +383,8 @@ async fn ingest_url_rejects_a_note_whose_id_host_differs_from_attributed_to_host
 #[tokio::test]
 async fn ingest_url_rejects_a_note_whose_id_and_attributed_to_agree_on_a_host_different_from_the_fetched_url()
  {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let evil_fetch_url = "https://evil.example/anything";
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(ok_response(json!({
@@ -395,7 +395,7 @@ async fn ingest_url_rejects_a_note_whose_id_and_attributed_to_agree_on_a_host_di
         "content": "evil.example launders this through remote.example/alice's identity",
         "to": ["https://www.w3.org/ns/activitystreams#Public"],
     })));
-    let service = service_for(&app, mock, Arc::clone(&remote_actors));
+    let service = service_for(&db, mock, Arc::clone(&remote_actors));
 
     let error = service.ingest_url(evil_fetch_url).await.expect_err(
         "a fetched Note whose self-consistent id/attributedTo host differs from the \
@@ -404,7 +404,7 @@ async fn ingest_url_rejects_a_note_whose_id_and_attributed_to_agree_on_a_host_di
     assert_eq!(error.kind, ErrorKind::Client);
     assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let persisted = status_repository::find_by_uri(&app.pool, NOTE_URI)
+    let persisted = status_repository::find_by_uri(&db.pool, NOTE_URI)
         .await
         .expect("find_by_uri must succeed");
     assert!(
@@ -424,10 +424,10 @@ async fn ingest_url_rejects_a_note_whose_id_and_attributed_to_agree_on_a_host_di
 /// origin/authority mismatch.
 #[tokio::test]
 async fn ingest_document_accepts_an_id_and_attributed_to_host_differing_only_in_case() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let service = service_for(
-        &app,
+        &db,
         Arc::new(MockFederationHttpClient::new()),
         remote_actors,
     );
@@ -454,8 +454,8 @@ async fn ingest_document_accepts_an_id_and_attributed_to_host_differing_only_in_
 /// in a different case.
 #[tokio::test]
 async fn ingest_url_accepts_a_fetched_url_and_id_host_differing_only_in_case() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let fetch_url = "https://Remote.Example/notes/1";
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(ok_response(json!({
@@ -466,7 +466,7 @@ async fn ingest_url_accepts_a_fetched_url_and_id_host_differing_only_in_case() {
         "content": "same origin, different letter case",
         "to": ["https://www.w3.org/ns/activitystreams#Public"],
     })));
-    let service = service_for(&app, mock, remote_actors);
+    let service = service_for(&db, mock, remote_actors);
 
     service.ingest_url(fetch_url).await.expect(
         "a fetched url and document id differing only in letter case must not be \
@@ -479,11 +479,11 @@ async fn ingest_url_accepts_a_fetched_url_and_id_host_differing_only_in_case() {
 /// `ingest_document`.
 #[tokio::test]
 async fn ingest_url_fetches_and_ingests_a_note() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(ok_response(note_document(NOTE_URI)));
-    let service = service_for(&app, mock, remote_actors);
+    let service = service_for(&db, mock, remote_actors);
 
     let status = service
         .ingest_url(NOTE_URI)
@@ -498,15 +498,15 @@ async fn ingest_url_fetches_and_ingests_a_note() {
 /// mirroring `RemoteAccountFetcher::fetch_and_upsert`'s identical mapping.
 #[tokio::test]
 async fn ingest_url_maps_a_non_success_fetch_to_not_found() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let mock = Arc::new(MockFederationHttpClient::new());
     mock.queue_fetch_response(HttpResponse {
         status: StatusCode::NOT_FOUND,
         headers: HeaderMap::new(),
         body: Vec::new(),
     });
-    let service = service_for(&app, mock, remote_actors);
+    let service = service_for(&db, mock, remote_actors);
 
     let error = service
         .ingest_url(NOTE_URI)
@@ -524,17 +524,17 @@ async fn ingest_url_maps_a_non_success_fetch_to_not_found() {
 /// exact same `ingest_note_object` function.
 #[tokio::test]
 async fn ingest_document_matches_the_inbound_dispatch_path_for_the_same_note() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
 
     // Path 1: the inbound Create(Note) dispatch handler (task 6.1).
     let dispatch_uri = "https://remote.example/notes/via-dispatch";
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         Arc::clone(&remote_actors),
         "kawasemi.example",
-        ActorDirectory::new(app.pool.clone()),
+        ActorDirectory::new(db.pool.clone()),
         NotificationSinkRegistry::new(),
     );
     let ctx = InboundContext {
@@ -560,7 +560,7 @@ async fn ingest_document_matches_the_inbound_dispatch_path_for_the_same_note() {
     )
     .await
     .expect("CreateNoteHandler must ingest the wrapped Note");
-    let via_dispatch = status_repository::find_by_uri(&app.pool, dispatch_uri)
+    let via_dispatch = status_repository::find_by_uri(&db.pool, dispatch_uri)
         .await
         .expect("find_by_uri must succeed")
         .expect("CreateNoteHandler must have persisted the Note");
@@ -569,7 +569,7 @@ async fn ingest_document_matches_the_inbound_dispatch_path_for_the_same_note() {
     // directly (no Create wrapper, as an out-of-dispatch fetch would see).
     let out_of_dispatch_uri = "https://remote.example/notes/via-ingest-service";
     let service = service_for(
-        &app,
+        &db,
         Arc::new(MockFederationHttpClient::new()),
         Arc::clone(&remote_actors),
     );
@@ -597,11 +597,11 @@ async fn ingest_document_matches_the_inbound_dispatch_path_for_the_same_note() {
 /// doc comment, "受信ハンドラ経路と同一結果になる").
 #[tokio::test]
 async fn ingest_document_persists_tag_mentions_and_attachments() {
-    let app = spawn_test_app().await;
-    let bob = app.runtime.ids.next_id();
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let bob = db.runtime.ids.next_id();
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let service = service_with_mentions_for(
-        &app,
+        &db,
         Arc::new(MockFederationHttpClient::new()),
         remote_actors,
         FakeMentionLookup::with_actors(&[(bob, "bob")]),
@@ -621,7 +621,7 @@ async fn ingest_document_persists_tag_mentions_and_attachments() {
         .await
         .expect("a Note with attachments/mentions must ingest successfully");
 
-    let mentioned = status_repository::mentioned_actor_ids(&app.pool, status.id)
+    let mentioned = status_repository::mentioned_actor_ids(&db.pool, status.id)
         .await
         .expect("mention lookup must succeed");
     assert_eq!(
@@ -630,7 +630,7 @@ async fn ingest_document_persists_tag_mentions_and_attachments() {
         "only the locally-resolved mention must be persisted"
     );
 
-    let attachments = status_repository::remote_attachments_for_status(&app.pool, status.id)
+    let attachments = status_repository::remote_attachments_for_status(&db.pool, status.id)
         .await
         .expect("attachment lookup must succeed");
     assert_eq!(attachments.len(), 1);
@@ -642,9 +642,9 @@ async fn ingest_document_persists_tag_mentions_and_attachments() {
 /// Inserts a real `statuses` row directly, owned by `actor_id` -- mirrors
 /// `inbound_handlers/tests.rs::insert_test_status`'s identical helper
 /// (narrowed to this module's own reply-reflection test's needs).
-async fn insert_test_status(app: &TestApp, actor_id: Id, visibility: Visibility) -> Status {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+async fn insert_test_status(db: &TestDb, actor_id: Id, visibility: Visibility) -> Status {
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let status = Status {
         id,
         actor_id,
@@ -666,7 +666,7 @@ async fn insert_test_status(app: &TestApp, actor_id: Id, visibility: Visibility)
         created_at: now,
         edited_at: None,
     };
-    status_repository::insert_status(&app.pool, &status)
+    status_repository::insert_status(&db.pool, &status)
         .await
         .expect("insert_status must succeed for a fresh id/uri");
     status

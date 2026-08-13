@@ -3,7 +3,7 @@
 //! れ read-only 照会できる".
 //!
 //! Mirrors `src/statuses/status_repository/tests.rs`'s established
-//! convention: `crate::test_harness::spawn_test_app` for an isolated,
+//! convention: `crate::test_harness::db_fixture::spawn_test_db` for an isolated,
 //! already-migrated schema and a deterministic `RuntimeContext`. Unlike
 //! `statuses.actor_id`, `status_tags.status_id`/`tag_id` carry *real*
 //! physical FKs (`ON DELETE CASCADE`, `migrations/0007_statuses.sql`), so
@@ -21,14 +21,14 @@ use crate::domain::Id;
 use crate::domain::Visibility;
 use crate::statuses::model::{Status, Tag};
 use crate::statuses::status_repository::insert_status;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
-fn sample_status(app: &TestApp) -> Status {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+fn sample_status(db: &TestDb) -> Status {
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     Status {
         id,
-        actor_id: app.runtime.ids.next_id(),
+        actor_id: db.runtime.ids.next_id(),
         uri: format!("https://example.test/statuses/{}", id.as_i64()),
         url: None,
         content: "hello #rustlang".to_string(),
@@ -49,19 +49,19 @@ fn sample_status(app: &TestApp) -> Status {
     }
 }
 
-async fn insert_test_status(app: &TestApp) -> Status {
-    let status = sample_status(app);
-    insert_status(&app.pool, &status)
+async fn insert_test_status(db: &TestDb) -> Status {
+    let status = sample_status(db);
+    insert_status(&db.pool, &status)
         .await
         .expect("insert_status must succeed");
     status
 }
 
-fn sample_tag(app: &TestApp, name: &str) -> Tag {
+fn sample_tag(db: &TestDb, name: &str) -> Tag {
     Tag {
-        id: app.runtime.ids.next_id(),
+        id: db.runtime.ids.next_id(),
         name: name.to_string(),
-        created_at: app.runtime.clock.now(),
+        created_at: db.runtime.clock.now(),
     }
 }
 
@@ -70,21 +70,21 @@ fn sample_tag(app: &TestApp, name: &str) -> Tag {
 /// A fresh tag name is inserted and immediately findable.
 #[tokio::test]
 async fn upsert_tag_creates_a_new_row_findable_by_name() {
-    let app = spawn_test_app().await;
-    let tag = sample_tag(&app, "rustlang");
+    let db = spawn_test_db().await;
+    let tag = sample_tag(&db, "rustlang");
 
-    let created = upsert_tag(&app.pool, &tag)
+    let created = upsert_tag(&db.pool, &tag)
         .await
         .expect("upsert_tag must succeed");
     assert_eq!(created, tag);
 
-    let found = find_tag_by_name(&app.pool, "rustlang")
+    let found = find_tag_by_name(&db.pool, "rustlang")
         .await
         .expect("find_tag_by_name must succeed")
         .expect("the just-created tag must be found");
     assert_eq!(found, tag);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 3.6 / `tags_name_unique`: upserting the same name twice never
@@ -92,20 +92,20 @@ async fn upsert_tag_creates_a_new_row_findable_by_name() {
 /// discarding the second call's own id/created_at.
 #[tokio::test]
 async fn upsert_tag_is_idempotent_on_name_and_keeps_the_original_id() {
-    let app = spawn_test_app().await;
-    let first = sample_tag(&app, "mastodon");
-    let created_first = upsert_tag(&app.pool, &first)
+    let db = spawn_test_db().await;
+    let first = sample_tag(&db, "mastodon");
+    let created_first = upsert_tag(&db.pool, &first)
         .await
         .expect("first upsert_tag must succeed");
     assert_eq!(created_first.id, first.id);
 
     // A second, later-minted Tag value for the exact same name.
-    let second = sample_tag(&app, "mastodon");
+    let second = sample_tag(&db, "mastodon");
     assert_ne!(
         second.id, first.id,
         "sanity: the two Tag values must carry different minted ids"
     );
-    let created_second = upsert_tag(&app.pool, &second)
+    let created_second = upsert_tag(&db.pool, &second)
         .await
         .expect("second upsert_tag must succeed");
 
@@ -115,19 +115,19 @@ async fn upsert_tag_is_idempotent_on_name_and_keeps_the_original_id() {
     );
     assert_eq!(created_second.created_at, first.created_at);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// find_tag_by_name returns None (not an error) for a name nothing was ever
 /// created under.
 #[tokio::test]
 async fn find_tag_by_name_returns_none_for_an_unknown_name() {
-    let app = spawn_test_app().await;
-    let found = find_tag_by_name(&app.pool, "neverexisted")
+    let db = spawn_test_db().await;
+    let found = find_tag_by_name(&db.pool, "neverexisted")
         .await
         .expect("find_tag_by_name must succeed even when nothing matches");
     assert!(found.is_none());
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- associate_tag / tags_for_status / status_ids_for_tag -----------------
@@ -136,118 +136,118 @@ async fn find_tag_by_name_returns_none_for_an_unknown_name() {
 /// is persisted and queryable read-only from both directions.
 #[tokio::test]
 async fn associate_tag_is_queryable_from_both_status_and_tag_directions() {
-    let app = spawn_test_app().await;
-    let status = insert_test_status(&app).await;
-    let tag = sample_tag(&app, "rustlang");
-    upsert_tag(&app.pool, &tag)
+    let db = spawn_test_db().await;
+    let status = insert_test_status(&db).await;
+    let tag = sample_tag(&db, "rustlang");
+    upsert_tag(&db.pool, &tag)
         .await
         .expect("upsert_tag must succeed");
 
-    associate_tag(&app.pool, status.id, tag.id)
+    associate_tag(&db.pool, status.id, tag.id)
         .await
         .expect("associate_tag must succeed");
 
-    let tags = tags_for_status(&app.pool, status.id)
+    let tags = tags_for_status(&db.pool, status.id)
         .await
         .expect("tags_for_status must succeed");
     assert_eq!(tags, vec![tag.clone()]);
 
-    let status_ids = status_ids_for_tag(&app.pool, tag.id)
+    let status_ids = status_ids_for_tag(&db.pool, tag.id)
         .await
         .expect("status_ids_for_tag must succeed");
     assert_eq!(status_ids, vec![status.id]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Associating the same (status, tag) pair twice is a silent no-op — the
 /// `status_tags` PK's dedup guarantee, not a duplicate association.
 #[tokio::test]
 async fn associate_tag_is_idempotent_for_the_same_pair() {
-    let app = spawn_test_app().await;
-    let status = insert_test_status(&app).await;
-    let tag = sample_tag(&app, "idempotent");
-    upsert_tag(&app.pool, &tag)
+    let db = spawn_test_db().await;
+    let status = insert_test_status(&db).await;
+    let tag = sample_tag(&db, "idempotent");
+    upsert_tag(&db.pool, &tag)
         .await
         .expect("upsert_tag must succeed");
 
-    associate_tag(&app.pool, status.id, tag.id)
+    associate_tag(&db.pool, status.id, tag.id)
         .await
         .expect("first associate_tag must succeed");
-    associate_tag(&app.pool, status.id, tag.id)
+    associate_tag(&db.pool, status.id, tag.id)
         .await
         .expect("second associate_tag (duplicate) must succeed as a no-op");
 
-    let tags = tags_for_status(&app.pool, status.id).await.unwrap();
+    let tags = tags_for_status(&db.pool, status.id).await.unwrap();
     assert_eq!(tags.len(), 1, "no duplicate association must be created");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// tags_for_status only returns tags belonging to the queried status, not
 /// another status' tags.
 #[tokio::test]
 async fn tags_for_status_returns_only_that_statuss_tags() {
-    let app = spawn_test_app().await;
-    let status_a = insert_test_status(&app).await;
-    let status_b = insert_test_status(&app).await;
-    let tag_a = sample_tag(&app, "taga");
-    let tag_b = sample_tag(&app, "tagb");
-    upsert_tag(&app.pool, &tag_a).await.unwrap();
-    upsert_tag(&app.pool, &tag_b).await.unwrap();
-    associate_tag(&app.pool, status_a.id, tag_a.id)
+    let db = spawn_test_db().await;
+    let status_a = insert_test_status(&db).await;
+    let status_b = insert_test_status(&db).await;
+    let tag_a = sample_tag(&db, "taga");
+    let tag_b = sample_tag(&db, "tagb");
+    upsert_tag(&db.pool, &tag_a).await.unwrap();
+    upsert_tag(&db.pool, &tag_b).await.unwrap();
+    associate_tag(&db.pool, status_a.id, tag_a.id)
         .await
         .unwrap();
-    associate_tag(&app.pool, status_b.id, tag_b.id)
+    associate_tag(&db.pool, status_b.id, tag_b.id)
         .await
         .unwrap();
 
-    let tags_a = tags_for_status(&app.pool, status_a.id).await.unwrap();
+    let tags_a = tags_for_status(&db.pool, status_a.id).await.unwrap();
     assert_eq!(tags_a, vec![tag_a]);
 
-    let tags_b = tags_for_status(&app.pool, status_b.id).await.unwrap();
+    let tags_b = tags_for_status(&db.pool, status_b.id).await.unwrap();
     assert_eq!(tags_b, vec![tag_b]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// status_ids_for_tag only returns statuses associated with the queried tag,
 /// newest first.
 #[tokio::test]
 async fn status_ids_for_tag_returns_only_that_tags_statuses_newest_first() {
-    let app = spawn_test_app().await;
-    let tag = sample_tag(&app, "shared");
-    upsert_tag(&app.pool, &tag).await.unwrap();
-    let other_tag = sample_tag(&app, "unrelated");
-    upsert_tag(&app.pool, &other_tag).await.unwrap();
+    let db = spawn_test_db().await;
+    let tag = sample_tag(&db, "shared");
+    upsert_tag(&db.pool, &tag).await.unwrap();
+    let other_tag = sample_tag(&db, "unrelated");
+    upsert_tag(&db.pool, &other_tag).await.unwrap();
 
-    let first = insert_test_status(&app).await;
-    let second = insert_test_status(&app).await;
-    let unrelated = insert_test_status(&app).await;
-    associate_tag(&app.pool, first.id, tag.id).await.unwrap();
-    associate_tag(&app.pool, second.id, tag.id).await.unwrap();
-    associate_tag(&app.pool, unrelated.id, other_tag.id)
+    let first = insert_test_status(&db).await;
+    let second = insert_test_status(&db).await;
+    let unrelated = insert_test_status(&db).await;
+    associate_tag(&db.pool, first.id, tag.id).await.unwrap();
+    associate_tag(&db.pool, second.id, tag.id).await.unwrap();
+    associate_tag(&db.pool, unrelated.id, other_tag.id)
         .await
         .unwrap();
 
-    let ids = status_ids_for_tag(&app.pool, tag.id).await.unwrap();
+    let ids = status_ids_for_tag(&db.pool, tag.id).await.unwrap();
     assert_eq!(ids, vec![second.id, first.id], "newest (largest id) first");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// status_ids_for_tag returns an empty Vec (not an error) for a tag with no
 /// associated statuses.
 #[tokio::test]
 async fn status_ids_for_tag_returns_empty_for_an_unused_tag() {
-    let app = spawn_test_app().await;
-    let tag = sample_tag(&app, "unused");
-    upsert_tag(&app.pool, &tag).await.unwrap();
+    let db = spawn_test_db().await;
+    let tag = sample_tag(&db, "unused");
+    upsert_tag(&db.pool, &tag).await.unwrap();
 
-    let ids = status_ids_for_tag(&app.pool, tag.id).await.unwrap();
+    let ids = status_ids_for_tag(&db.pool, tag.id).await.unwrap();
     assert!(ids.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Deleting a status cascade-removes its `status_tags` associations via the
@@ -257,22 +257,22 @@ async fn status_ids_for_tag_returns_empty_for_an_unused_tag() {
 /// on for every other same-spec relation.
 #[tokio::test]
 async fn deleting_a_status_cascades_its_tag_associations() {
-    let app = spawn_test_app().await;
-    let status = insert_test_status(&app).await;
-    let tag = sample_tag(&app, "cascaded");
-    upsert_tag(&app.pool, &tag).await.unwrap();
-    associate_tag(&app.pool, status.id, tag.id).await.unwrap();
+    let db = spawn_test_db().await;
+    let status = insert_test_status(&db).await;
+    let tag = sample_tag(&db, "cascaded");
+    upsert_tag(&db.pool, &tag).await.unwrap();
+    associate_tag(&db.pool, status.id, tag.id).await.unwrap();
 
-    crate::statuses::status_repository::delete_status(&app.pool, status.id)
+    crate::statuses::status_repository::delete_status(&db.pool, status.id)
         .await
         .expect("delete_status must succeed");
 
-    let tags = tags_for_status(&app.pool, status.id).await.unwrap();
+    let tags = tags_for_status(&db.pool, status.id).await.unwrap();
     assert!(tags.is_empty());
-    let status_ids = status_ids_for_tag(&app.pool, tag.id).await.unwrap();
+    let status_ids = status_ids_for_tag(&db.pool, tag.id).await.unwrap();
     assert!(status_ids.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- tags_for_statuses -----------------------------------------------------
@@ -284,34 +284,32 @@ async fn deleting_a_status_cascades_its_tag_associations() {
 /// status carrying no tags at all.
 #[tokio::test]
 async fn tags_for_statuses_matches_calling_the_singular_version_per_status() {
-    let app = spawn_test_app().await;
-    let with_many = insert_test_status(&app).await;
-    let with_one = insert_test_status(&app).await;
-    let without_tags = insert_test_status(&app).await;
+    let db = spawn_test_db().await;
+    let with_many = insert_test_status(&db).await;
+    let with_one = insert_test_status(&db).await;
+    let without_tags = insert_test_status(&db).await;
 
     // Minted in ascending id order, but *named* in descending alphabetical
     // order relative to that id order, so neither "no `ORDER BY` at all"
     // (which would surface the association order below) nor an
     // `ORDER BY tags.name` could coincidentally agree with the singular
     // version's `ORDER BY tags.id`.
-    let low = sample_tag(&app, "zulu");
-    let mid = sample_tag(&app, "mike");
-    let high = sample_tag(&app, "alpha");
+    let low = sample_tag(&db, "zulu");
+    let mid = sample_tag(&db, "mike");
+    let high = sample_tag(&db, "alpha");
     assert!(
         low.id < mid.id && mid.id < high.id,
         "sanity: the deterministic IdGenerator must mint ascending ids"
     );
     for tag in [&low, &mid, &high] {
-        upsert_tag(&app.pool, tag).await.unwrap();
+        upsert_tag(&db.pool, tag).await.unwrap();
     }
 
     // Deliberately associated in *descending* tag-id order.
     for tag in [&high, &mid, &low] {
-        associate_tag(&app.pool, with_many.id, tag.id)
-            .await
-            .unwrap();
+        associate_tag(&db.pool, with_many.id, tag.id).await.unwrap();
     }
-    associate_tag(&app.pool, with_one.id, mid.id).await.unwrap();
+    associate_tag(&db.pool, with_one.id, mid.id).await.unwrap();
 
     // A status id no tag was ever associated with *and* that no `statuses`
     // row exists for: the plural version must handle it exactly like the
@@ -321,7 +319,7 @@ async fn tags_for_statuses_matches_calling_the_singular_version_per_status() {
 
     let mut per_call: HashMap<Id, Vec<Tag>> = HashMap::new();
     for &status_id in &ids {
-        let singular = tags_for_status(&app.pool, status_id)
+        let singular = tags_for_status(&db.pool, status_id)
             .await
             .expect("tags_for_status must succeed");
         if !singular.is_empty() {
@@ -329,7 +327,7 @@ async fn tags_for_statuses_matches_calling_the_singular_version_per_status() {
         }
     }
 
-    let batched = tags_for_statuses(&app.pool, &ids)
+    let batched = tags_for_statuses(&db.pool, &ids)
         .await
         .expect("tags_for_statuses must succeed");
     assert_eq!(
@@ -348,7 +346,7 @@ async fn tags_for_statuses_matches_calling_the_singular_version_per_status() {
     assert_eq!(batched.get(&without_tags.id), None);
     assert_eq!(batched.get(&unknown), None);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// An empty `status_ids` returns an empty map *without issuing a query*.
@@ -358,15 +356,15 @@ async fn tags_for_statuses_matches_calling_the_singular_version_per_status() {
 /// the database.
 #[tokio::test]
 async fn tags_for_statuses_returns_empty_for_an_empty_slice_without_querying() {
-    let app = spawn_test_app().await;
-    app.pool.close().await;
+    let db = spawn_test_db().await;
+    db.pool.close().await;
 
-    let batched = tags_for_statuses(&app.pool, &[])
+    let batched = tags_for_statuses(&db.pool, &[])
         .await
         .expect("an empty slice must succeed even against a closed pool");
     assert!(batched.is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- executor genericity ---------------------------------------------------
@@ -378,11 +376,11 @@ async fn tags_for_statuses_returns_empty_for_an_empty_slice_without_querying() {
 /// strand tag rows.
 #[tokio::test]
 async fn tag_writes_accept_a_transaction_and_roll_back_together() {
-    let app = spawn_test_app().await;
-    let status = insert_test_status(&app).await;
-    let tag = sample_tag(&app, "rollbacktag");
+    let db = spawn_test_db().await;
+    let status = insert_test_status(&db).await;
+    let tag = sample_tag(&db, "rollbacktag");
 
-    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    let mut tx = db.pool.begin().await.expect("begin must succeed");
     let created = upsert_tag(&mut *tx, &tag)
         .await
         .expect("upsert_tag must succeed against a transaction");
@@ -391,7 +389,7 @@ async fn tag_writes_accept_a_transaction_and_roll_back_together() {
         .expect("associate_tag must succeed against a transaction");
     tx.rollback().await.expect("rollback must succeed");
 
-    let found = find_tag_by_name(&app.pool, "rollbacktag")
+    let found = find_tag_by_name(&db.pool, "rollbacktag")
         .await
         .expect("find_tag_by_name must succeed");
     assert!(
@@ -399,7 +397,7 @@ async fn tag_writes_accept_a_transaction_and_roll_back_together() {
         "a rolled-back upsert_tag must leave no row"
     );
 
-    let associated = tags_for_status(&app.pool, status.id)
+    let associated = tags_for_status(&db.pool, status.id)
         .await
         .expect("tags_for_status must succeed");
     assert!(
@@ -407,7 +405,7 @@ async fn tag_writes_accept_a_transaction_and_roll_back_together() {
         "a rolled-back associate_tag must leave no status_tags row"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The commit half of
@@ -416,11 +414,11 @@ async fn tag_writes_accept_a_transaction_and_roll_back_together() {
 /// pool-driven path persists.
 #[tokio::test]
 async fn tag_writes_committed_through_a_transaction_persist_normally() {
-    let app = spawn_test_app().await;
-    let status = insert_test_status(&app).await;
-    let tag = sample_tag(&app, "committag");
+    let db = spawn_test_db().await;
+    let status = insert_test_status(&db).await;
+    let tag = sample_tag(&db, "committag");
 
-    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    let mut tx = db.pool.begin().await.expect("begin must succeed");
     let created = upsert_tag(&mut *tx, &tag)
         .await
         .expect("upsert_tag must succeed against a transaction");
@@ -430,10 +428,10 @@ async fn tag_writes_committed_through_a_transaction_persist_normally() {
     tx.commit().await.expect("commit must succeed");
 
     assert_eq!(created, tag);
-    let associated = tags_for_status(&app.pool, status.id)
+    let associated = tags_for_status(&db.pool, status.id)
         .await
         .expect("tags_for_status must succeed");
     assert_eq!(associated, vec![tag]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

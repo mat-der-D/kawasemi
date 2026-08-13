@@ -8,7 +8,7 @@
 //! implementing the same trait — what happens to a `poll_id` whose `polls`
 //! row is not there. A rendered timeline never contains one.
 //!
-//! DB-backed against `crate::test_harness::spawn_test_app`, mirroring
+//! DB-backed against `crate::test_harness::db_fixture::spawn_test_db`, mirroring
 //! `statuses/poll_repository/tests.rs`'s fixture convention: a poll needs a
 //! real `statuses` row to reference (`polls.status_id` is a genuine FK), but
 //! `statuses.actor_id` is not FK-constrained, so a bare id stands in for the
@@ -19,10 +19,10 @@ use crate::domain::Visibility;
 use crate::statuses::model::{Poll, PollOption};
 use crate::statuses::poll_repository::PollTally;
 use crate::statuses::status_repository::insert_status;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
-fn sample_status(app: &TestApp, actor_id: Id) -> Status {
-    let id = app.runtime.ids.next_id();
+fn sample_status(db: &TestDb, actor_id: Id) -> Status {
+    let id = db.runtime.ids.next_id();
     Status {
         id,
         actor_id,
@@ -41,21 +41,21 @@ fn sample_status(app: &TestApp, actor_id: Id) -> Status {
         favourites_count: 0,
         replies_count: 0,
         local: true,
-        created_at: app.runtime.clock.now(),
+        created_at: db.runtime.clock.now(),
         edited_at: None,
     }
 }
 
 /// Inserts a `polls` row carrying `titles` as options `idx 0..N`, attached
 /// to a fresh `statuses` row.
-async fn insert_test_poll(app: &TestApp, titles: &[&str]) -> Poll {
-    let status = sample_status(app, app.runtime.ids.next_id());
-    insert_status(&app.pool, &status)
+async fn insert_test_poll(db: &TestDb, titles: &[&str]) -> Poll {
+    let status = sample_status(db, db.runtime.ids.next_id());
+    insert_status(&db.pool, &status)
         .await
         .expect("insert_status must succeed for a fresh id/uri");
 
     let poll = Poll {
-        id: app.runtime.ids.next_id(),
+        id: db.runtime.ids.next_id(),
         status_id: status.id,
         expires_at: None,
         multiple: false,
@@ -70,7 +70,7 @@ async fn insert_test_poll(app: &TestApp, titles: &[&str]) -> Poll {
             votes_count: 0,
         })
         .collect();
-    poll_repository::insert_poll(&app.pool, &poll, &options)
+    poll_repository::insert_poll(&db.pool, &poll, &options)
         .await
         .expect("insert_poll must succeed for a fresh poll");
     poll
@@ -100,13 +100,13 @@ fn option_titles(tally: &PollTally) -> Vec<&str> {
 /// get wrong.
 #[tokio::test]
 async fn resolve_many_drops_a_dangling_poll_id_instead_of_failing() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = TolerantPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let first = insert_test_poll(&app, &["Yes", "No"]).await;
-    let second = insert_test_poll(&app, &["Pizza", "Sushi"]).await;
+    let first = insert_test_poll(&db, &["Yes", "No"]).await;
+    let second = insert_test_poll(&db, &["Pizza", "Sushi"]).await;
     let dangling = Id::from_i64(i64::MAX - 41);
 
     let resolved = polls
@@ -122,7 +122,7 @@ async fn resolve_many_drops_a_dangling_poll_id_instead_of_failing() {
     assert_eq!(option_titles(&resolved[0].2), vec!["Yes", "No"]);
     assert_eq!(option_titles(&resolved[1].2), vec!["Pizza", "Sushi"]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The returned `Vec` follows `poll_ids`, not whatever order the rows come
@@ -131,14 +131,14 @@ async fn resolve_many_drops_a_dangling_poll_id_instead_of_failing() {
 /// iteration order through could not pass by luck.
 #[tokio::test]
 async fn resolve_many_returns_polls_in_the_requested_order() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = TolerantPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let first = insert_test_poll(&app, &["a"]).await;
-    let second = insert_test_poll(&app, &["b"]).await;
-    let third = insert_test_poll(&app, &["c"]).await;
+    let first = insert_test_poll(&db, &["a"]).await;
+    let second = insert_test_poll(&db, &["b"]).await;
+    let third = insert_test_poll(&db, &["c"]).await;
 
     let requested = [third.id, first.id, second.id];
     let resolved = polls
@@ -151,7 +151,7 @@ async fn resolve_many_returns_polls_in_the_requested_order() {
     assert_eq!(option_titles(&resolved[1].2), vec!["a"]);
     assert_eq!(option_titles(&resolved[2].2), vec!["b"]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `viewer` reaches the tally: their own selections come back in
@@ -159,14 +159,14 @@ async fn resolve_many_returns_polls_in_the_requested_order() {
 /// seeing the same public `voters_count`.
 #[tokio::test]
 async fn resolve_many_reports_the_viewers_own_votes() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = TolerantPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let poll = insert_test_poll(&app, &["Yes", "No"]).await;
-    let viewer = app.runtime.ids.next_id();
-    poll_repository::record_vote(&app.pool, poll.id, viewer, &[1], app.runtime.clock.now())
+    let poll = insert_test_poll(&db, &["Yes", "No"]).await;
+    let viewer = db.runtime.ids.next_id();
+    poll_repository::record_vote(&db.pool, poll.id, viewer, &[1], db.runtime.clock.now())
         .await
         .expect("record_vote must succeed");
 
@@ -184,5 +184,5 @@ async fn resolve_many_reports_the_viewers_own_votes() {
     assert!(anonymous[0].2.own_votes.is_empty());
     assert_eq!(anonymous[0].2.voters_count, 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

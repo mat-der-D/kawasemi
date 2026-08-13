@@ -16,7 +16,11 @@
 //! batched assembly can be shown not to have moved anything the caller can
 //! see.
 //!
-//! DB-backed against `crate::test_harness::spawn_test_app`, mirroring
+//! DB-backed, on both fixture tiers: the `RequiredPolls` tests are SQL plus
+//! domain types and run on `crate::test_harness::db_fixture::spawn_test_db`,
+//! while the rendering tests reach the provider's live handles through
+//! `AppState` and therefore need `crate::test_harness::spawn_test_app`.
+//! Either way the row shapes mirror
 //! `statuses/poll_repository/tests.rs`'s fixture convention: a poll needs a
 //! real `statuses` row to reference (`polls.status_id` is a genuine FK), but
 //! `statuses.actor_id` is not FK-constrained, so a bare id stands in for the
@@ -34,11 +38,12 @@ use crate::media::store::ObjectKey;
 use crate::statuses::model::{Poll, PollOption, Tag};
 use crate::statuses::poll_repository::PollTally;
 use crate::statuses::tag_repository::{associate_tag, upsert_tag};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 use crate::test_harness::query_log::{QueryKind, record_queries};
 use crate::test_harness::{TestApp, spawn_test_app};
 
-fn sample_status(app: &TestApp, actor_id: Id) -> Status {
-    let id = app.runtime.ids.next_id();
+fn sample_status(runtime: &RuntimeContext, actor_id: Id) -> Status {
+    let id = runtime.ids.next_id();
     Status {
         id,
         actor_id,
@@ -57,21 +62,21 @@ fn sample_status(app: &TestApp, actor_id: Id) -> Status {
         favourites_count: 0,
         replies_count: 0,
         local: true,
-        created_at: app.runtime.clock.now(),
+        created_at: runtime.clock.now(),
         edited_at: None,
     }
 }
 
 /// Inserts a `polls` row carrying `titles` as options `idx 0..N`, attached
 /// to a fresh `statuses` row.
-async fn insert_test_poll(app: &TestApp, titles: &[&str]) -> Poll {
-    let status = sample_status(app, app.runtime.ids.next_id());
-    status_repository::insert_status(&app.pool, &status)
+async fn insert_test_poll(db: &TestDb, titles: &[&str]) -> Poll {
+    let status = sample_status(&db.runtime, db.runtime.ids.next_id());
+    status_repository::insert_status(&db.pool, &status)
         .await
         .expect("insert_status must succeed for a fresh id/uri");
 
     let poll = Poll {
-        id: app.runtime.ids.next_id(),
+        id: db.runtime.ids.next_id(),
         status_id: status.id,
         expires_at: None,
         multiple: false,
@@ -86,7 +91,7 @@ async fn insert_test_poll(app: &TestApp, titles: &[&str]) -> Poll {
             votes_count: 0,
         })
         .collect();
-    poll_repository::insert_poll(&app.pool, &poll, &options)
+    poll_repository::insert_poll(&db.pool, &poll, &options)
         .await
         .expect("insert_poll must succeed for a fresh poll");
     poll
@@ -116,12 +121,12 @@ fn option_titles(tally: &PollTally) -> Vec<&str> {
 /// whether or not a resolvable poll precedes it.
 #[tokio::test]
 async fn resolve_many_raises_this_modules_not_found_for_a_dangling_poll_id() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = RequiredPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let existing = insert_test_poll(&app, &["Yes", "No"]).await;
+    let existing = insert_test_poll(&db, &["Yes", "No"]).await;
     let dangling = Id::from_i64(i64::MAX - 41);
 
     for requested in [[existing.id, dangling], [dangling, existing.id]] {
@@ -133,7 +138,7 @@ async fn resolve_many_raises_this_modules_not_found_for_a_dangling_poll_id() {
         assert_eq!(err.public_message, "status not found");
     }
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The strict resolver is not trivially failing: every id that does resolve
@@ -143,14 +148,14 @@ async fn resolve_many_raises_this_modules_not_found_for_a_dangling_poll_id() {
 /// not pass by luck.
 #[tokio::test]
 async fn resolve_many_returns_every_existing_poll_in_the_requested_order() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = RequiredPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let first = insert_test_poll(&app, &["a"]).await;
-    let second = insert_test_poll(&app, &["b"]).await;
-    let third = insert_test_poll(&app, &["c"]).await;
+    let first = insert_test_poll(&db, &["a"]).await;
+    let second = insert_test_poll(&db, &["b"]).await;
+    let third = insert_test_poll(&db, &["c"]).await;
 
     let requested = [third.id, first.id, second.id];
     let resolved = polls
@@ -163,7 +168,7 @@ async fn resolve_many_returns_every_existing_poll_in_the_requested_order() {
     assert_eq!(option_titles(&resolved[1].2), vec!["a"]);
     assert_eq!(option_titles(&resolved[2].2), vec!["b"]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `viewer` reaches the tally: their own selections come back in
@@ -171,14 +176,14 @@ async fn resolve_many_returns_every_existing_poll_in_the_requested_order() {
 /// seeing the same public `voters_count`.
 #[tokio::test]
 async fn resolve_many_reports_the_viewers_own_votes() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let polls = RequiredPolls {
-        pool: app.pool.clone(),
+        pool: db.pool.clone(),
     };
 
-    let poll = insert_test_poll(&app, &["Yes", "No"]).await;
-    let viewer = app.runtime.ids.next_id();
-    poll_repository::record_vote(&app.pool, poll.id, viewer, &[1], app.runtime.clock.now())
+    let poll = insert_test_poll(&db, &["Yes", "No"]).await;
+    let viewer = db.runtime.ids.next_id();
+    poll_repository::record_vote(&db.pool, poll.id, viewer, &[1], db.runtime.clock.now())
         .await
         .expect("record_vote must succeed");
 
@@ -196,7 +201,7 @@ async fn resolve_many_reports_the_viewers_own_votes() {
     assert!(anonymous[0].2.own_votes.is_empty());
     assert_eq!(anonymous[0].2.voters_count, 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- `list_statuses` page characterization ---------------------------------
@@ -381,7 +386,7 @@ async fn list_statuses_keeps_every_rendered_material_and_order() {
         &app,
         &Status {
             content: "first :zulu: and :alpha:".to_string(),
-            ..sample_status(&app, author)
+            ..sample_status(&app.runtime, author)
         },
     )
     .await;
@@ -390,7 +395,7 @@ async fn list_statuses_keeps_every_rendered_material_and_order() {
         &app,
         &Status {
             content: "second by the same author".to_string(),
-            ..sample_status(&app, author)
+            ..sample_status(&app.runtime, author)
         },
     )
     .await;
@@ -401,7 +406,7 @@ async fn list_statuses_keeps_every_rendered_material_and_order() {
         &app,
         &Status {
             content: "boosted publicly".to_string(),
-            ..sample_status(&app, other)
+            ..sample_status(&app.runtime, other)
         },
     )
     .await;
@@ -418,7 +423,7 @@ async fn list_statuses_keeps_every_rendered_material_and_order() {
         &Status {
             content: String::new(),
             reblog_of_id: Some(visible_target),
-            ..sample_status(&app, author)
+            ..sample_status(&app.runtime, author)
         },
     )
     .await;
@@ -431,7 +436,7 @@ async fn list_statuses_keeps_every_rendered_material_and_order() {
         &Status {
             content: "boosted privately".to_string(),
             visibility: Visibility::Private,
-            ..sample_status(&app, other)
+            ..sample_status(&app.runtime, other)
         },
     )
     .await;
@@ -440,7 +445,7 @@ async fn list_statuses_keeps_every_rendered_material_and_order() {
         &Status {
             content: String::new(),
             reblog_of_id: Some(hidden_target),
-            ..sample_status(&app, author)
+            ..sample_status(&app.runtime, author)
         },
     )
     .await;
@@ -452,7 +457,7 @@ async fn list_statuses_keeps_every_rendered_material_and_order() {
         &Status {
             content: "lunch?".to_string(),
             poll_id: Some(poll_id),
-            ..sample_status(&app, author)
+            ..sample_status(&app.runtime, author)
         },
     )
     .await;
@@ -655,7 +660,7 @@ async fn seed_rich_status(app: &TestApp, author: Id, viewer: Id) -> Id {
     let status = Status {
         content: "lunch :zulu: or :alpha:?".to_string(),
         poll_id: Some(poll_id),
-        ..sample_status(app, author)
+        ..sample_status(&app.runtime, author)
     };
     let status_id = insert(app, &status).await;
 
@@ -829,7 +834,7 @@ async fn the_only_media_and_pinned_filters_still_cost_one_query_per_candidate() 
 
     const CANDIDATES: usize = 5;
     for _ in 0..CANDIDATES {
-        insert(&app, &sample_status(&app, author)).await;
+        insert(&app, &sample_status(&app.runtime, author)).await;
     }
 
     let provider = build_provider(&app);

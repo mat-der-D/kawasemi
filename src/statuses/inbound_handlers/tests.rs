@@ -5,7 +5,7 @@
 //! て反映される（受信結合テストがグリーン）".
 //!
 //! Mirrors `poll_service/tests.rs`'s established convention
-//! (`crate::test_harness::spawn_test_app` for an isolated, migrated schema
+//! (`crate::test_harness::db_fixture::spawn_test_db` for an isolated, migrated schema
 //! plus a deterministic `RuntimeContext`) adapted for this module's own
 //! dependency: an in-memory [`FakeRemoteActors`] standing in for
 //! `RemoteAccountFetcher` (no real HTTP fetch in these tests — see
@@ -27,19 +27,19 @@ use crate::error::ErrorKind;
 use crate::federation::VerifiedSigner;
 use crate::statuses::model::{Poll, PollOption};
 use crate::statuses::notification_sink::{NotificationEvent, NotificationEventSink};
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 /// Test-instance-wide "own domain" for mention-resolution tests (task
 /// 10.2), matching `CreateNoteHandler`'s own `domain` parameter — arbitrary
-/// but self-consistent, unrelated to `TestApp`'s own
+/// but self-consistent, unrelated to `TestDb`'s own
 /// `config.server.domain` (nothing in these tests routes mention resolution
-/// through `TestApp`'s real config).
+/// through `TestDb`'s real config).
 const TEST_DOMAIN: &str = "kawasemi.example";
 
 // --- Test doubles -----------------------------------------------------------
 
 /// An in-memory [`RemoteActorResolver`]: hands out a stable [`Id`] per
-/// `actor_uri`, minting a fresh one (via the app's own deterministic
+/// `actor_uri`, minting a fresh one (via the db's own deterministic
 /// `IdGenerator`) on first sight and remembering it thereafter — no real
 /// network fetch, mirroring `poll_service/tests.rs::MockActorLookup`'s
 /// identical "narrow in-memory fake over a heavier real port" precedent.
@@ -180,14 +180,14 @@ fn activity_from(value: Value) -> ParsedActivity {
 /// `poll_service/tests.rs::insert_test_status`'s identical helper, with an
 /// added `local`/`poll_id` parameter this module's own tests need.
 async fn insert_test_status(
-    app: &TestApp,
+    db: &TestDb,
     actor_id: Id,
     visibility: Visibility,
     local: bool,
     poll_id: Option<Id>,
 ) -> Status {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let status = Status {
         id,
         actor_id,
@@ -209,13 +209,13 @@ async fn insert_test_status(
         created_at: now,
         edited_at: None,
     };
-    status_repository::insert_status(&app.pool, &status)
+    status_repository::insert_status(&db.pool, &status)
         .await
         .expect("insert_status must succeed for a fresh id/uri");
     status
 }
 
-async fn insert_test_poll(app: &TestApp, status_id: Id, poll_id: Id, titles: &[&str]) -> Poll {
+async fn insert_test_poll(db: &TestDb, status_id: Id, poll_id: Id, titles: &[&str]) -> Poll {
     let poll = Poll {
         id: poll_id,
         status_id,
@@ -232,17 +232,17 @@ async fn insert_test_poll(app: &TestApp, status_id: Id, poll_id: Id, titles: &[&
             votes_count: 0,
         })
         .collect();
-    poll_repository::insert_poll(&app.pool, &poll, &options)
+    poll_repository::insert_poll(&db.pool, &poll, &options)
         .await
         .expect("insert_poll must succeed for a fresh poll");
     poll
 }
 
-fn deps(app: &TestApp) -> StatusInboundDeps<FakeRemoteActors, FakeMentionLookup> {
+fn deps(db: &TestDb) -> StatusInboundDeps<FakeRemoteActors, FakeMentionLookup> {
     StatusInboundDeps {
-        pool: app.pool.clone(),
-        runtime: app.runtime.clone(),
-        remote_actors: Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        pool: db.pool.clone(),
+        runtime: db.runtime.clone(),
+        remote_actors: Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         domain: TEST_DOMAIN.to_string(),
         mentions: FakeMentionLookup::default(),
         notifications: NotificationSinkRegistry::new(),
@@ -255,14 +255,14 @@ fn deps(app: &TestApp) -> StatusInboundDeps<FakeRemoteActors, FakeMentionLookup>
 /// `Status`, reflecting reply/visibility.
 #[tokio::test]
 async fn create_note_ingests_a_remote_status_with_reply_and_visibility() {
-    let app = spawn_test_app().await;
-    let local_author = app.runtime.ids.next_id();
-    let parent = insert_test_status(&app, local_author, Visibility::Public, true, None).await;
+    let db = spawn_test_db().await;
+    let local_author = db.runtime.ids.next_id();
+    let parent = insert_test_status(&db, local_author, Visibility::Public, true, None).await;
 
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         TEST_DOMAIN,
         FakeMentionLookup::default(),
         NotificationSinkRegistry::new(),
@@ -289,7 +289,7 @@ async fn create_note_ingests_a_remote_status_with_reply_and_visibility() {
         .expect("a well-formed Create(Note) must be handled");
     assert_eq!(outcome, HandleOutcome::Handled);
 
-    let ingested = status_repository::find_by_uri(&app.pool, "https://remote.example/notes/1")
+    let ingested = status_repository::find_by_uri(&db.pool, "https://remote.example/notes/1")
         .await
         .expect("query must succeed")
         .expect("the remote Note must be ingested as a Status");
@@ -299,7 +299,7 @@ async fn create_note_ingests_a_remote_status_with_reply_and_visibility() {
     assert_eq!(ingested.in_reply_to_id, Some(parent.id));
     assert_eq!(ingested.in_reply_to_account_id, Some(parent.actor_id));
 
-    let refreshed_parent = status_repository::find_by_id(&app.pool, parent.id)
+    let refreshed_parent = status_repository::find_by_id(&db.pool, parent.id)
         .await
         .expect("query must succeed")
         .expect("parent must still exist");
@@ -308,7 +308,7 @@ async fn create_note_ingests_a_remote_status_with_reply_and_visibility() {
         "ingesting a reply must increment the parent's replies_count"
     );
 
-    let tags = tag_repository::tags_for_status(&app.pool, ingested.id)
+    let tags = tag_repository::tags_for_status(&db.pool, ingested.id)
         .await
         .expect("tag lookup must succeed");
     assert!(
@@ -316,18 +316,18 @@ async fn create_note_ingests_a_remote_status_with_reply_and_visibility() {
         "hashtag extraction must reuse status_service::extract_content_tokens"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 15.2 (fan-out ownership): a `Create` wrapping a non-`Note`
 /// inner object is not owned by this handler.
 #[tokio::test]
 async fn create_ignores_a_non_note_inner_object() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         TEST_DOMAIN,
         FakeMentionLookup::default(),
         NotificationSinkRegistry::new(),
@@ -349,18 +349,18 @@ async fn create_ignores_a_non_note_inner_object() {
         .expect("must not error");
     assert_eq!(outcome, HandleOutcome::Ignored);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A redelivered `Create(Note)` (same object `id`) is a safe idempotent
 /// no-op, not a duplicate row / unique-violation error.
 #[tokio::test]
 async fn create_note_redelivery_is_idempotent() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         TEST_DOMAIN,
         FakeMentionLookup::default(),
         NotificationSinkRegistry::new(),
@@ -390,7 +390,7 @@ async fn create_note_redelivery_is_idempotent() {
         .expect("redelivery must not error");
     assert_eq!(second, HandleOutcome::Handled);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- CreateNoteHandler: vote wire-form branch (Requirement 13.6) ------------
@@ -400,17 +400,17 @@ async fn create_note_redelivery_is_idempotent() {
 /// (`poll_repository::record_vote`) instead of ingesting a Status.
 #[tokio::test]
 async fn create_note_matching_the_vote_wire_shape_records_a_vote_not_a_status() {
-    let app = spawn_test_app().await;
-    let local_author = app.runtime.ids.next_id();
-    let poll_id = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let local_author = db.runtime.ids.next_id();
+    let poll_id = db.runtime.ids.next_id();
     let poll_status =
-        insert_test_status(&app, local_author, Visibility::Public, true, Some(poll_id)).await;
-    insert_test_poll(&app, poll_status.id, poll_id, &["Pizza", "Sushi", "Tacos"]).await;
+        insert_test_status(&db, local_author, Visibility::Public, true, Some(poll_id)).await;
+    insert_test_poll(&db, poll_status.id, poll_id, &["Pizza", "Sushi", "Tacos"]).await;
 
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         remote_actors,
         TEST_DOMAIN,
         FakeMentionLookup::default(),
@@ -437,14 +437,14 @@ async fn create_note_matching_the_vote_wire_shape_records_a_vote_not_a_status() 
     assert_eq!(outcome, HandleOutcome::Handled);
 
     assert!(
-        status_repository::find_by_uri(&app.pool, "https://remote.example/notes/vote-1")
+        status_repository::find_by_uri(&db.pool, "https://remote.example/notes/vote-1")
             .await
             .expect("query must succeed")
             .is_none(),
         "a detected vote must not be ingested as a Status"
     );
 
-    let tally = poll_repository::tally(&app.pool, poll_id, None)
+    let tally = poll_repository::tally(&db.pool, poll_id, None)
         .await
         .expect("tally must succeed");
     let sushi = tally
@@ -454,24 +454,24 @@ async fn create_note_matching_the_vote_wire_shape_records_a_vote_not_a_status() 
         .expect("Sushi option must exist");
     assert_eq!(sushi.votes_count, 1, "the vote must be recorded");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A `Create{Note, name=...}` whose `name` matches no option on the target
 /// poll falls through to ordinary Note ingestion instead of erroring.
 #[tokio::test]
 async fn create_note_with_unmatched_name_falls_through_to_ordinary_ingestion() {
-    let app = spawn_test_app().await;
-    let local_author = app.runtime.ids.next_id();
-    let poll_id = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let local_author = db.runtime.ids.next_id();
+    let poll_id = db.runtime.ids.next_id();
     let poll_status =
-        insert_test_status(&app, local_author, Visibility::Public, true, Some(poll_id)).await;
-    insert_test_poll(&app, poll_status.id, poll_id, &["Pizza", "Sushi"]).await;
+        insert_test_status(&db, local_author, Visibility::Public, true, Some(poll_id)).await;
+    insert_test_poll(&db, poll_status.id, poll_id, &["Pizza", "Sushi"]).await;
 
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         TEST_DOMAIN,
         FakeMentionLookup::default(),
         NotificationSinkRegistry::new(),
@@ -498,14 +498,14 @@ async fn create_note_with_unmatched_name_falls_through_to_ordinary_ingestion() {
     assert_eq!(outcome, HandleOutcome::Handled);
 
     assert!(
-        status_repository::find_by_uri(&app.pool, "https://remote.example/notes/not-a-vote")
+        status_repository::find_by_uri(&db.pool, "https://remote.example/notes/not-a-vote")
             .await
             .expect("query must succeed")
             .is_some(),
         "an unmatched vote-shaped Create must ingest as an ordinary Status"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- CreateNoteHandler: mention notifications (task 10.2, Requirements 9.1,
@@ -518,18 +518,18 @@ async fn create_note_with_unmatched_name_falls_through_to_ordinary_ingestion() {
 /// `find_by_uri`-gated idempotency, applied here to the notification side).
 #[tokio::test]
 async fn create_note_mentioning_a_local_actor_emits_a_mention_notification_event_exactly_once() {
-    let app = spawn_test_app().await;
-    let bob = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let bob = db.runtime.ids.next_id();
 
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let remote_actor_id = remote_actors
         .resolve_remote_actor(REMOTE_ALICE)
         .await
         .expect("resolve must succeed");
     let (notifications, sink) = recording_notifications();
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         Arc::clone(&remote_actors),
         TEST_DOMAIN,
         FakeMentionLookup::with_actors(&[(bob, "bob")]),
@@ -561,7 +561,7 @@ async fn create_note_mentioning_a_local_actor_emits_a_mention_notification_event
         .expect("a redelivered Create must not error");
 
     let ingested =
-        status_repository::find_by_uri(&app.pool, "https://remote.example/notes/mention-1")
+        status_repository::find_by_uri(&db.pool, "https://remote.example/notes/mention-1")
             .await
             .expect("query must succeed")
             .expect("the mentioning Note must be ingested");
@@ -573,22 +573,22 @@ async fn create_note_mentioning_a_local_actor_emits_a_mention_notification_event
     assert_eq!(events[0].origin, AccountRef::Remote(remote_actor_id));
     assert_eq!(events[0].target_status_id, Some(ingested.id));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A `Create(Note)` mentioning two distinct registered local actors emits
 /// one `Mention` `NotificationEvent` per mentioned actor.
 #[tokio::test]
 async fn create_note_mentioning_two_local_actors_emits_two_mention_notification_events() {
-    let app = spawn_test_app().await;
-    let bob = app.runtime.ids.next_id();
-    let carol = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let bob = db.runtime.ids.next_id();
+    let carol = db.runtime.ids.next_id();
 
     let (notifications, sink) = recording_notifications();
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         TEST_DOMAIN,
         FakeMentionLookup::with_actors(&[(bob, "bob"), (carol, "carol")]),
         notifications,
@@ -620,7 +620,7 @@ async fn create_note_mentioning_two_local_actors_emits_two_mention_notification_
     assert!(recipients.contains(&AccountRef::Local(carol)));
     assert!(events.iter().all(|e| e.kind == NotificationType::Mention));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A mention naming a domain other than this instance's own configured
@@ -631,14 +631,14 @@ async fn create_note_mentioning_two_local_actors_emits_two_mention_notification_
 /// wire, actually named someone else's domain.
 #[tokio::test]
 async fn create_note_mentioning_a_different_domain_emits_no_notification_event() {
-    let app = spawn_test_app().await;
-    let bob = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let bob = db.runtime.ids.next_id();
 
     let (notifications, sink) = recording_notifications();
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         TEST_DOMAIN,
         FakeMentionLookup::with_actors(&[(bob, "bob")]),
         notifications,
@@ -667,20 +667,20 @@ async fn create_note_mentioning_a_different_domain_emits_no_notification_event()
         "a mention naming a different domain must not resolve to a local recipient"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A `Create(Note)` mentioning a handle with no locally-registered actor
 /// emits no `NotificationEvent` (there is no `Id` to tag it with).
 #[tokio::test]
 async fn create_note_mentioning_an_unregistered_handle_emits_no_notification_event() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
     let (notifications, sink) = recording_notifications();
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         TEST_DOMAIN,
         FakeMentionLookup::default(),
         notifications,
@@ -706,7 +706,7 @@ async fn create_note_mentioning_an_unregistered_handle_emits_no_notification_eve
 
     assert!(sink.events().is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Defensive self-mention guard (task 10.2 — currently unreachable in
@@ -719,8 +719,8 @@ async fn create_note_mentioning_an_unregistered_handle_emits_no_notification_eve
 /// exercising the skip condition itself, not a realistic wire scenario.
 #[tokio::test]
 async fn create_note_self_mention_via_a_coincident_id_is_not_notified() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let remote_actor_id = remote_actors
         .resolve_remote_actor(REMOTE_ALICE)
         .await
@@ -728,8 +728,8 @@ async fn create_note_self_mention_via_a_coincident_id_is_not_notified() {
 
     let (notifications, sink) = recording_notifications();
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         Arc::clone(&remote_actors),
         TEST_DOMAIN,
         FakeMentionLookup::with_actors(&[(remote_actor_id, "alice")]),
@@ -759,7 +759,7 @@ async fn create_note_self_mention_via_a_coincident_id_is_not_notified() {
         "a mention resolving to the same Id as the acting actor must be skipped"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- CreateNoteHandler: attachment/mention persistence (task 10.3, 14.2) ----
@@ -771,13 +771,13 @@ async fn create_note_self_mention_via_a_coincident_id_is_not_notified() {
 /// `status_remote_attachments`.
 #[tokio::test]
 async fn create_note_persists_tag_mentions_and_attachments() {
-    let app = spawn_test_app().await;
-    let bob = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let bob = db.runtime.ids.next_id();
 
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         TEST_DOMAIN,
         FakeMentionLookup::with_actors(&[(bob, "bob")]),
         NotificationSinkRegistry::new(),
@@ -831,12 +831,12 @@ async fn create_note_persists_tag_mentions_and_attachments() {
     assert_eq!(outcome, HandleOutcome::Handled);
 
     let ingested =
-        status_repository::find_by_uri(&app.pool, "https://remote.example/notes/attach-1")
+        status_repository::find_by_uri(&db.pool, "https://remote.example/notes/attach-1")
             .await
             .expect("query must succeed")
             .expect("the Note must be ingested");
 
-    let mentioned = status_repository::mentioned_actor_ids(&app.pool, ingested.id)
+    let mentioned = status_repository::mentioned_actor_ids(&db.pool, ingested.id)
         .await
         .expect("mention lookup must succeed");
     assert_eq!(
@@ -845,7 +845,7 @@ async fn create_note_persists_tag_mentions_and_attachments() {
         "only the locally-resolved mention must be persisted"
     );
 
-    let attachments = status_repository::remote_attachments_for_status(&app.pool, ingested.id)
+    let attachments = status_repository::remote_attachments_for_status(&db.pool, ingested.id)
         .await
         .expect("attachment lookup must succeed");
     assert_eq!(
@@ -860,7 +860,7 @@ async fn create_note_persists_tag_mentions_and_attachments() {
     assert_eq!(attachments[1].media_type.as_deref(), Some("image/jpeg"));
     assert_eq!(attachments[1].description, None);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A `tag`-array `Mention` naming a handle with no local actor registered
@@ -869,12 +869,12 @@ async fn create_note_persists_tag_mentions_and_attachments() {
 /// tolerance.
 #[tokio::test]
 async fn create_note_tag_mention_for_an_unregistered_handle_persists_no_mention() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
 
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         TEST_DOMAIN,
         FakeMentionLookup::default(),
         NotificationSinkRegistry::new(),
@@ -902,11 +902,11 @@ async fn create_note_tag_mention_for_an_unregistered_handle_persists_no_mention(
         .expect("must be handled");
 
     let ingested =
-        status_repository::find_by_uri(&app.pool, "https://remote.example/notes/attach-2")
+        status_repository::find_by_uri(&db.pool, "https://remote.example/notes/attach-2")
             .await
             .expect("query must succeed")
             .expect("the Note must be ingested");
-    let mentioned = status_repository::mentioned_actor_ids(&app.pool, ingested.id)
+    let mentioned = status_repository::mentioned_actor_ids(&db.pool, ingested.id)
         .await
         .expect("mention lookup must succeed");
     assert!(
@@ -914,7 +914,7 @@ async fn create_note_tag_mention_for_an_unregistered_handle_persists_no_mention(
         "an unregistered handle must not be persisted as a mention"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Redelivery idempotency (mirrors `persist_tags`'s own identical
@@ -922,13 +922,13 @@ async fn create_note_tag_mention_for_an_unregistered_handle_persists_no_mention(
 /// `status_mentions`/`status_remote_attachments` rows.
 #[tokio::test]
 async fn create_note_redelivery_does_not_duplicate_mentions_or_attachments() {
-    let app = spawn_test_app().await;
-    let bob = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let bob = db.runtime.ids.next_id();
 
     let handler = CreateNoteHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         TEST_DOMAIN,
         FakeMentionLookup::with_actors(&[(bob, "bob")]),
         NotificationSinkRegistry::new(),
@@ -959,17 +959,17 @@ async fn create_note_redelivery_does_not_duplicate_mentions_or_attachments() {
         .expect("redelivery must not error");
 
     let ingested =
-        status_repository::find_by_uri(&app.pool, "https://remote.example/notes/attach-3")
+        status_repository::find_by_uri(&db.pool, "https://remote.example/notes/attach-3")
             .await
             .expect("query must succeed")
             .expect("the Note must be ingested");
 
-    let mentioned = status_repository::mentioned_actor_ids(&app.pool, ingested.id)
+    let mentioned = status_repository::mentioned_actor_ids(&db.pool, ingested.id)
         .await
         .expect("mention lookup must succeed");
     assert_eq!(mentioned, vec![bob]);
 
-    let attachments = status_repository::remote_attachments_for_status(&app.pool, ingested.id)
+    let attachments = status_repository::remote_attachments_for_status(&db.pool, ingested.id)
         .await
         .expect("attachment lookup must succeed");
     assert_eq!(
@@ -978,7 +978,7 @@ async fn create_note_redelivery_does_not_duplicate_mentions_or_attachments() {
         "redelivery must not duplicate attachments"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- AnnounceHandler ----------------------------------------------------------
@@ -987,14 +987,14 @@ async fn create_note_redelivery_does_not_duplicate_mentions_or_attachments() {
 /// row and increments `reblogs_count`.
 #[tokio::test]
 async fn announce_of_a_local_post_records_reblog_and_increments_count() {
-    let app = spawn_test_app().await;
-    let local_author = app.runtime.ids.next_id();
-    let target = insert_test_status(&app, local_author, Visibility::Public, true, None).await;
+    let db = spawn_test_db().await;
+    let local_author = db.runtime.ids.next_id();
+    let target = insert_test_status(&db, local_author, Visibility::Public, true, None).await;
 
     let handler = AnnounceHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         NotificationSinkRegistry::new(),
     );
 
@@ -1011,13 +1011,13 @@ async fn announce_of_a_local_post_records_reblog_and_increments_count() {
         .expect("must be handled");
     assert_eq!(outcome, HandleOutcome::Handled);
 
-    let refreshed = status_repository::find_by_id(&app.pool, target.id)
+    let refreshed = status_repository::find_by_id(&db.pool, target.id)
         .await
         .expect("query must succeed")
         .expect("target must still exist");
     assert_eq!(refreshed.reblogs_count, 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Task 10.2, Requirements 9.1, 9.2, 10.1: an inbound `Announce` of a local
@@ -1028,19 +1028,19 @@ async fn announce_of_a_local_post_records_reblog_and_increments_count() {
 /// already exercises for the counter side).
 #[tokio::test]
 async fn announce_of_a_local_post_emits_a_reblog_notification_event_exactly_once() {
-    let app = spawn_test_app().await;
-    let local_author = app.runtime.ids.next_id();
-    let target = insert_test_status(&app, local_author, Visibility::Public, true, None).await;
+    let db = spawn_test_db().await;
+    let local_author = db.runtime.ids.next_id();
+    let target = insert_test_status(&db, local_author, Visibility::Public, true, None).await;
 
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let remote_actor_id = remote_actors
         .resolve_remote_actor(REMOTE_ALICE)
         .await
         .expect("resolve must succeed");
     let (notifications, sink) = recording_notifications();
     let handler = AnnounceHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         Arc::clone(&remote_actors),
         notifications,
     );
@@ -1070,22 +1070,22 @@ async fn announce_of_a_local_post_emits_a_reblog_notification_event_exactly_once
     assert_eq!(events[0].origin, AccountRef::Remote(remote_actor_id));
     assert_eq!(events[0].target_status_id, Some(target.id));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 14.3: an `Announce` of a **remote** (not-locally-owned) post
 /// is not this handler's concern.
 #[tokio::test]
 async fn announce_of_a_remote_post_is_ignored() {
-    let app = spawn_test_app().await;
-    let remote_author = app.runtime.ids.next_id();
-    let target = insert_test_status(&app, remote_author, Visibility::Public, false, None).await;
+    let db = spawn_test_db().await;
+    let remote_author = db.runtime.ids.next_id();
+    let target = insert_test_status(&db, remote_author, Visibility::Public, false, None).await;
 
     let (notifications, sink) = recording_notifications();
     let handler = AnnounceHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         notifications,
     );
 
@@ -1106,7 +1106,7 @@ async fn announce_of_a_remote_post_is_ignored() {
         "an Announce of a non-local target must not emit a NotificationEvent"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- LikeHandler ---------------------------------------------------------------
@@ -1115,14 +1115,14 @@ async fn announce_of_a_remote_post_is_ignored() {
 /// `favourites_count`, and a duplicate `Like` does not double-count.
 #[tokio::test]
 async fn like_of_a_local_post_increments_count_and_is_idempotent() {
-    let app = spawn_test_app().await;
-    let local_author = app.runtime.ids.next_id();
-    let target = insert_test_status(&app, local_author, Visibility::Public, true, None).await;
+    let db = spawn_test_db().await;
+    let local_author = db.runtime.ids.next_id();
+    let target = insert_test_status(&db, local_author, Visibility::Public, true, None).await;
 
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let handler = LikeHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         remote_actors,
         NotificationSinkRegistry::new(),
     );
@@ -1143,7 +1143,7 @@ async fn like_of_a_local_post_increments_count_and_is_idempotent() {
         .await
         .expect("a duplicate Like must not error");
 
-    let refreshed = status_repository::find_by_id(&app.pool, target.id)
+    let refreshed = status_repository::find_by_id(&db.pool, target.id)
         .await
         .expect("query must succeed")
         .expect("target must still exist");
@@ -1152,7 +1152,7 @@ async fn like_of_a_local_post_increments_count_and_is_idempotent() {
         "a duplicate Like must not double-count"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Task 10.2, Requirements 9.1, 9.2, 10.1: an inbound `Like` of a local post
@@ -1163,19 +1163,19 @@ async fn like_of_a_local_post_increments_count_and_is_idempotent() {
 /// `is_new`-gated counter behavior).
 #[tokio::test]
 async fn like_of_a_local_post_emits_a_favourite_notification_event_exactly_once() {
-    let app = spawn_test_app().await;
-    let local_author = app.runtime.ids.next_id();
-    let target = insert_test_status(&app, local_author, Visibility::Public, true, None).await;
+    let db = spawn_test_db().await;
+    let local_author = db.runtime.ids.next_id();
+    let target = insert_test_status(&db, local_author, Visibility::Public, true, None).await;
 
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let remote_actor_id = remote_actors
         .resolve_remote_actor(REMOTE_ALICE)
         .await
         .expect("resolve must succeed");
     let (notifications, sink) = recording_notifications();
     let handler = LikeHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         Arc::clone(&remote_actors),
         notifications,
     );
@@ -1203,7 +1203,7 @@ async fn like_of_a_local_post_emits_a_favourite_notification_event_exactly_once(
     assert_eq!(events[0].origin, AccountRef::Remote(remote_actor_id));
     assert_eq!(events[0].target_status_id, Some(target.id));
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 14.3 (fan-out ownership): a `Like` of a **remote**
@@ -1211,15 +1211,15 @@ async fn like_of_a_local_post_emits_a_favourite_notification_event_exactly_once(
 /// `NotificationEvent`.
 #[tokio::test]
 async fn like_of_a_remote_post_is_ignored_and_emits_no_notification() {
-    let app = spawn_test_app().await;
-    let remote_author = app.runtime.ids.next_id();
-    let target = insert_test_status(&app, remote_author, Visibility::Public, false, None).await;
+    let db = spawn_test_db().await;
+    let remote_author = db.runtime.ids.next_id();
+    let target = insert_test_status(&db, remote_author, Visibility::Public, false, None).await;
 
     let (notifications, sink) = recording_notifications();
     let handler = LikeHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        db.runtime.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
         notifications,
     );
 
@@ -1237,7 +1237,7 @@ async fn like_of_a_remote_post_is_ignored_and_emits_no_notification() {
     assert_eq!(outcome, HandleOutcome::Ignored);
     assert!(sink.events().is_empty());
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- DeleteHandler --------------------------------------------------------------
@@ -1246,15 +1246,15 @@ async fn like_of_a_remote_post_is_ignored_and_emits_no_notification() {
 /// owned by the signed actor.
 #[tokio::test]
 async fn delete_removes_a_remote_origin_status_owned_by_the_signed_actor() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let actor_id = remote_actors
         .resolve_remote_actor(REMOTE_ALICE)
         .await
         .expect("resolve must succeed");
-    let target = insert_test_status(&app, actor_id, Visibility::Public, false, None).await;
+    let target = insert_test_status(&db, actor_id, Visibility::Public, false, None).await;
 
-    let handler = DeleteHandler::new(app.pool.clone(), Arc::clone(&remote_actors));
+    let handler = DeleteHandler::new(db.pool.clone(), Arc::clone(&remote_actors));
     let activity = activity_from(json!({
         "id": "https://remote.example/activities/delete-1",
         "type": "Delete",
@@ -1269,29 +1269,29 @@ async fn delete_removes_a_remote_origin_status_owned_by_the_signed_actor() {
     assert_eq!(outcome, HandleOutcome::Handled);
 
     assert!(
-        status_repository::find_by_id(&app.pool, target.id)
+        status_repository::find_by_id(&db.pool, target.id)
             .await
             .expect("query must succeed")
             .is_none(),
         "the status must be deleted"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// A `Delete` naming a status owned by a *different* remote actor is
 /// rejected (a spoofing attempt), not silently applied.
 #[tokio::test]
 async fn delete_is_forbidden_when_the_signed_actor_does_not_own_the_target() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let owner_id = remote_actors
         .resolve_remote_actor(REMOTE_ALICE)
         .await
         .expect("resolve must succeed");
-    let target = insert_test_status(&app, owner_id, Visibility::Public, false, None).await;
+    let target = insert_test_status(&db, owner_id, Visibility::Public, false, None).await;
 
-    let handler = DeleteHandler::new(app.pool.clone(), Arc::clone(&remote_actors));
+    let handler = DeleteHandler::new(db.pool.clone(), Arc::clone(&remote_actors));
     let activity = activity_from(json!({
         "id": "https://remote.example/activities/delete-2",
         "type": "Delete",
@@ -1307,27 +1307,27 @@ async fn delete_is_forbidden_when_the_signed_actor_does_not_own_the_target() {
     assert_eq!(err.status, StatusCode::FORBIDDEN);
 
     assert!(
-        status_repository::find_by_id(&app.pool, target.id)
+        status_repository::find_by_id(&db.pool, target.id)
             .await
             .expect("query must succeed")
             .is_some(),
         "the status must not have been deleted"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 14.4 (ownership boundary): a `Delete` naming a **local**
 /// status is ignored, never actioned.
 #[tokio::test]
 async fn delete_of_a_local_status_is_ignored() {
-    let app = spawn_test_app().await;
-    let local_author = app.runtime.ids.next_id();
-    let target = insert_test_status(&app, local_author, Visibility::Public, true, None).await;
+    let db = spawn_test_db().await;
+    let local_author = db.runtime.ids.next_id();
+    let target = insert_test_status(&db, local_author, Visibility::Public, true, None).await;
 
     let handler = DeleteHandler::new(
-        app.pool.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
     );
     let activity = activity_from(json!({
         "id": "https://remote.example/activities/delete-3",
@@ -1343,14 +1343,14 @@ async fn delete_of_a_local_status_is_ignored() {
     assert_eq!(outcome, HandleOutcome::Ignored);
 
     assert!(
-        status_repository::find_by_id(&app.pool, target.id)
+        status_repository::find_by_id(&db.pool, target.id)
             .await
             .expect("query must succeed")
             .is_some(),
         "a local status must never be deleted via an inbound Delete"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- UpdateHandler --------------------------------------------------------------
@@ -1359,17 +1359,17 @@ async fn delete_of_a_local_status_is_ignored() {
 /// content/spoiler_text/sensitive.
 #[tokio::test]
 async fn update_edits_a_remote_origin_status() {
-    let app = spawn_test_app().await;
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let db = spawn_test_db().await;
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let actor_id = remote_actors
         .resolve_remote_actor(REMOTE_ALICE)
         .await
         .expect("resolve must succeed");
-    let target = insert_test_status(&app, actor_id, Visibility::Public, false, None).await;
+    let target = insert_test_status(&db, actor_id, Visibility::Public, false, None).await;
 
     let handler = UpdateHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         Arc::clone(&remote_actors),
     );
     let activity = activity_from(json!({
@@ -1391,7 +1391,7 @@ async fn update_edits_a_remote_origin_status() {
         .expect("must be handled");
     assert_eq!(outcome, HandleOutcome::Handled);
 
-    let refreshed = status_repository::find_by_id(&app.pool, target.id)
+    let refreshed = status_repository::find_by_id(&db.pool, target.id)
         .await
         .expect("query must succeed")
         .expect("target must still exist");
@@ -1400,12 +1400,12 @@ async fn update_edits_a_remote_origin_status() {
     assert!(refreshed.sensitive);
     assert!(refreshed.edited_at.is_some());
 
-    let history = status_repository::list_edits(&app.pool, target.id)
+    let history = status_repository::list_edits(&db.pool, target.id)
         .await
         .expect("history query must succeed");
     assert_eq!(history.len(), 1, "the pre-edit content must be archived");
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- UndoHandler -----------------------------------------------------------------
@@ -1414,14 +1414,14 @@ async fn update_edits_a_remote_origin_status() {
 /// and decrements the target's `reblogs_count`.
 #[tokio::test]
 async fn undo_announce_reverts_reblog_and_decrements_count() {
-    let app = spawn_test_app().await;
-    let local_author = app.runtime.ids.next_id();
-    let target = insert_test_status(&app, local_author, Visibility::Public, true, None).await;
+    let db = spawn_test_db().await;
+    let local_author = db.runtime.ids.next_id();
+    let target = insert_test_status(&db, local_author, Visibility::Public, true, None).await;
 
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let announce_handler = AnnounceHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         Arc::clone(&remote_actors),
         NotificationSinkRegistry::new(),
     );
@@ -1436,7 +1436,7 @@ async fn undo_announce_reverts_reblog_and_decrements_count() {
         .await
         .expect("Announce must be handled");
 
-    let undo_handler = UndoHandler::new(app.pool.clone(), Arc::clone(&remote_actors));
+    let undo_handler = UndoHandler::new(db.pool.clone(), Arc::clone(&remote_actors));
     let undo = activity_from(json!({
         "id": "https://remote.example/activities/undo-announce-1",
         "type": "Undo",
@@ -1455,27 +1455,27 @@ async fn undo_announce_reverts_reblog_and_decrements_count() {
         .expect("must be handled");
     assert_eq!(outcome, HandleOutcome::Handled);
 
-    let refreshed = status_repository::find_by_id(&app.pool, target.id)
+    let refreshed = status_repository::find_by_id(&db.pool, target.id)
         .await
         .expect("query must succeed")
         .expect("target must still exist");
     assert_eq!(refreshed.reblogs_count, 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 14.3: `Undo(Like)` reverts a previously-recorded favourite
 /// and decrements the target's `favourites_count`.
 #[tokio::test]
 async fn undo_like_reverts_favourite_and_decrements_count() {
-    let app = spawn_test_app().await;
-    let local_author = app.runtime.ids.next_id();
-    let target = insert_test_status(&app, local_author, Visibility::Public, true, None).await;
+    let db = spawn_test_db().await;
+    let local_author = db.runtime.ids.next_id();
+    let target = insert_test_status(&db, local_author, Visibility::Public, true, None).await;
 
-    let remote_actors = Arc::new(FakeRemoteActors::new(app.runtime.clone()));
+    let remote_actors = Arc::new(FakeRemoteActors::new(db.runtime.clone()));
     let like_handler = LikeHandler::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         Arc::clone(&remote_actors),
         NotificationSinkRegistry::new(),
     );
@@ -1490,7 +1490,7 @@ async fn undo_like_reverts_favourite_and_decrements_count() {
         .await
         .expect("Like must be handled");
 
-    let undo_handler = UndoHandler::new(app.pool.clone(), Arc::clone(&remote_actors));
+    let undo_handler = UndoHandler::new(db.pool.clone(), Arc::clone(&remote_actors));
     let undo = activity_from(json!({
         "id": "https://remote.example/activities/undo-like-1",
         "type": "Undo",
@@ -1508,23 +1508,23 @@ async fn undo_like_reverts_favourite_and_decrements_count() {
         .await
         .expect("must be handled");
 
-    let refreshed = status_repository::find_by_id(&app.pool, target.id)
+    let refreshed = status_repository::find_by_id(&db.pool, target.id)
         .await
         .expect("query must succeed")
         .expect("target must still exist");
     assert_eq!(refreshed.favourites_count, 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Task 6.1's own explicit fan-out requirement: `UndoHandler` ignores an
 /// `Undo` wrapping a `Follow` (social-graph's own concern), never erroring.
 #[tokio::test]
 async fn undo_ignores_non_announce_or_like_inner_types() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let handler = UndoHandler::new(
-        app.pool.clone(),
-        Arc::new(FakeRemoteActors::new(app.runtime.clone())),
+        db.pool.clone(),
+        Arc::new(FakeRemoteActors::new(db.runtime.clone())),
     );
 
     let undo = activity_from(json!({
@@ -1545,7 +1545,7 @@ async fn undo_ignores_non_announce_or_like_inner_types() {
         .expect("must not error");
     assert_eq!(outcome, HandleOutcome::Ignored);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- register_status_handlers / dispatcher integration ------------------------
@@ -1556,9 +1556,9 @@ async fn undo_ignores_non_announce_or_like_inner_types() {
 /// itself, not just each handler in isolation.
 #[tokio::test]
 async fn register_status_handlers_wires_create_through_the_real_dispatcher() {
-    let app = spawn_test_app().await;
+    let db = spawn_test_db().await;
     let mut dispatcher = InboundActivityDispatcher::new();
-    register_status_handlers(&mut dispatcher, deps(&app));
+    register_status_handlers(&mut dispatcher, deps(&db));
 
     let activity = activity_from(json!({
         "id": "https://remote.example/activities/create-dispatched",
@@ -1578,7 +1578,7 @@ async fn register_status_handlers_wires_create_through_the_real_dispatcher() {
         .expect("dispatch must succeed");
 
     let ingested =
-        status_repository::find_by_uri(&app.pool, "https://remote.example/notes/dispatched-1")
+        status_repository::find_by_uri(&db.pool, "https://remote.example/notes/dispatched-1")
             .await
             .expect("query must succeed");
     assert!(
@@ -1586,5 +1586,5 @@ async fn register_status_handlers_wires_create_through_the_real_dispatcher() {
         "dispatching a Create through the registered handlers must ingest a Status"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }

@@ -3,7 +3,7 @@
 //! 投票 Activity が配送される、無効投票が拒否される".
 //!
 //! Mirrors `interaction_service/tests.rs`'s established convention
-//! (`crate::test_harness::spawn_test_app` for an isolated, migrated schema
+//! (`crate::test_harness::db_fixture::spawn_test_db` for an isolated, migrated schema
 //! plus a deterministic `RuntimeContext`, in-memory `ActorHandleLookup`/
 //! `LocalActorLookup`/`DeliverySink` test doubles, a `RecordingSink` that
 //! captures every dispatched Activity, and a configurable
@@ -32,7 +32,7 @@ use crate::statuses::model::{PollOption, Status};
 use crate::statuses::poll_repository::insert_poll;
 use crate::statuses::status_repository;
 use crate::statuses::visibility::ViewerRelation;
-use crate::test_harness::{TestApp, spawn_test_app};
+use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 
 // --- Test doubles (mirrors interaction_service/tests.rs) -------------------
 
@@ -175,14 +175,14 @@ type TestService = PollService<
     MockRelationshipQuery,
 >;
 
-/// Builds a ready-to-use `PollService` against `app`'s own pool/runtime.
+/// Builds a ready-to-use `PollService` against `db`'s own pool/runtime.
 /// `known_actors` pre-registers every `(Id, handle)` this test needs
 /// `ActorHandleLookup`/`LocalActorLookup` to resolve (both the voting actor
 /// and the poll-owning status's author, whose `ActorRef` this service must
 /// resolve for `deliver_vote` delivery). `is_follower` controls
 /// `MockRelationshipQuery`'s `private` visibility answer.
 fn service(
-    app: &TestApp,
+    db: &TestDb,
     known_actors: &[(Id, &str)],
     is_follower: bool,
 ) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
@@ -202,8 +202,8 @@ fn service(
         StatusActivityBuilder::new(urls.clone(), ids, actor_lookup.clone(), Arc::new(delivery));
 
     let service = PollService::new(
-        app.pool.clone(),
-        app.runtime.clone(),
+        db.pool.clone(),
+        db.runtime.clone(),
         urls,
         activity_builder,
         actor_lookup,
@@ -228,9 +228,9 @@ fn activity_type(activity: &serde_json::Value) -> &str {
 /// `insert_test_status` helper (a small, deliberate duplicate: this task's
 /// Boundary forbids modifying `interaction_service.rs`/`status_service.rs`
 /// just to share a test helper).
-async fn insert_test_status(app: &TestApp, actor_id: Id, visibility: Visibility) -> Status {
-    let id = app.runtime.ids.next_id();
-    let now = app.runtime.clock.now();
+async fn insert_test_status(db: &TestDb, actor_id: Id, visibility: Visibility) -> Status {
+    let id = db.runtime.ids.next_id();
+    let now = db.runtime.clock.now();
     let status = Status {
         id,
         actor_id,
@@ -252,7 +252,7 @@ async fn insert_test_status(app: &TestApp, actor_id: Id, visibility: Visibility)
         created_at: now,
         edited_at: None,
     };
-    status_repository::insert_status(&app.pool, &status)
+    status_repository::insert_status(&db.pool, &status)
         .await
         .expect("insert_status must succeed for a fresh id/uri");
     status
@@ -261,16 +261,16 @@ async fn insert_test_status(app: &TestApp, actor_id: Id, visibility: Visibility)
 /// Builds and persists a poll with `titles.len()` options, attached to a
 /// fresh status owned by `actor_id`. Returns `(Status, Poll)`.
 async fn insert_test_poll(
-    app: &TestApp,
+    db: &TestDb,
     actor_id: Id,
     visibility: Visibility,
     titles: &[&str],
     multiple: bool,
     expires_at: Option<time::OffsetDateTime>,
 ) -> (Status, Poll) {
-    let status = insert_test_status(app, actor_id, visibility).await;
+    let status = insert_test_status(db, actor_id, visibility).await;
     let poll = Poll {
-        id: app.runtime.ids.next_id(),
+        id: db.runtime.ids.next_id(),
         status_id: status.id,
         expires_at,
         multiple,
@@ -286,7 +286,7 @@ async fn insert_test_poll(
         })
         .collect();
 
-    insert_poll(&app.pool, &poll, &options)
+    insert_poll(&db.pool, &poll, &options)
         .await
         .expect("insert_poll must succeed for a fresh poll");
 
@@ -300,15 +300,15 @@ async fn insert_test_poll(
 /// name=<title>}`).
 #[tokio::test]
 async fn valid_vote_before_deadline_updates_tally_and_dispatches_vote_activity() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let voter = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let voter = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (voter, "bob")], false);
+        service(&db, &[(author, "alice"), (voter, "bob")], false);
 
-    let expires_at = app.runtime.clock.now() + Duration::hours(1);
+    let expires_at = db.runtime.clock.now() + Duration::hours(1);
     let (_status, poll) = insert_test_poll(
-        &app,
+        &db,
         author,
         Visibility::Public,
         &["Pizza", "Sushi", "Tacos"],
@@ -346,7 +346,7 @@ async fn valid_vote_before_deadline_updates_tally_and_dispatches_vote_activity()
         "the dispatched vote Note must name the actually-chosen option's title"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 13.4 (single-choice half): a multiple-choice poll's vote
@@ -354,14 +354,14 @@ async fn valid_vote_before_deadline_updates_tally_and_dispatches_vote_activity()
 /// option (task 4.1's own established per-title dispatch convention).
 #[tokio::test]
 async fn multiple_choice_vote_dispatches_one_activity_per_selection() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let voter = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let voter = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (voter, "bob")], false);
+        service(&db, &[(author, "alice"), (voter, "bob")], false);
 
     let (_status, poll) = insert_test_poll(
-        &app,
+        &db,
         author,
         Visibility::Public,
         &["Pizza", "Sushi", "Tacos"],
@@ -396,7 +396,7 @@ async fn multiple_choice_vote_dispatches_one_activity_per_selection() {
     titles.sort();
     assert_eq!(titles, vec!["Pizza".to_string(), "Tacos".to_string()]);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- vote: rejections ----------------------------------------------------------
@@ -405,15 +405,15 @@ async fn multiple_choice_vote_dispatches_one_activity_per_selection() {
 /// tally change and no dispatch.
 #[tokio::test]
 async fn vote_after_deadline_is_rejected_with_no_tally_change_or_dispatch() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let voter = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let voter = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (voter, "bob")], false);
+        service(&db, &[(author, "alice"), (voter, "bob")], false);
 
-    let expired_at = app.runtime.clock.now() - Duration::hours(1);
+    let expired_at = db.runtime.clock.now() - Duration::hours(1);
     let (_status, poll) = insert_test_poll(
-        &app,
+        &db,
         author,
         Visibility::Public,
         &["Pizza", "Sushi"],
@@ -429,27 +429,27 @@ async fn vote_after_deadline_is_rejected_with_no_tally_change_or_dispatch() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let tally = poll_repository::tally(&app.pool, poll.id, Some(voter))
+    let tally = poll_repository::tally(&db.pool, poll.id, Some(voter))
         .await
         .expect("tally must still succeed");
     assert!(tally.own_votes.is_empty());
     assert_eq!(tally.options[0].votes_count, 0);
     assert_eq!(deliveries(&local_sink, &http_sink), 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 13.4 (range half): an out-of-range choice index is rejected.
 #[tokio::test]
 async fn out_of_range_choice_is_rejected() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let voter = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let voter = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (voter, "bob")], false);
+        service(&db, &[(author, "alice"), (voter, "bob")], false);
 
     let (_status, poll) = insert_test_poll(
-        &app,
+        &db,
         author,
         Visibility::Public,
         &["Pizza", "Sushi"],
@@ -466,21 +466,21 @@ async fn out_of_range_choice_is_rejected() {
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(deliveries(&local_sink, &http_sink), 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 13.4 (single-choice half): a single-choice poll rejects a
 /// vote naming multiple selected indices.
 #[tokio::test]
 async fn single_choice_poll_rejects_multiple_selected_indices() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let voter = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let voter = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (voter, "bob")], false);
+        service(&db, &[(author, "alice"), (voter, "bob")], false);
 
     let (_status, poll) = insert_test_poll(
-        &app,
+        &db,
         author,
         Visibility::Public,
         &["Pizza", "Sushi", "Tacos"],
@@ -497,21 +497,21 @@ async fn single_choice_poll_rejects_multiple_selected_indices() {
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(deliveries(&local_sink, &http_sink), 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 13.5: a duplicate vote by the same actor is rejected and does
 /// not double-count.
 #[tokio::test]
 async fn duplicate_vote_by_the_same_actor_is_rejected_and_does_not_double_count() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let voter = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let voter = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) =
-        service(&app, &[(author, "alice"), (voter, "bob")], false);
+        service(&db, &[(author, "alice"), (voter, "bob")], false);
 
     let (_status, poll) = insert_test_poll(
-        &app,
+        &db,
         author,
         Visibility::Public,
         &["Pizza", "Sushi"],
@@ -534,7 +534,7 @@ async fn duplicate_vote_by_the_same_actor_is_rejected_and_does_not_double_count(
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    let tally = poll_repository::tally(&app.pool, poll.id, Some(voter))
+    let tally = poll_repository::tally(&db.pool, poll.id, Some(voter))
         .await
         .expect("tally must still succeed");
     assert_eq!(
@@ -550,24 +550,24 @@ async fn duplicate_vote_by_the_same_actor_is_rejected_and_does_not_double_count(
         "a rejected duplicate vote must not dispatch a second Activity"
     );
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// Requirement 13.2 (visibility gate): voting on a `private` poll's owning
 /// status is rejected for a non-follower viewer.
 #[tokio::test]
 async fn voting_on_an_invisible_private_poll_is_rejected() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let voter = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let voter = db.runtime.ids.next_id();
     let (service, local_sink, http_sink) = service(
-        &app,
+        &db,
         &[(author, "alice"), (voter, "bob")],
         false, // voter is not a follower of author
     );
 
     let (_status, poll) = insert_test_poll(
-        &app,
+        &db,
         author,
         Visibility::Private,
         &["Pizza", "Sushi"],
@@ -583,13 +583,13 @@ async fn voting_on_an_invisible_private_poll_is_rejected() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::NOT_FOUND);
 
-    let tally = poll_repository::tally(&app.pool, poll.id, Some(voter))
+    let tally = poll_repository::tally(&db.pool, poll.id, Some(voter))
         .await
         .expect("tally must still succeed");
     assert!(tally.own_votes.is_empty());
     assert_eq!(deliveries(&local_sink, &http_sink), 0);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 // -- poll (get) ------------------------------------------------------------
@@ -597,13 +597,13 @@ async fn voting_on_an_invisible_private_poll_is_rejected() {
 /// The "get" half: `poll()` returns the poll+tally for a visible poll.
 #[tokio::test]
 async fn poll_returns_poll_and_tally_for_a_visible_poll() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let voter = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, &[(author, "alice"), (voter, "bob")], false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let voter = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, &[(author, "alice"), (voter, "bob")], false);
 
     let (_status, poll) = insert_test_poll(
-        &app,
+        &db,
         author,
         Visibility::Public,
         &["Pizza", "Sushi"],
@@ -624,24 +624,24 @@ async fn poll_returns_poll_and_tally_for_a_visible_poll() {
     assert_eq!(tally.own_votes, vec![1]);
     assert_eq!(tally.options[1].votes_count, 1);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// The "get" half: `poll()` rejects (uniform not-found) an invisible poll —
 /// a `private` poll's owning status, viewed by a non-follower.
 #[tokio::test]
 async fn poll_rejects_an_invisible_private_poll() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let stranger = app.runtime.ids.next_id();
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let stranger = db.runtime.ids.next_id();
     let (service, _local, _http) = service(
-        &app,
+        &db,
         &[(author, "alice"), (stranger, "eve")],
         false, // stranger is not a follower of author
     );
 
     let (_status, poll) = insert_test_poll(
-        &app,
+        &db,
         author,
         Visibility::Private,
         &["Pizza", "Sushi"],
@@ -657,17 +657,17 @@ async fn poll_rejects_an_invisible_private_poll() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::NOT_FOUND);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
 
 /// `poll()` returns a not-found for a nonexistent poll id.
 #[tokio::test]
 async fn poll_returns_not_found_for_a_nonexistent_poll_id() {
-    let app = spawn_test_app().await;
-    let author = app.runtime.ids.next_id();
-    let (service, _local, _http) = service(&app, &[(author, "alice")], false);
+    let db = spawn_test_db().await;
+    let author = db.runtime.ids.next_id();
+    let (service, _local, _http) = service(&db, &[(author, "alice")], false);
 
-    let missing_id = app.runtime.ids.next_id();
+    let missing_id = db.runtime.ids.next_id();
     let err = service
         .poll(Some(author), missing_id)
         .await
@@ -675,5 +675,5 @@ async fn poll_returns_not_found_for_a_nonexistent_poll_id() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::NOT_FOUND);
 
-    app.cleanup().await;
+    db.cleanup().await;
 }
