@@ -51,12 +51,20 @@
 
 use std::time::{Duration, Instant};
 
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
+use tower::ServiceExt;
 
 use kawasemi::actor::owner::create_owner;
 use kawasemi::actor::{ActorType, Handle, LocalActor, NewActor};
-use kawasemi::federation::urls::ActorUrls;
+use kawasemi::domain::Visibility;
+use kawasemi::federation::urls::{ActorUrls, ObjectKind};
 use kawasemi::federation::{DeliveryRequest, FederationPair, Recipient, spawn_federation_pair};
+use kawasemi::server;
+use kawasemi::statuses::model::Status;
+use kawasemi::statuses::status_repository;
 use kawasemi::test_harness::TestApp;
 
 // ==========================================================================
@@ -311,6 +319,128 @@ async fn federation_pair_round_trip_verifies_signature_and_dispatch_and_local_ht
         "the local delivery path (on A) and the HTTP federation delivery path (on B) must both \
          have recorded the identical Activity id as successfully received"
     );
+
+    a.cleanup().await;
+    b.cleanup().await;
+}
+
+// ==========================================================================
+// (3) Each paired instance runs the SAME module-wiring sequence production
+// runs (structural-refactor task 6.4, Requirements 1.4, 7.1, 7.7)
+// ==========================================================================
+
+/// Inserts a plain public local `Status` row directly via `StatusRepository`
+/// (mirroring `tests/statuses_federation_pair_it.rs`'s own
+/// `insert_local_status_fixture` convention — each `tests/*.rs` file is its
+/// own compiled crate, so this is independently duplicated rather than
+/// shared). The test below only needs *some* authored post to exist so the
+/// account representation has something real to report.
+async fn insert_local_status_fixture(app: &TestApp, actor: &LocalActor, content: &str) -> Status {
+    let id = app.runtime.ids.next_id();
+    let now = app.runtime.clock.now();
+    let uri = ActorUrls::new(test_domain(app)).object_url(ObjectKind::new("statuses"), id);
+
+    let status = Status {
+        id,
+        actor_id: actor.id,
+        uri: uri.clone(),
+        url: Some(uri),
+        content: content.to_string(),
+        visibility: Visibility::Public,
+        sensitive: false,
+        spoiler_text: String::new(),
+        in_reply_to_id: None,
+        in_reply_to_account_id: None,
+        reblog_of_id: None,
+        poll_id: None,
+        language: None,
+        reblogs_count: 0,
+        favourites_count: 0,
+        replies_count: 0,
+        local: true,
+        created_at: now,
+        edited_at: None,
+    };
+    status_repository::insert_status(&app.pool, &status)
+        .await
+        .expect("inserting the local status fixture must succeed");
+    status
+}
+
+async fn get_json_unauthenticated(router: &Router, path: &str) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("GET")
+        .uri(path)
+        .body(Body::empty())
+        .expect("build request");
+    let response = router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router must not fail to produce a response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read response body");
+    let value: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).expect("response body must be valid JSON")
+    };
+    (status, value)
+}
+
+/// structural-refactor Requirements 1.4, 7.1, 7.7: every startup path — this
+/// federation-pair harness included — runs the one shared module-wiring
+/// sequence (`crate::bootstrap::wiring::compose_modules`), so BOTH paired
+/// instances' Account representations go through statuses-core's real
+/// `AccountStatusesProvider`/`AccountCountsContribution`
+/// (`statuses::register_account_ports`, wiring stage 7) rather than
+/// `build_accounts_module`'s built-in `EmptyStatusesProvider`/
+/// `ZeroCountsProvider` defaults.
+///
+/// Before task 6.4, `spawn_paired_instance` open-coded the wiring sequence
+/// and omitted `register_account_ports` entirely, so the account-statuses
+/// page below read empty on both instances even with a real authored post in
+/// the database — the exact pre-existing wiring divergence Requirement 7.7
+/// asks to be corrected and recorded. The `statuses_count` assertion below
+/// passed even then (`social_graph::CombinedAccountCountsProvider`, wiring
+/// stage 8, builds its own `AccountCountsContribution` rather than reading
+/// back stage 7's registration) and is kept as a guard that the corrected
+/// wiring does not regress it.
+#[tokio::test]
+async fn federation_pair_instances_wire_statuses_account_ports_like_production() {
+    let FederationPair { a, b } = spawn_federation_pair().await;
+
+    for (label, app) in [("A", &a), ("B", &b)] {
+        let actor = insert_actor_fixture(app, "ports_alice").await;
+        insert_local_status_fixture(app, &actor, "a real authored post").await;
+        let router = server::build_router(app.state.clone());
+
+        let (status, body) =
+            get_json_unauthenticated(&router, &format!("/api/v1/accounts/{}", actor.id.as_i64()))
+                .await;
+        assert_eq!(status, StatusCode::OK, "instance {label}: {body:?}");
+        assert_eq!(
+            body["statuses_count"].as_i64(),
+            Some(1),
+            "instance {label}: statuses_count must reflect the real authored post \
+             (statuses::register_account_ports wired), got: {body}"
+        );
+
+        let (status, body) = get_json_unauthenticated(
+            &router,
+            &format!("/api/v1/accounts/{}/statuses", actor.id.as_i64()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "instance {label}: {body:?}");
+        assert_eq!(
+            body.as_array().map(Vec::len),
+            Some(1),
+            "instance {label}: the account's statuses page must not be the built-in \
+             EmptyStatusesProvider's empty page, got: {body}"
+        );
+    }
 
     a.cleanup().await;
     b.cleanup().await;
