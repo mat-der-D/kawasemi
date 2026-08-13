@@ -1,6 +1,6 @@
 # Project Structure
 
-> Phase 1（MVP）の全 11 spec（core-runtime / actor-model / api-foundation / federation-core / media-pipeline / accounts-and-instance / statuses-core / social-graph / timelines / notifications / search）が実装済み。以下は実コードから確認された構成原則。
+> Phase 1（MVP）の全 11 spec（core-runtime / actor-model / api-foundation / federation-core / media-pipeline / accounts-and-instance / statuses-core / social-graph / timelines / notifications / search）が実装済み。加えて、Phase 1 完了後の構造リファクタ（structural-refactor）により「組み立てコードの spec 境界ごとの複製」が解消されている。以下は実コードから確認された構成原則。
 
 ## Organization Philosophy
 
@@ -29,11 +29,37 @@ clock / id generator / RNG / 署名鍵は具体実装に直接依存させず、
 ### バックエンド一体配信
 フロント（React）のビルド済み資産・DB マイグレーション・SPA 配信はバックエンドバイナリに同梱する前提で構成する（別 Web サーバーを構造に持ち込まない）。
 
+### 組み立て（assembly）コードを spec 境界ごとに複製しない
+
+**本プロジェクトの構造的負債は一貫してここに出る。** 同じ表現を複数の spec が返すとき、各 spec が自前の組み立てグルーを持つと、差分が「決定」なのか「見落とし」なのかコードから読めなくなる。組み立ては 1 実装に集約し、**呼び出し側ごとの違いは引数として渡す**（渡さざるを得ない ＝ 名前が付く）。
+
+- **Status 表現**：`statuses/render_assembler.rs` の `StatusRenderAssembler` が唯一の組み立て経路。投稿エンドポイント・アカウント投稿一覧・通知・タイムライン・検索の 5 経路すべてがここを通る。呼び出し側ごとの差（ミュート文脈の有無など）は `RenderContext` のフィールドとして明示する。
+- **集約しないものも明示する**：ブースト先の解決と可視性判定、投票の取得方法は呼び出し側ごとに本質的に異なるため、解決済みの値を受け取るか `PollResolver` のようなポートとして注入させる。「どの呼び出し元か」で内部分岐させるのは、複製を隠しただけで解消していない。
+- `assemble_one` は `assemble_many` の 1 要素版として実装する（第 2 実装を作らない ＝ ドリフトし得ない）。
+
+### 横断ボイラープレートの単一定義（`src/api/`）
+
+ドメイン知識を持たないが全モジュールが必要とする処理は `src/api/` 直下に 1 定義だけ置く。「この API が `limit` をどう読むか」を**慣習ではなく事実**にするのが目的。
+
+- `api/query.rs` — クエリパラメータの解釈（`limit`・loose bool）
+- `api/time.rs` — RFC 3339 タイムスタンプ整形
+- `api/db.rs` — `sqlx::Error` → `AppError` の標準変換
+- `api/origin.rs` — リクエストを持たない呼び出し元のための自インスタンス origin 解決
+
+**例外は集約しない**：特定の一意制約違反を 4xx に落とすマッパーのように、自分のスキーマの制約名を知っているものは各モジュールに残す。横断モジュールに畳み込むと、複数スキーマの知識を持ち込むか、文書化済みの 4xx を静かに 500 に戻すことになる。
+
+### 合成ルート（module wiring）の単一実装
+
+モジュール構築順は `bootstrap/wiring.rs` の `compose_modules` に 1 度だけ書く。本番 bootstrap・通常テストハーネス・連合ペアテストハーネスの 3 経路がこれを共有する。レジストリスロットの上書き順序（後勝ち）のように**型で守られない順序制約**があるため、複製すると「コンパイルも起動も通るが機能しない」構成が容易に生まれる。
+
+起動経路ごとに本質的に異なるもの（config のロード／合成、pool 生成、マイグレーション、リスナ bind、シャットダウン signal）は呼び出し側に残す。バックグラウンドタスクのハンドルは**返すだけで spawn しない**。3 経路の差は具体値だけなのでトレイト抽象は導入せず、素のデータバンドル（`ModuleWiringInput`）で渡す。
+
 ## テストレイアウト
 
 - **単体テスト**：実装ファイルと同階層の `tests.rs` サブモジュールに置く（例：`src/actor/service.rs` → `src/actor/service/tests.rs`）。`#[cfg(test)] mod tests;` で親から宣言する。
 - **統合テスト**：`tests/` 直下、ファイル名は `_it.rs` サフィックス（例：`tests/actor_lifecycle_it.rs`）。DB込みの実起動インスタンスを要する検証はここに置く。
-- **TestHarness**：`src/test_harness.rs` の `spawn_test_app` が bootstrap と同じ構成要素（`db::establish_pool` / `migrate::apply_migrations` / `runtime::RuntimeContext::deterministic` / `state::AppState::new` / `server::build_router`）を再利用して実インスタンスを起動する。`bootstrap::bootstrap` 自体を直接再利用しないのは、待受アドレスを呼び出し側に返さないため。統合テストは `bootstrap` を再実装せず、この harness 経由で実体を起動する。
+- **TestHarness**：`src/test_harness.rs` の `spawn_test_app` が bootstrap と同じ構成要素（`db::establish_pool` / `migrate::apply_migrations` / `runtime::RuntimeContext::deterministic` / `bootstrap::wiring::compose_modules` / `state::AppState::new` / `server::build_router`）を再利用して実インスタンスを起動する。モジュール構築順そのものはここに書かれていない（`compose_modules` に一本化済み）。`bootstrap::bootstrap` 自体を直接再利用しないのは、待受アドレスを呼び出し側に返さないため。統合テストは `bootstrap` を再実装せず、この harness 経由で実体を起動する。
+- **連合ペアハーネス**：`src/federation/test_harness.rs` の `spawn_federation_pair`（自前インスタンスを 2 つ起動して Activity 往復を検証する）も、各インスタンスの構築で同じ `compose_modules` を通る。テストハーネスが本番と違う構成で起動していると、連合テストが検証しているものが本番の構成ではなくなる。
 
 ## Spec & Steering Layout
 
@@ -95,6 +121,7 @@ requirements.md も handoff 後はログである。ふるまいの一次情報�
 - Rust：標準慣習（モジュール/関数 `snake_case`、型/トレイト `PascalCase`）。
 - TypeScript/React：標準慣習（コンポーネント `PascalCase`）。
 - 統合テストファイル：`<対象>_it.rs`（例：`bootstrap_lifecycle_it.rs` / `owner_actor_boundary_it.rs`）。
+- **リポジトリの単数／複数対**：1 件版と一括版は単数形／複数形で対にする（`find_by_id` / `find_by_ids`、`tags_for_status` / `tags_for_statuses`、`media_ids_for_status` / `media_ids_for_statuses`、`tally` / `tally_many`）。一括版は `&[Id]` を取り、`HashMap<Id, _>`（または集合の場合 `HashSet<Id>`）を返す。キーの欠落は 1 件版の `None` と同じ意味を持たせる。
 - フロント実装はまだ無し。着手時に確立した命名パターンをここに追記する。
 
 ## Rust コーディング規約
