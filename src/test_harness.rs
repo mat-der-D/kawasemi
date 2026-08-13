@@ -58,23 +58,55 @@
 //! the identical clock/id/rng/key sequence, which is the more useful
 //! property for a caller asserting on those values.
 //!
-//! ## Release path: `cleanup()` vs `Drop` (Requirement 8.5)
-//! [`TestApp::cleanup`] is the one documented, mandatory release path: it
-//! signals the listener's graceful shutdown and awaits it actually stopping,
-//! closes the shared pool, and then drops the isolated schema — in that
-//! order, so the schema is only dropped once nothing still holds a
-//! connection pinned to it. `Drop for TestApp` never does any of this
-//! synchronously: it only (a) fires the same shutdown signal `cleanup` would
-//! (sending on a `oneshot::Sender` is synchronous and non-blocking, unlike
-//! awaiting the listener task) and (b) spawns the isolated-schema teardown
-//! as a *detached* background task via `tokio::runtime::Handle::try_current`
-//! when a Tokio runtime happens to be available (never `block_on`, which
-//! would risk a panic inside a sync `Drop::drop` running on a tokio
-//! runtime thread) — falling back to leaving the orphaned schema in place
-//! (for a future startup sweep to reclaim) when no runtime handle is
-//! reachable at all. Correctness is never assumed to come from `Drop`; only
-//! `cleanup()` is guaranteed to have released everything by the time it
-//! returns.
+//! ## Release path: `cleanup()` vs `Drop` (Requirement 8.5,
+//! test-infrastructure Requirements 2.1-2.5)
+//! [`TestApp::cleanup`] is the explicit, synchronous release path: it signals
+//! the listener's graceful shutdown and awaits it actually stopping, closes
+//! the shared pool, and then drops the isolated schema — in that order, so
+//! the schema is only dropped once nothing still holds a connection pinned to
+//! it. It remains the only path that has provably finished releasing
+//! everything by the time it returns, and every existing caller keeps using
+//! it unchanged.
+//!
+//! `Drop for TestApp` covers the case where a test panics, returns early, or
+//! simply never calls `cleanup()` — which 131 call sites in this repository
+//! do. It cannot do the work itself: `drop` is synchronous, and the release
+//! steps are `async`. It used to detach them onto
+//! `tokio::runtime::Handle::try_current`, but a `#[tokio::test]`'s runtime is
+//! destroyed the moment the test function returns, so a task spawned from a
+//! destructor running on that runtime never completes — and the pool was
+//! never closed at all, only the schema drop was attempted. That is the
+//! measured leak this harness is being fixed for (requirements.md's
+//! Introduction: 8 dropped instances still holding 40 connections).
+//!
+//! `Drop` now (a) fires the same shutdown signal `cleanup` would (sending on
+//! a `oneshot::Sender` is synchronous, non-blocking and infallible here) and
+//! (b) hands a *clone* of the pool plus the isolated schema name to
+//! [`reaper::HarnessReaper`], the process-resident executor that owns its own
+//! runtime on its own thread and therefore outlives every per-test runtime.
+//! Submitting is a lock-free channel push: it never blocks and never panics,
+//! which is what makes it legal inside a destructor that may be running
+//! during an unwind. The reclaim itself (close the pool, then drop the
+//! schema) happens on the reaper's runtime, after the caller's runtime is
+//! gone. `Drop` still never blocks, never awaits, and never reports failure.
+//!
+//! That delegation is asynchronous, and therefore best-effort at process
+//! exit: the reaper is deliberately never shut down, so requests still queued
+//! when the test binary exits are simply lost together with it (see
+//! [`reaper::HarnessReaper::global`]). Their schemas stay on the server as
+//! residue for the startup sweep (task 2.2) to reclaim on a later run. What
+//! `Drop` guarantees is that a leaked fixture is *queued* for release, not
+//! that it has been released by any particular moment — only `cleanup()`
+//! guarantees that.
+//!
+//! The two paths meet on every `cleanup()` call site, since `cleanup` takes
+//! `self` by value and `Drop` runs immediately afterwards. They do not
+//! collide: `cleanup` takes the `schema` out of the `Option`, and `Drop`
+//! submits nothing when it finds `None`, so a cleaned-up instance generates
+//! no redundant reclaim at all. (Were one ever generated, the reaper's own
+//! contract makes it harmless — `Pool::close` is idempotent and the schema
+//! drop is `IF EXISTS` — but not generating it is cheaper and keeps the
+//! reaper's queue proportional to the fixtures that actually leaked.)
 
 #[cfg(test)]
 mod tests;
@@ -84,12 +116,6 @@ mod tests;
 /// Not `#[cfg(test)]`: `tests/*.rs` integration binaries drop harness
 /// fixtures too, and their destructors need the same release path this
 /// crate's own unit tests get.
-///
-/// `allow(dead_code)`: the reaper's only production caller is `Drop for
-/// TestApp`, which task 1.2 rewrites to delegate here. Until then the module
-/// is exercised solely by its own `#[cfg(test)]` suite, so a non-test lib
-/// build sees every item as unused. Remove this attribute once 1.2 lands.
-#[allow(dead_code)]
 pub(crate) mod reaper;
 
 /// SQL-statement counting for this crate's own unit tests. `#[cfg(test)]`
@@ -286,7 +312,7 @@ async fn create_schema(schema: &str) {
 /// Best-effort teardown of `schema` (and everything in it, including its
 /// private `_sqlx_migrations` table): drops it via a fresh admin connection.
 /// Failures here are logged, never panicked on — by the time this runs
-/// (either from [`TestApp::cleanup`] or `Drop`'s detached fallback), the
+/// (either from [`TestApp::cleanup`] or from [`reaper::HarnessReaper`]), the
 /// schema is disposable test scaffolding, not something whose loss should
 /// fail a caller that already got everything it asked for.
 async fn drop_schema(schema: &str) {
@@ -317,9 +343,15 @@ async fn drop_schema(schema: &str) {
 /// `TestApp`, and a [`runtime`](Self::runtime) built from
 /// [`RuntimeContext::deterministic`].
 ///
-/// Callers must call [`TestApp::cleanup`] when done with it (Requirement
-/// 8.5) — see this module's doc comment for why `Drop` alone is not a
-/// substitute.
+/// [`TestApp::cleanup`] remains the explicit release path callers should
+/// prefer (Requirement 8.5): it is the only one that has provably finished by
+/// the time it returns. Omitting it no longer leaks for the rest of the
+/// process, though — `Drop` hands the pool and schema to
+/// [`reaper::HarnessReaper`] instead (test-infrastructure Requirements 2.3,
+/// 2.4). That hand-off is best-effort at process exit: a request still queued
+/// when the test binary exits is lost with the reaper, leaving a stale schema
+/// for the startup sweep to reclaim on a later run. See this module's doc
+/// comment ("Release path") for how the two differ.
 pub struct TestApp {
     /// The real, bound socket address the foundation router
     /// ([`crate::server::build_router`]) is being served on. Connectable
@@ -362,9 +394,10 @@ pub struct TestApp {
     pub state: AppState,
     /// Name of this instance's isolated PostgreSQL schema (Requirement 8.4).
     /// `Some` until whichever of [`TestApp::cleanup`] or `Drop` runs first
-    /// takes it, so the schema is torn down exactly once even though `Drop`
+    /// takes it, so the release is requested exactly once even though `Drop`
     /// always runs (including immediately after a successful `cleanup()`
-    /// call, since `cleanup` takes `self` by value). Not part of
+    /// call, since `cleanup` takes `self` by value — that is the case in
+    /// which `Drop` finds `None` and submits nothing to the reaper). Not part of
     /// design.md's documented Service Interface; kept private to this
     /// module's own [`create_schema`]/[`drop_schema`] plumbing (and this
     /// module's own tests, which may reach it via `super::*`).
@@ -467,11 +500,12 @@ impl TestApp {
 }
 
 impl Drop for TestApp {
-    /// Best-effort only (design.md: "`Drop` はベストエフォートのみに留める"):
-    /// covers the case where a test panics or otherwise returns without
-    /// calling [`TestApp::cleanup`], without ever blocking or panicking
-    /// inside this synchronous `drop`. See this module's doc comment
-    /// ("Release path") for the full reasoning.
+    /// Delegates release to the process-resident [`reaper::HarnessReaper`]
+    /// (test-infrastructure Requirements 2.1-2.5), covering the case where a
+    /// test panics or otherwise returns without calling [`TestApp::cleanup`].
+    /// Every step here is synchronous, non-blocking and infallible, because a
+    /// panic in a destructor running during an unwind aborts the process. See
+    /// this module's doc comment ("Release path") for the full reasoning.
     fn drop(&mut self) {
         // Synchronous and non-blocking: at most wakes up a task that may
         // already be gone.
@@ -483,32 +517,21 @@ impl Drop for TestApp {
         // this destructor never awaits or aborts it.
 
         let Some(schema) = self.schema.take() else {
-            // Already torn down by `cleanup()` (or by an earlier `Drop`
-            // call, though `drop` only ever runs once per value) — nothing
-            // left to do.
+            // Already released by `cleanup()`, which closed the pool and
+            // dropped the schema synchronously. Submitting anyway would be
+            // harmless (the reaper's reclaim is idempotent) but would queue
+            // work behind the fixtures that genuinely leaked, so the
+            // take-once `Option` is what keeps the reaper's queue
+            // proportional to the actual leak.
             return;
         };
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                // Detached: this destructor does not await the spawned
-                // task, so dropping a `TestApp` outside `cleanup()` never
-                // blocks the current thread or risks panicking from a
-                // `block_on` inside `Drop::drop`.
-                handle.spawn(async move {
-                    drop_schema(&schema).await;
-                });
-            }
-            Err(_) => {
-                // No Tokio runtime reachable from this thread: fall back to
-                // leaving the orphaned schema in place for a future
-                // startup-time sweep to reclaim, rather than risking a panic
-                // by trying to drive async cleanup here.
-                eprintln!(
-                    "test_harness: TestApp dropped without calling cleanup() and outside a \
-                     Tokio runtime; leaving orphaned schema {schema} for a future startup sweep"
-                );
-            }
-        }
+        // A `Pool` clone shares one inner state with the handle this struct
+        // still owns, so the reaper closing its clone closes this pool — and
+        // cloning is a refcount bump, not an operation that can block or
+        // fail. The reclaim runs on the reaper's own runtime, which outlives
+        // the per-test runtime this destructor is executing on.
+        reaper::HarnessReaper::global()
+            .submit(reaper::ReclaimRequest::new(self.pool.clone(), schema));
     }
 }
 
@@ -539,12 +562,15 @@ pub async fn spawn_test_app() -> TestApp {
     create_schema(&schema).await;
 
     // `max_connections: 2` rather than 5: every connection here is opened
-    // eagerly, and `Drop` releases none of them (only [`TestApp::cleanup`]
-    // does), so each `TestApp` a test forgets to clean up holds its full
-    // pool open for the rest of the process. At 5 the shared server's ~97
-    // usable slots are exhausted after ~19 leaked instances, which is what
-    // makes a single-process `cargo test --lib` run fail en masse with
-    // `PoolTimedOut`.
+    // eagerly, so a pool's full size is the unit in which a `TestApp` costs
+    // the shared server. This started as a mitigation for `Drop` releasing
+    // nothing at all (at 5, the server's ~97 usable slots were exhausted
+    // after ~19 uncleaned instances, which is what made a single-process
+    // `cargo test --lib` run fail en masse with `PoolTimedOut`); `Drop` now
+    // hands the pool to `reaper::HarnessReaper`, so uncleaned instances are
+    // reclaimed rather than accumulated. The reduced size is kept because it
+    // still bounds what is held while a reclaim is in flight, and because
+    // no test needs more.
     //
     // Not 1: at a single connection
     // `federation::outbound::worker::tests::run_once_marks_a_job_failed_
@@ -554,9 +580,6 @@ pub async fn spawn_test_app() -> TestApp {
     // size. That interaction is unexplained and out of scope here, so this
     // mitigation stops at the largest reduction that provably changes no
     // test outcome.
-    //
-    // This is a mitigation, not a fix — the leak itself lives in the release
-    // path (see this module's doc comment).
     let db_config = DatabaseConfig {
         url: Secret::new(schema_scoped_url(&base_test_db_url(), &schema)),
         max_connections: 2,
