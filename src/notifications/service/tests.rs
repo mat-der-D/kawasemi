@@ -173,9 +173,9 @@ async fn list_returns_only_the_requesting_recipients_notifications() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
 
-    let recipient = create_test_actor(&app, "list-recipient").await;
-    let other_recipient = create_test_actor(&app, "list-other-recipient").await;
-    let origin = create_test_actor(&app, "list-origin").await;
+    let recipient = create_test_actor(&app, "list_recipient").await;
+    let other_recipient = create_test_actor(&app, "list_other_recipient").await;
+    let origin = create_test_actor(&app, "list_origin").await;
 
     seed_notification(
         &app,
@@ -220,8 +220,8 @@ async fn list_excludes_dismissed_notifications() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
 
-    let recipient = create_test_actor(&app, "list-dismiss-recipient").await;
-    let origin = create_test_actor(&app, "list-dismiss-origin").await;
+    let recipient = create_test_actor(&app, "list_dismiss_recipient").await;
+    let origin = create_test_actor(&app, "list_dismiss_origin").await;
 
     let notification_id = seed_notification(
         &app,
@@ -258,8 +258,8 @@ async fn list_applies_types_filter() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
 
-    let recipient = create_test_actor(&app, "list-types-recipient").await;
-    let origin = create_test_actor(&app, "list-types-origin").await;
+    let recipient = create_test_actor(&app, "list_types_recipient").await;
+    let origin = create_test_actor(&app, "list_types_origin").await;
 
     seed_notification(
         &app,
@@ -301,9 +301,9 @@ async fn list_applies_account_id_filter() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
 
-    let recipient = create_test_actor(&app, "list-account-recipient").await;
-    let origin_a = create_test_actor(&app, "list-account-origin-a").await;
-    let origin_b = create_test_actor(&app, "list-account-origin-b").await;
+    let recipient = create_test_actor(&app, "list_account_recipient").await;
+    let origin_a = create_test_actor(&app, "list_account_origin_a").await;
+    let origin_b = create_test_actor(&app, "list_account_origin_b").await;
 
     seed_notification(
         &app,
@@ -348,8 +348,8 @@ async fn list_embeds_related_status_for_post_related_kinds() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
 
-    let recipient = create_test_actor(&app, "list-status-recipient").await;
-    let origin = create_test_actor(&app, "list-status-origin").await;
+    let recipient = create_test_actor(&app, "list_status_recipient").await;
+    let origin = create_test_actor(&app, "list_status_origin").await;
     let status_id = create_test_status(&app, recipient).await;
 
     seed_notification(
@@ -387,8 +387,8 @@ async fn list_null_status_for_follow_kinds() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
 
-    let recipient = create_test_actor(&app, "list-follow-null-recipient").await;
-    let origin = create_test_actor(&app, "list-follow-null-origin").await;
+    let recipient = create_test_actor(&app, "list_follow_null_recipient").await;
+    let origin = create_test_actor(&app, "list_follow_null_origin").await;
 
     seed_notification(
         &app,
@@ -425,8 +425,8 @@ async fn show_returns_the_notification_for_its_own_recipient() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
 
-    let recipient = create_test_actor(&app, "show-recipient").await;
-    let origin = create_test_actor(&app, "show-origin").await;
+    let recipient = create_test_actor(&app, "show_recipient").await;
+    let origin = create_test_actor(&app, "show_origin").await;
     let notification_id = seed_notification(
         &app,
         recipient,
@@ -453,9 +453,9 @@ async fn show_404_for_another_recipients_notification() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
 
-    let recipient = create_test_actor(&app, "show-other-recipient").await;
-    let owner = create_test_actor(&app, "show-owner").await;
-    let origin = create_test_actor(&app, "show-other-origin").await;
+    let recipient = create_test_actor(&app, "show_other_recipient").await;
+    let owner = create_test_actor(&app, "show_owner").await;
+    let origin = create_test_actor(&app, "show_other_origin").await;
     let notification_id = seed_notification(
         &app,
         owner,
@@ -477,7 +477,7 @@ async fn show_404_for_another_recipients_notification() {
 async fn show_404_for_a_nonexistent_notification() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
-    let recipient = create_test_actor(&app, "show-nonexistent-recipient").await;
+    let recipient = create_test_actor(&app, "show_nonexistent_recipient").await;
 
     let err = service
         .show(&ctx_for(recipient), app.runtime.ids.next_id())
@@ -495,8 +495,8 @@ async fn dismiss_excludes_from_subsequent_show_and_list() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
 
-    let recipient = create_test_actor(&app, "dismiss-recipient").await;
-    let origin = create_test_actor(&app, "dismiss-origin").await;
+    let recipient = create_test_actor(&app, "dismiss_recipient").await;
+    let origin = create_test_actor(&app, "dismiss_origin").await;
     let notification_id = seed_notification(
         &app,
         recipient,
@@ -534,9 +534,9 @@ async fn dismiss_404_for_another_recipients_notification() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
 
-    let recipient = create_test_actor(&app, "dismiss-other-recipient").await;
-    let owner = create_test_actor(&app, "dismiss-owner").await;
-    let origin = create_test_actor(&app, "dismiss-other-origin").await;
+    let recipient = create_test_actor(&app, "dismiss_other_recipient").await;
+    let owner = create_test_actor(&app, "dismiss_owner").await;
+    let origin = create_test_actor(&app, "dismiss_other_origin").await;
     let notification_id = seed_notification(
         &app,
         owner,
@@ -558,7 +558,7 @@ async fn dismiss_404_for_another_recipients_notification() {
 async fn dismiss_404_for_a_nonexistent_notification() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
-    let recipient = create_test_actor(&app, "dismiss-nonexistent-recipient").await;
+    let recipient = create_test_actor(&app, "dismiss_nonexistent_recipient").await;
 
     let err = service
         .dismiss(&ctx_for(recipient), app.runtime.ids.next_id())
@@ -574,8 +574,8 @@ async fn clear_dismisses_every_notification_for_the_recipient() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
 
-    let recipient = create_test_actor(&app, "clear-recipient").await;
-    let origin = create_test_actor(&app, "clear-origin").await;
+    let recipient = create_test_actor(&app, "clear_recipient").await;
+    let origin = create_test_actor(&app, "clear_origin").await;
     seed_notification(
         &app,
         recipient,
@@ -615,7 +615,7 @@ async fn clear_dismisses_every_notification_for_the_recipient() {
 async fn clear_succeeds_when_the_recipient_has_no_notifications() {
     let app = spawn_test_app().await;
     let service = build_service(&app);
-    let recipient = create_test_actor(&app, "clear-empty-recipient").await;
+    let recipient = create_test_actor(&app, "clear_empty_recipient").await;
 
     service
         .clear(&ctx_for(recipient))
