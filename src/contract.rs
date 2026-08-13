@@ -58,7 +58,7 @@
 //! Requirement 9.3's "reproducible golden" guarantee instead comes from
 //! *how* a calling contract test produces `actual_json` before handing it
 //! to [`assert_golden`]: by generating it from a
-//! [`crate::test_harness::spawn_test_app`]-booted instance, whose
+//! `crate::test_harness::spawn_test_app`-booted instance, whose
 //! `RuntimeContext` is always [`crate::runtime::RuntimeContext::deterministic`]
 //! with a fixed seed (see `src/test_harness.rs`'s own doc comment,
 //! "Deterministic injection"). `tests/contract_harness_it.rs` proves

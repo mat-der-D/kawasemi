@@ -434,7 +434,7 @@ impl FederationModule {
 /// one via [`ReqwestFederationHttpClient::new`] (this function itself used
 /// to do exactly that internally, before this parameter existed — behavior
 /// for those callers is unchanged), while
-/// [`crate::federation::test_harness::spawn_federation_pair`] passes one
+/// `crate::federation::test_harness::spawn_federation_pair` passes one
 /// built via [`ReqwestFederationHttpClient::insecure_loopback`] instead, so
 /// its two paired, plain-HTTP-served instances can actually reach each
 /// other's `https://{domain}/...` URLs (see `insecure_loopback`'s own doc

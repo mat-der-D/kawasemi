@@ -87,7 +87,7 @@ impl OauthModule {
     /// (`src/server.rs`) never terminates TLS itself, and a typical
     /// single-owner deployment sits behind a reverse proxy that may or may
     /// not do so — so callers ([`crate::bootstrap::bootstrap`],
-    /// [`crate::test_harness::spawn_test_app`]) pass this explicitly rather
+    /// `crate::test_harness::spawn_test_app`) pass this explicitly rather
     /// than this constructor guessing. See `src/bootstrap.rs`'s call site
     /// for the documented production default and the accompanying CONCERN.
     pub fn new(

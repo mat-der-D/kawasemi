@@ -38,5 +38,13 @@ pub mod social_graph;
 pub mod state;
 pub mod statuses;
 pub mod telemetry;
+// The harness carries fixed test-only credentials (a fixed KEK, a fixed owner
+// passphrase, a fixed token-hash key) and a hard-coded test database URL, so it
+// must never be compiled into a distributed artifact. Gating the module
+// declaration keeps the whole subtree -- including its constants and its
+// `sweep`/`reaper`/`db_fixture` children -- out of a plain `cargo build`, while
+// `cargo test` (via `test`) and `tests/*` (via the self dev-dependency that
+// enables `test-harness`) still see it.
+#[cfg(any(test, feature = "test-harness"))]
 pub mod test_harness;
 pub mod timelines;

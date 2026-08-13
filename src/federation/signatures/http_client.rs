@@ -188,7 +188,7 @@ impl ReqwestFederationHttpClient {
     /// 13.3, 13.4).
     ///
     /// [`crate::federation::urls::ActorUrls`] hardcodes `https://{domain}/...`
-    /// for every URL it builds, and [`crate::federation::test_harness::spawn_federation_pair`]
+    /// for every URL it builds, and `crate::federation::test_harness::spawn_federation_pair`
     /// serves each paired instance over plain HTTP on a real loopback
     /// `127.0.0.1:PORT` listener (mirroring `crate::test_harness::spawn_test_app`'s
     /// own plain-HTTP serving) with `domain` set to that instance's own
