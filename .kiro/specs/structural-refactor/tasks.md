@@ -228,7 +228,7 @@
   - _Requirements: 7.1, 7.2, 7.3, 7.5_
   - _Boundary: compose_modules_
 
-- [ ] 6.2 本番起動経路を合成関数に移行する
+- [x] 6.2 本番起動経路を合成関数に移行する
   - 本番の状態構築から配線部分を削除し、合成関数の呼び出しに置き換える。設定読み込み・接続プール・マイグレーション・アクター配線・実リスナーでの待ち受けとシャットダウン処理は残す
   - バックグラウンドタスクは本番の OS シャットダウン信号で spawn する
   - 完了状態：本番経路に配線シーケンスの複製が残っておらず、起動ライフサイクルの既存テストがグリーン
@@ -469,3 +469,11 @@
 - **フルスイート実行はこの環境で複数エージェントが同時に DB を使うと信頼できない。**
   `--test-threads=2` でも同時実行が重なると `PoolTimedOut` が数百件単位で出る（コードの問題ではない）。
   対処：モジュール単位（`statuses::` 等）で実行し、フルスイートは全並行作業が止まっている時にのみ判定材料にする。
+- **task 6.2: 本番起動経路の配線を `compose_modules` に置き換え、`bootstrap.rs` から重複を除去した。**
+  挙動同一性の 3 点（HTTP クライアント共有・`ActorDirectory` 共有・cadence）はレビューで実測確認済み
+  （[[kawasemi-structural-refactor-progress]] の task 6.1 の記録と同じ根拠）。background task の
+  spawn 順序が「11 段階完了後にまとめて」に変わったが、リスナー bind より前である点は変わらず
+  観測不能。`compose_modules` の `Result<_, AppError>` は既存の `BootstrapError::KeySupply` に
+  素通しされる（誤った variant 名だが、配線段階自体は現状失敗し得ないため到達不能。将来配線が
+  失敗し得るようになったら `BootstrapError::Wiring` を追加すること）。
+  `pub(crate) mod wiring;` の `#[allow(dead_code)]` はこのタスクで削除。

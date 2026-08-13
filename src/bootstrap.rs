@@ -86,10 +86,7 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
-use crate::accounts;
-use crate::accounts::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
 use crate::actor;
-use crate::actor::ActorDirectory;
 use crate::actor::ActorModule;
 use crate::actor::keys::cache::KeyCache;
 use crate::actor::keys::cipher::{ChaCha20Poly1305KeyCipher, KeyCipher};
@@ -97,42 +94,23 @@ use crate::actor::keys::provider::DbSigningKeyProvider;
 use crate::config::{self, AppConfig, ConfigError};
 use crate::db::{self, DbError};
 use crate::error::AppError;
-use crate::federation::inbound::InboundActivityDispatcher;
 use crate::federation::signatures::ReqwestFederationHttpClient;
-use crate::federation::{self, FederationWiringConfig};
-use crate::media;
 use crate::migrate::{self, MigrateError};
-use crate::notifications;
-use crate::oauth::OauthModule;
 use crate::runtime::{RuntimeContext, SnowflakeIdGenerator, SystemClock, SystemRng};
-use crate::search;
 use crate::server::{self, ServeError};
-use crate::social_graph;
 use crate::state::AppState;
-use crate::statuses::notification_sink::NotificationSinkRegistry;
-use crate::statuses::{self, ProdRemoteActorResolver};
 use crate::telemetry::{self, TelemetryError};
-use crate::timelines;
+
+use self::wiring::{ComposedModules, FederationPollCadence, ModuleWiringInput, compose_modules};
 
 #[cfg(test)]
 mod tests;
 
 /// The single implementation of the module-wiring sequence
-/// (structural-refactor task 6.1, Requirements 7.1, 7.2, 7.3, 7.5). Not yet
-/// called from [`build_state`] below — tasks 6.2/6.3/6.4 migrate this
-/// module's own `build_state`, `crate::test_harness::spawn_test_app`, and
-/// `crate::federation::test_harness::spawn_paired_instance` onto it.
-///
-/// Until those three tasks land, nothing calls into this module, so
-/// `dead_code` is allowed for it as a whole (`pub(crate)` alone does not
-/// silence the lint, and this crate builds with `-D warnings`). The allow is
-/// scoped to this one `mod` declaration — the single line task 6.2 deletes
-/// once the first real caller exists — rather than being scattered over the
-/// module's individual items.
-#[allow(
-    dead_code,
-    reason = "wired into the three startup paths by tasks 6.2/6.3/6.4; task 6.1 only extracts it"
-)]
+/// (structural-refactor task 6.1, Requirements 7.1, 7.2, 7.3, 7.5), called
+/// from [`build_state`] below (task 6.2) as well as from
+/// `crate::test_harness::spawn_test_app` and
+/// `crate::federation::test_harness::spawn_paired_instance` (tasks 6.3/6.4).
 pub(crate) mod wiring;
 
 /// Aggregated startup failure (design.md's Bootstrap Service Interface,
@@ -371,360 +349,105 @@ async fn build_state() -> Result<AppState, BootstrapError> {
     // `AppState` now carries.
     let (runtime, actor_module) = build_actor_wiring(&pool, &cfg).await?;
 
-    // Assembles the OAuth service bundle (task 7.1, api-foundation's
-    // Requirements 1.1, 2.1, 3.1, 5.1): builds the one shared `OauthService`
-    // from the same `pool`/`runtime` every other composition-root component
-    // shares, plus the startup-configured `oauth.token_hash_key`/
-    // `owner.password` secrets (task 1.2) `OauthModule` needs.
+    // Runs the module-wiring sequence itself — the single implementation
+    // shared by all three startup paths (`self::wiring::compose_modules`,
+    // task 6.2, Requirements 7.1, 7.5, 7.6). Everything above this line is
+    // what deliberately stays here because it is genuinely production-
+    // specific (real config from the environment, a real pool, migrations,
+    // the real KEK-bound key supply) — and everything below it is the
+    // background-task spawn and the listener, which differ per path too.
     //
-    // CONCERN (documented judgment call): `cookie_secure` is hardcoded to
-    // `false` here. design.md's Security Considerations call for the
+    // CONCERN carried over from this call site's previous inline wiring
+    // (documented judgment call): the OAuth module's `cookie_secure` is
+    // hardcoded to `false` — see `wiring::compose_modules`'s stage 1, which
+    // now owns that call. design.md's Security Considerations call for the
     // owner-session cookie's `Secure` attribute "TLS 配信時" (when served
     // over TLS), but `AppConfig`/`ServerConfig` (`src/config.rs`) has no
-    // TLS-termination setting at all — this crate's own HTTP listener
-    // (`src/server.rs`) never terminates TLS itself, and Modified Files for
-    // this task does not list `src/config.rs`, so adding one is out of this
-    // task's boundary. `false` is the conservative choice: a single-owner
-    // instance commonly sits behind a reverse proxy terminating TLS in
-    // front of a plain-HTTP origin, and a `Secure` cookie would silently
-    // break owner login entirely on such a deployment (browsers refuse to
-    // send `Secure` cookies over a plain-HTTP connection), whereas omitting
-    // `Secure` only weakens (not breaks) a deployment that *is* served
-    // directly over TLS. A future task adding TLS-awareness to
-    // `ServerConfig` should flip this to that setting instead of a fixed
-    // constant.
-    let oauth_module = OauthModule::new(
-        pool.clone(),
-        runtime.clone(),
-        cfg.oauth.token_hash_key.clone(),
-        cfg.owner.clone(),
-        false,
-    );
+    // TLS-termination setting at all, and this crate's own HTTP listener
+    // (`src/server.rs`) never terminates TLS itself. `false` is the
+    // conservative choice: a single-owner instance commonly sits behind a
+    // reverse proxy terminating TLS in front of a plain-HTTP origin, and a
+    // `Secure` cookie would silently break owner login entirely on such a
+    // deployment (browsers refuse to send `Secure` cookies over a
+    // plain-HTTP connection), whereas omitting `Secure` only weakens (not
+    // breaks) a deployment that *is* served directly over TLS. A future
+    // task adding TLS-awareness to `ServerConfig` should flip this to that
+    // setting instead of a fixed constant.
+    //
+    // The `?` below converts `compose_modules`' `AppError` through this
+    // module's existing `From<AppError>` impl, i.e. into
+    // `BootstrapError::KeySupply`. That is not a misreport today: no stage of
+    // the wiring sequence is fallible, so `compose_modules` always returns
+    // `Ok` (see its own "# Errors" section — the `Result` exists only so a
+    // future fallible stage does not have to change every call site). If such
+    // a stage is ever added, `BootstrapError` needs its own `Wiring` variant
+    // at that point.
+    let ComposedModules {
+        oauth,
+        federation,
+        media,
+        accounts,
+        statuses,
+        social_graph,
+        timelines,
+        notifications,
+        search,
+        federation_background,
+        media_background,
+    } = compose_modules(ModuleWiringInput {
+        pool: pool.clone(),
+        runtime: runtime.clone(),
+        actor_module: &actor_module,
+        config: &cfg,
+        // Production shares one `ReqwestFederationHttpClient` across every
+        // consumer `compose_modules` wires, instead of the four independent
+        // instances this function used to build. The HTTP requests emitted
+        // are unchanged; only the underlying connection pool is now shared
+        // (see `wiring`'s own doc comment, "Shared federation HTTP client").
+        http_client: Arc::new(ReqwestFederationHttpClient::new()),
+        // Identical to what `FederationWiringConfig::production` used to
+        // install at this call site (`DEFAULT_DELIVERY_POLL_INTERVAL` /
+        // `DEFAULT_DELIVERY_POLL_BATCH_SIZE` / `DEFAULT_PRUNING_INTERVAL`).
+        federation_cadence: FederationPollCadence::production(),
+    })
+    .await?;
 
-    // Assembles statuses-core's own `RemoteActorResolver` (task 7.2,
-    // `_Boundary: StatusesModule, server, bootstrap, config_`) *before*
-    // `federation::build_federation_module` runs: `register_status_handlers`
-    // must be called from inside that function's own registration point,
-    // before its `InboxService::new` call — see that function's own doc
-    // comment. `RemoteAccountFetcher` needs only `pool`/`runtime` (already
-    // available here) plus its own, separately-constructed
-    // `ReqwestFederationHttpClient` (mirroring `accounts_module`'s own
-    // instance further below, never the same `Arc` `federation_module`'s own
-    // client uses).
-    let statuses_remote_actor_fetcher = Arc::new(RemoteAccountFetcher::new(
-        pool.clone(),
-        Arc::new(ReqwestFederationHttpClient::new()),
-        runtime.clone(),
-        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
-    ));
-    let statuses_remote_actor_resolver = Arc::new(ProdRemoteActorResolver::new(
-        cfg.server.domain.clone(),
-        Arc::new(ActorDirectory::new(pool.clone())),
-        statuses_remote_actor_fetcher,
-    ));
-
-    // Task 10.2: built here — *before* `federation::build_federation_module`
-    // runs `register_downstream_handlers` (which needs its own clone) — so
-    // the exact same `NotificationSinkRegistry` instance also reaches
-    // `statuses::build_statuses_module` below (`StatusService`/
-    // `InteractionService`'s own task-9.2 local-origin emit sink). A single
-    // future notifications bootstrap's `set_sink` call then reaches every
-    // emit call site, local- and remote-origin alike, at once — see
-    // `statuses::build_statuses_module`'s own doc comment.
-    let notifications = NotificationSinkRegistry::new();
-
-    // Assembles social-graph's own `RemoteAccountFetcher` (task 5.2,
-    // `_Boundary: SocialGraphModule_`) the same way `statuses_remote_actor_fetcher`
-    // immediately above does — *before* `federation::build_federation_module`
-    // runs, since `social_graph::register_downstream_handlers` (registering
-    // `SocialGraphInboundHandler` against the live `InboundActivityDispatcher`,
-    // Requirement 7.1) must be composed into that function's own
-    // `register_downstream` closure before it runs (see
-    // `src/federation/module.rs`'s own doc comment, "DOWNSTREAM DISPATCHER
-    // REGISTRATION POINT"). Shared afterward with `build_social_graph_module`'s
-    // own `BlockPolicyImpl` construction below, so both this instance's
-    // signer-resolution call sites reuse the same `RemoteAccountFetcher`
-    // cache.
-    let social_graph_remote_actor_fetcher = Arc::new(RemoteAccountFetcher::new(
-        pool.clone(),
-        Arc::new(ReqwestFederationHttpClient::new()),
-        runtime.clone(),
-        DEFAULT_REMOTE_ACCOUNT_CACHE_TTL,
-    ));
-    let (social_graph_register_downstream, social_graph_pending_delivery) =
-        social_graph::register_downstream_handlers(
-            pool.clone(),
-            runtime.clone(),
-            cfg.server.domain.clone(),
-            Arc::clone(actor_module.directory()),
-            Arc::clone(&social_graph_remote_actor_fetcher),
-            notifications.clone(),
-        );
-
-    // Assembles the federation-core port bundle (task 5.4, Requirements 7.3,
-    // 10.1, 11.1, 11.2): every federation-core port constructed with one
-    // concrete production type (`crate::federation::build_federation_module`),
-    // using the same `pool`/`runtime` every other composition-root component
-    // shares and `actor_module`'s own `ActorDirectory` handle (federation-core
-    // needs handle resolution across several ports; never reconstructs its
-    // own directory independently). `FederationWiringConfig::production`
-    // converts `cfg.federation`'s `std::time::Duration` fields into the
-    // `time::Duration` federation-core's own components take throughout, and
-    // supplies this module's own choice of background-task poll/prune
-    // cadence (design.md names no numeric value for either — see
-    // `FederationWiringConfig::production`'s own doc comment). The final
-    // argument (task 7.2's own addition) registers statuses-core's six
-    // post-related inbound handlers against the live dispatcher (Requirement
-    // 14.1) — see `statuses::register_downstream_handlers`'s own doc
-    // comment.
-    let (federation_module, federation_background) = federation::build_federation_module(
-        pool.clone(),
-        runtime.clone(),
-        Arc::clone(actor_module.directory()),
-        FederationWiringConfig::production(
-            cfg.server.domain.clone(),
-            cfg.federation.secure_mode,
-            time::Duration::seconds(cfg.federation.public_key_cache_ttl.as_secs() as i64),
-            time::Duration::days(cfg.federation.received_activity_retention_days as i64),
-        ),
-        Arc::new(ReqwestFederationHttpClient::new()),
-        {
-            // Composes both specs' own registration closures into the one
-            // `register_downstream` call `build_federation_module` accepts
-            // (`src/federation/module.rs`'s own doc comment, "Downstream
-            // registration surface": "同じ closure 内で両 spec の
-            // register_*_handlers を順に呼ぶ").
-            let statuses_register = statuses::register_downstream_handlers(
-                pool.clone(),
-                runtime.clone(),
-                cfg.server.domain.clone(),
-                statuses_remote_actor_resolver,
-                notifications.clone(),
-            );
-            move |dispatcher: &mut InboundActivityDispatcher| {
-                statuses_register(dispatcher);
-                social_graph_register_downstream(dispatcher);
-            }
-        },
-    );
     // Starts the delivery-worker poll loop and received-Activity pruning
     // loop as detached background tasks (never awaited here) — this call
     // returns immediately, so it does not delay `bootstrap()`'s own listener
     // bind below (Requirement: background tasks must not block startup).
     federation_background.spawn();
 
-    // Task 5.2: fills in the `SocialGraphInboundHandler`'s deferred delivery
-    // cell now that a real `Arc<ConcreteDeliveryService>` finally exists —
-    // see `social_graph::PendingDeliveryService`'s own doc comment for why
-    // this could not happen any earlier. Strictly before the HTTP listener
-    // starts serving (this function's own `serve_with_shutdown*` call is
-    // still several steps away), so no real inbound request can ever
-    // observe an unresolved cell.
-    social_graph_pending_delivery.resolve(Arc::clone(federation_module.delivery_service()));
-
-    // Assembles the media-pipeline module bundle (task 5.2, Requirements
-    // 1.1, 4.1, 9.5): builds the repository/queue/store/processor/service
-    // wiring (`crate::media::build_media_module`) from this same
-    // `pool`/`runtime`/`cfg.media` every other composition-root component
-    // shares, then starts its resident `ProcessingWorker` pool
+    // Starts the media pipeline's resident `ProcessingWorker` pool
     // (`MediaConfig::worker_concurrency` workers) as detached background
-    // tasks — mirroring `federation_background.spawn()`'s own "never blocks
-    // this function's own startup" contract immediately above. Each
-    // worker's own shutdown signal is `server::os_shutdown_signal` itself
-    // (now `pub(crate)` for exactly this reuse) passed directly as the
-    // signal factory — see `MediaBackgroundWorkers::spawn`'s own doc comment
-    // for why calling it once per worker (plus once more, independently,
-    // inside `serve_with_shutdown`'s own call below) observes the same real
-    // OS shutdown event without needing a broadcast/watch channel to fan one
-    // signal out to several tasks.
-    let (media_module, media_background) =
-        media::build_media_module(pool.clone(), runtime.clone(), cfg.media.clone());
+    // tasks, mirroring `federation_background.spawn()`'s own "never blocks
+    // this function's own startup" contract immediately above. Each worker's
+    // own shutdown signal is `server::os_shutdown_signal` itself (`pub(crate)`
+    // for exactly this reuse) passed directly as the signal factory — see
+    // `MediaBackgroundWorkers::spawn`'s own doc comment for why calling it
+    // once per worker (plus once more, independently, inside
+    // `serve_with_shutdown`'s own call below) observes the same real OS
+    // shutdown event without needing a broadcast/watch channel to fan one
+    // signal out to several tasks. This is the production-specific half of
+    // `compose_modules`' "return the handles, never spawn them" contract
+    // (Requirement 7.5); the two test harnesses spawn against a signal that
+    // never resolves instead.
     media_background.spawn(server::os_shutdown_signal);
-
-    // Assembles the accounts-and-instance Composition Root wiring (task 5.1,
-    // Requirements 2.1, 3.1, 3.2, 3.3, 10.1, 10.5): defaults task 1.3's
-    // `AccountPortsRegistry` to its built-in safe implementations
-    // (`EmptyStatusesProvider`/`NoRelationshipProvider`/`ZeroCountsProvider`)
-    // and builds the real `AccountService` (task 5.1) via
-    // `crate::accounts::build_accounts_module`, sharing this same
-    // `pool`/`runtime`/`cfg.server.domain`/`actor_module`'s `ActorDirectory`/
-    // `media_module`'s `LocalFsStore` every other composition-root component
-    // above already shares. Uses its own, separately-constructed
-    // `ReqwestFederationHttpClient` (mirroring `federation_module`'s own
-    // instance immediately above) rather than threading the same `Arc`
-    // through both — this task does not touch `federation::build_federation_module`'s
-    // own call site to add a second consumer of its client. No background
-    // task to spawn here — unlike `federation_background`/`media_background`
-    // above, this bundle owns no resident worker.
-    let accounts_module = accounts::build_accounts_module(
-        pool.clone(),
-        runtime.clone(),
-        cfg.server.domain.clone(),
-        Arc::clone(actor_module.directory()),
-        Arc::new(ReqwestFederationHttpClient::new()),
-        media_module.store().clone(),
-        media_module.service(),
-        cfg.media.clone(),
-    );
-
-    // Assembles the statuses-core module bundle (task 7.2, Requirements 4.3,
-    // 14.1): builds `StatusService`/`InteractionService`/`PollService`
-    // (`crate::statuses::build_statuses_module`) sharing this same
-    // `pool`/`runtime`/`cfg.server.domain` every other composition-root
-    // component above already shares, and `federation_module`'s own
-    // `Arc<ConcreteDeliveryService>` handle (`StatusActivityBuilder`'s only
-    // delivery path — see `activity_builder.rs`'s own doc comment on why
-    // this field is now an `Arc`). No background task to spawn here —
-    // mirrors `accounts_module`'s own "no resident worker" precedent. Passes
-    // this same `notifications` instance (task 10.2) already handed to
-    // `register_downstream_handlers` above, so `StatusService`/
-    // `InteractionService`'s local-origin emit sites and
-    // `inbound_handlers.rs`'s remote-origin ones share one registry.
-    let statuses_module = statuses::build_statuses_module(
-        pool.clone(),
-        runtime.clone(),
-        cfg.server.domain.clone(),
-        Arc::clone(federation_module.delivery_service()),
-        notifications.clone(),
-    );
-
-    // Supplies statuses-core's own real implementations of the two
-    // accounts-and-instance-owned delegation ports (task 9.1, Requirements
-    // 6.1, 7.1), replacing `accounts_module`'s built-in
-    // `EmptyStatusesProvider`/`ZeroCountsProvider` defaults — see
-    // `statuses::register_account_ports`'s own doc comment. Must run after
-    // `accounts_module` (for `ports()`/`service()`), `media_module` (for
-    // `store()`), and `statuses_module` (for `relationship_query_registry()`
-    // — feature-level `kiro-validate-impl` remediation round 1 follow-up,
-    // 2026-07-31, so `AccountStatusesProviderImpl::visible_to` consults the
-    // same live registry every other statuses-core consumer already does)
-    // above.
-    statuses::register_account_ports(
-        pool.clone(),
-        runtime.clone(),
-        cfg.server.domain.clone(),
-        accounts_module.ports(),
-        accounts_module.service(),
-        media_module.store().clone(),
-        statuses_module.relationship_query_registry(),
-    );
-
-    // Assembles the social-graph module bundle (task 5.2, Requirements 6.1,
-    // 8.2, 10.1) the same way `bootstrap()`'s production path assembles
-    // every other bundle above (`social_graph::build_social_graph_module`),
-    // sharing this same `pool`/`runtime`/`cfg.server.domain`/
-    // `actor_module`'s own `ActorDirectory`/`social_graph_remote_actor_fetcher`
-    // every other composition-root component above already shares, plus
-    // `federation_module`'s own `Arc<ConcreteDeliveryService>` and its live
-    // `BlockPolicyRegistry` (task 5.2's own addition to
-    // `src/federation/module.rs`), `statuses_module`'s own live
-    // `RelationshipQueryRegistry` (feature-level `kiro-validate-impl`
-    // remediation round 1, 2026-07-31 — must run after `statuses_module` is
-    // already built, immediately above), `accounts_module`'s own
-    // `AccountPortsRegistry`/`AccountService` handles, and this same
-    // `notifications` registry every other module above shares. Must run
-    // after `statuses::register_account_ports` immediately above, so this
-    // call's own `AccountCountsProvider` registration (a composed value —
-    // see `social_graph::CombinedAccountCountsProvider`'s own doc comment)
-    // is the last one, and therefore the one actually observed. No
-    // background task to spawn here — mirrors `accounts_module`'s own "no
-    // resident worker" precedent.
-    let social_graph_module = social_graph::build_social_graph_module(
-        pool.clone(),
-        runtime.clone(),
-        cfg.server.domain.clone(),
-        Arc::clone(actor_module.directory()),
-        social_graph_remote_actor_fetcher,
-        Arc::clone(federation_module.delivery_service()),
-        federation_module.block_policy(),
-        &statuses_module.relationship_query_registry(),
-        accounts_module.ports(),
-        accounts_module.service(),
-        notifications.clone(),
-    );
-
-    // Assembles the timelines module bundle (task 5.2, Requirements 8.1,
-    // 8.3) the same way `bootstrap()`'s production path assembles every
-    // other bundle above (`timelines::build_timelines_module`), sharing this
-    // same `pool`/`runtime` and `accounts_module`'s own `AccountService`/
-    // `media_module`'s own `LocalFsStore` handles (`StatusHydrator`'s
-    // account/media dependencies) — mirrors `statuses_module`'s own
-    // identical "no background task to spawn" precedent.
-    let timelines_module = timelines::build_timelines_module(
-        pool.clone(),
-        runtime.clone(),
-        accounts_module.service(),
-        media_module.store().clone(),
-    );
-
-    // Assembles the notifications module bundle (task 4.2, Requirements
-    // 5.4, 5.5, 9.1) the same way `bootstrap()`'s production path assembles
-    // every other bundle above (`notifications::build_notification_module`),
-    // sharing this same `pool`/`runtime`/`cfg.server.domain`/
-    // `accounts_module`'s own `AccountService`/`media_module`'s own
-    // `LocalFsStore` handles (`NotificationService`'s own `account`/`status`
-    // embed dependencies), and this same `notifications` registry every
-    // upstream module above already shares — this call's own `set_sink`
-    // replaces its built-in `NoopSink` default with the real event sink
-    // (task 3.1), reaching every local-/remote-origin emit call site
-    // `statuses_module`/`social_graph_module` above already hold a clone of
-    // (Requirement 5.4). No background task to spawn here — mirrors
-    // `accounts_module`'s own "no resident worker" precedent.
-    let notification_module = notifications::build_notification_module(
-        pool.clone(),
-        runtime.clone(),
-        cfg.server.domain.clone(),
-        accounts_module.service(),
-        media_module.store().clone(),
-        notifications,
-    );
-
-    // Assembles the search module bundle (task 5.3, Requirements 7.3, 7.4,
-    // 8.1, 8.4, 9.4) the same way `bootstrap()`'s production path assembles
-    // every other bundle above (`search::build_search_module`): wires the
-    // default, extension-free `PgSearchBackend` (Requirement 7.3) against
-    // this same `pool`/`runtime` every other composition-root component
-    // shares, sharing `actor_module`'s own `ActorDirectory` handle
-    // (mirroring `statuses_remote_actor_resolver`'s own identical
-    // `directory` argument above) while building its own, separately
-    // constructed `ReqwestFederationHttpClient`/`RemoteAccountFetcher`
-    // instance (mirroring `accounts_module`'s/`statuses_remote_actor_fetcher`'s
-    // own "never the same `Arc` another spec's own client uses" precedent —
-    // see `crate::search::build_search_module`'s own doc comment), and
-    // `accounts_module`'s own `AccountService`/`AccountPortsRegistry`,
-    // `media_module`'s own `LocalFsStore`, and `statuses_module`'s own live
-    // `RelationshipQueryRegistry` — the same three handles
-    // `crate::notifications::build_notification_module`/
-    // `statuses::register_account_ports` above already share. Must run
-    // after `accounts_module`/`media_module`/`statuses_module` (for
-    // `service()`/`ports()`/`store()`/`relationship_query_registry()`) are
-    // already built, immediately above. No background task to spawn here —
-    // mirrors `accounts_module`'s own "no resident worker" precedent.
-    let search_module = search::build_search_module(
-        pool.clone(),
-        runtime.clone(),
-        cfg.server.domain.clone(),
-        Arc::clone(actor_module.directory()),
-        accounts_module.service(),
-        accounts_module.ports(),
-        media_module.store().clone(),
-        statuses_module.relationship_query_registry(),
-    );
 
     Ok(AppState::new(
         pool,
         runtime,
         cfg,
         actor_module,
-        oauth_module,
-        federation_module,
-        media_module,
-        accounts_module,
-        statuses_module,
-        social_graph_module,
-        timelines_module,
-        notification_module,
-        search_module,
+        oauth,
+        federation,
+        media,
+        accounts,
+        statuses,
+        social_graph,
+        timelines,
+        notifications,
+        search,
     ))
 }
 
