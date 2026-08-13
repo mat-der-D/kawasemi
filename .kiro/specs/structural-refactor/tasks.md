@@ -555,3 +555,17 @@
 - **task 3.7 のカバレッジについてユーザー判断：現状（2経路の直接比較＋構造的保証）を受け入れる。**
   5経路すべてが単一の `StatusRenderAssembler` へ委譲していることはコード構造で確認済み。
   5経路横断の契約テストは追加しない。
+- **feature 検証（/kiro-validate-impl）で判明した未記録の interface 変更 3 件（挙動は健全・テストで担保済み、記録漏れのみ）**
+  1. task 3.1：`ResolvedReblog { index, target }` は design.md のピン止めどおりには実装されず、
+     `assemble_many` は `reblog_targets: &[Option<Status>]` を位置対応で受ける形になった
+     （`render_assembler.rs:320-330`、`assert_eq!` で対応関係を構造的に強制）。挙動同値でむしろ
+     index-out-of-range が構造的に不可能になっている
+  2. task 3.1：`PollResolver::resolve_many` の戻り値が design.md ピン止めの `HashMap<Id, (Poll, PollTally)>`
+     ではなく `Vec<(Id, Poll, PollTally)>`（`PollResolution<'a>` エイリアス、`render_assembler.rs:111-112`）。
+     「戻り値のキーは poll_ids の部分集合」という design.md の事後条件は保持されている
+  3. 絵文字食い違い修正（`d4717aa`/`282b336`）で `StatusRenderAssembler::render_poll`
+     （`render_assembler.rs:588`）が design.md の Service Interface に無い 7 番目の
+     `pub(crate)` メソッドとして追加された。投票エンドポイント 2 箇所から呼ばれる
+  いずれも design.md の Revalidation Trigger 2（「StatusRenderAssembler の入力契約が変わった場合」）に
+  該当するが、5 呼び出し元は task 3.2〜3.6・4.5 で実際に再検証・再テスト済みであり未テストの面はない。
+  今回 feature 検証で記録した。design.md 自体は編集しない（本 spec の制約どおり）。
