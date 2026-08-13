@@ -162,6 +162,38 @@
 //! against a cyclic `in_reply_to_id` chain (which should never occur from
 //! this repository's own writes, but is not assumed impossible) with a
 //! visited-id set.
+//!
+//! ## Task 5.1 additions
+//! [`insert_status`], [`attach_media`] and [`adjust_counts`] are generic over
+//! the executor they run against instead of taking a concrete `pool:
+//! &PgPool`. `StatusService::create_status` (task 5.2) must persist the post
+//! row, its media attachments, its poll, its tags and the parent's
+//! `replies_count` increment as **one** transaction (design.md, "複合書き込
+//! みのトランザクション境界（A-3 後）"; Requirement 6.3) — a genuine
+//! cross-statement atomicity need these functions cannot serve while pinned
+//! to a concrete `&PgPool` (a `PgPool` reference cannot join an already-open
+//! `sqlx::Transaction`). The change is purely additive: `&PgPool` itself
+//! satisfies both bounds used here, so **every existing call site compiles
+//! unchanged**; only a transaction-bound caller passes `&mut *tx` instead.
+//!
+//! Two different sqlx bounds are used, chosen per function rather than
+//! unified:
+//! - Single-statement writers ([`insert_status`], [`adjust_counts`]) take
+//!   `E: sqlx::PgExecutor<'e>`, this crate's established idiom (see
+//!   [`fetch_raw`] here, and `social_graph/repository.rs::delete_follow` for
+//!   the same task-2.2 precedent).
+//! - [`attach_media`] loops one `INSERT` per `media_id`, and a `PgExecutor`
+//!   is consumed by the single statement it drives. It therefore takes `A:
+//!   sqlx::Acquire<'a, Database = Postgres>` and acquires the connection
+//!   once, reusing the borrow across the loop — same emitted statements as
+//!   before, no transaction of its own added (see its own doc comment).
+//!
+//! The other writers here ([`apply_edit`], [`delete_status`],
+//! [`replace_media`], [`insert_mentions`], [`insert_remote_attachments`])
+//! keep their concrete `&PgPool` parameter: no composite write in task 5.2 or
+//! 5.3 needs them inside a shared transaction, and converting them
+//! speculatively would widen this task past its stated "purely additive"
+//! boundary.
 
 #[cfg(test)]
 mod tests;
@@ -362,7 +394,15 @@ async fn fetch_children(pool: &PgPool, parent_id: Id) -> Result<Vec<Status>, App
 ///
 /// A `statuses_uri_key` violation surfaces as a caller-facing (`ErrorKind::Client`)
 /// `409 Conflict` rather than a generic 5xx — see [`map_insert_error`].
-pub async fn insert_status(pool: &PgPool, status: &Status) -> Result<(), AppError> {
+///
+/// Generic over `executor` (this module's doc comment, "Task 5.1 additions")
+/// so `StatusService::create_status` can drive it against an open
+/// `sqlx::Transaction` (`&mut *tx`); every pre-existing caller keeps passing
+/// a bare `&PgPool` unchanged.
+pub async fn insert_status<'e, E>(executor: E, status: &Status) -> Result<(), AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     sqlx::query(
         "INSERT INTO statuses ( \
              id, actor_id, uri, url, content, visibility, sensitive, spoiler_text, \
@@ -391,7 +431,7 @@ pub async fn insert_status(pool: &PgPool, status: &Status) -> Result<(), AppErro
     .bind(status.local)
     .bind(status.created_at)
     .bind(status.edited_at)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(map_insert_error)?;
 
@@ -745,12 +785,21 @@ pub enum CountKind {
 ///
 /// A no-op (`Ok(())`, no error) when `id` matches no row — same "absence is
 /// not an error at this layer" convention as [`delete_status`].
-pub async fn adjust_counts(
-    pool: &PgPool,
+///
+/// Generic over `executor` (this module's doc comment, "Task 5.1 additions")
+/// so `StatusService`/`InteractionService` can drive it against an open
+/// `sqlx::Transaction` (`&mut *tx`) alongside the row write whose counter it
+/// adjusts (Requirement 6.3); every pre-existing caller keeps passing a bare
+/// `&PgPool` unchanged.
+pub async fn adjust_counts<'e, E>(
+    executor: E,
     id: Id,
     kind: CountKind,
     delta: i64,
-) -> Result<(), AppError> {
+) -> Result<(), AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let query = match kind {
         CountKind::Reblogs => {
             "UPDATE statuses SET reblogs_count = GREATEST(reblogs_count + $1, 0) WHERE id = $2"
@@ -766,7 +815,7 @@ pub async fn adjust_counts(
     sqlx::query(query)
         .bind(delta)
         .bind(id.as_i64())
-        .execute(pool)
+        .execute(executor)
         .await
         .map_err(map_server_error)?;
 
@@ -792,13 +841,34 @@ pub async fn adjust_counts(
 /// are responsible for having already verified each `media_id`'s ownership
 /// (`media_repository::find_owned`, media-pipeline's own contract) before
 /// calling this; this function only persists the association.
-pub async fn attach_media(pool: &PgPool, status_id: Id, media_ids: &[Id]) -> Result<(), AppError> {
+///
+/// Generic over `executor` (this module's doc comment, "Task 5.1 additions")
+/// so `StatusService::create_status` can drive it against an open
+/// `sqlx::Transaction` (`&mut *tx`); every pre-existing caller keeps passing
+/// a bare `&PgPool` unchanged. Unlike this module's single-statement writers
+/// the bound here is [`sqlx::Acquire`], not `sqlx::PgExecutor`: a
+/// `PgExecutor` is consumed by the single `execute` it drives, which cannot
+/// serve this function's per-`media_id` loop. Acquiring once and reusing the
+/// borrowed connection keeps the emitted statements byte-identical to the
+/// pre-task-5.1 loop (this is deliberately *not* wrapped in a transaction of
+/// its own — the previous pool-driven behavior had none, and task 5.2's
+/// caller supplies the enclosing one).
+pub async fn attach_media<'a, A>(
+    executor: A,
+    status_id: Id,
+    media_ids: &[Id],
+) -> Result<(), AppError>
+where
+    A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
+{
+    let mut conn = executor.acquire().await.map_err(map_server_error)?;
+
     for (position, media_id) in media_ids.iter().enumerate() {
         sqlx::query("INSERT INTO status_media (status_id, media_id, position) VALUES ($1, $2, $3)")
             .bind(status_id.as_i64())
             .bind(media_id.as_i64())
             .bind(position as i32)
-            .execute(pool)
+            .execute(&mut *conn)
             .await
             .map_err(map_server_error)?;
     }

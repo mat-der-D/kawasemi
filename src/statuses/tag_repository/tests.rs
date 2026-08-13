@@ -368,3 +368,72 @@ async fn tags_for_statuses_returns_empty_for_an_empty_slice_without_querying() {
 
     app.cleanup().await;
 }
+
+// -- executor genericity (task 5.1) ----------------------------------------
+
+/// Task 5.1 / Requirement 6.3: [`upsert_tag`] and [`associate_tag`] accept an
+/// open transaction, and rolling that transaction back leaves neither the
+/// `tags` row nor the `status_tags` association behind — the property
+/// `StatusService::create_status` (task 5.2) needs so a failed post creation
+/// cannot strand tag rows.
+#[tokio::test]
+async fn tag_writes_accept_a_transaction_and_roll_back_together() {
+    let app = spawn_test_app().await;
+    let status = insert_test_status(&app).await;
+    let tag = sample_tag(&app, "rollbacktag");
+
+    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    let created = upsert_tag(&mut *tx, &tag)
+        .await
+        .expect("upsert_tag must succeed against a transaction");
+    associate_tag(&mut *tx, status.id, created.id)
+        .await
+        .expect("associate_tag must succeed against a transaction");
+    tx.rollback().await.expect("rollback must succeed");
+
+    let found = find_tag_by_name(&app.pool, "rollbacktag")
+        .await
+        .expect("find_tag_by_name must succeed");
+    assert!(
+        found.is_none(),
+        "a rolled-back upsert_tag must leave no row"
+    );
+
+    let associated = tags_for_status(&app.pool, status.id)
+        .await
+        .expect("tags_for_status must succeed");
+    assert!(
+        associated.is_empty(),
+        "a rolled-back associate_tag must leave no status_tags row"
+    );
+
+    app.cleanup().await;
+}
+
+/// The commit half of
+/// [`tag_writes_accept_a_transaction_and_roll_back_together`]: committed
+/// through a transaction, both functions persist exactly what the
+/// pool-driven path persists.
+#[tokio::test]
+async fn tag_writes_committed_through_a_transaction_persist_normally() {
+    let app = spawn_test_app().await;
+    let status = insert_test_status(&app).await;
+    let tag = sample_tag(&app, "committag");
+
+    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    let created = upsert_tag(&mut *tx, &tag)
+        .await
+        .expect("upsert_tag must succeed against a transaction");
+    associate_tag(&mut *tx, status.id, created.id)
+        .await
+        .expect("associate_tag must succeed against a transaction");
+    tx.commit().await.expect("commit must succeed");
+
+    assert_eq!(created, tag);
+    let associated = tags_for_status(&app.pool, status.id)
+        .await
+        .expect("tags_for_status must succeed");
+    assert_eq!(associated, vec![tag]);
+
+    app.cleanup().await;
+}

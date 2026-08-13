@@ -942,3 +942,107 @@ async fn batched_poll_reads_return_empty_for_an_empty_slice_without_querying() {
 
     app.cleanup().await;
 }
+
+// -- executor genericity (task 5.1) ----------------------------------------
+
+/// Task 5.1 / Requirement 6.3: [`insert_poll`] accepts an open transaction,
+/// and rolling that transaction back leaves neither the `polls` row nor its
+/// `poll_options` rows behind — the property `StatusService::create_status`
+/// (task 5.2) needs so a failed post creation cannot strand a poll.
+#[tokio::test]
+async fn insert_poll_accepts_a_transaction_and_rolls_back() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+    let status = insert_target_status(&app, actor_id).await;
+
+    let poll = Poll {
+        id: app.runtime.ids.next_id(),
+        status_id: status.id,
+        expires_at: None,
+        multiple: false,
+    };
+    let options = vec![
+        PollOption {
+            poll_id: poll.id,
+            idx: 0,
+            title: "ramen".to_string(),
+            votes_count: 0,
+        },
+        PollOption {
+            poll_id: poll.id,
+            idx: 1,
+            title: "curry".to_string(),
+            votes_count: 0,
+        },
+    ];
+
+    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    insert_poll(&mut *tx, &poll, &options)
+        .await
+        .expect("insert_poll must succeed against a transaction");
+    tx.rollback().await.expect("rollback must succeed");
+
+    let found = find_poll_by_id(&app.pool, poll.id)
+        .await
+        .expect("find_poll_by_id must succeed");
+    assert!(
+        found.is_none(),
+        "a rolled-back insert_poll must leave no row"
+    );
+
+    app.cleanup().await;
+}
+
+/// The commit half of [`insert_poll_accepts_a_transaction_and_rolls_back`]:
+/// committed through a transaction, `insert_poll` persists the poll and its
+/// options exactly as the pool-driven path does.
+#[tokio::test]
+async fn insert_poll_committed_through_a_transaction_persists_normally() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+    let status = insert_target_status(&app, actor_id).await;
+
+    let poll = Poll {
+        id: app.runtime.ids.next_id(),
+        status_id: status.id,
+        expires_at: None,
+        multiple: false,
+    };
+    let options = vec![
+        PollOption {
+            poll_id: poll.id,
+            idx: 0,
+            title: "ramen".to_string(),
+            votes_count: 0,
+        },
+        PollOption {
+            poll_id: poll.id,
+            idx: 1,
+            title: "curry".to_string(),
+            votes_count: 0,
+        },
+    ];
+
+    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    insert_poll(&mut *tx, &poll, &options)
+        .await
+        .expect("insert_poll must succeed against a transaction");
+    tx.commit().await.expect("commit must succeed");
+
+    let found = find_poll_by_id(&app.pool, poll.id)
+        .await
+        .expect("find_poll_by_id must succeed");
+    assert_eq!(found.as_ref(), Some(&poll));
+
+    let tallied = tally(&app.pool, poll.id, None)
+        .await
+        .expect("tally must succeed");
+    let titles: Vec<&str> = tallied
+        .options
+        .iter()
+        .map(|option| option.title.as_str())
+        .collect();
+    assert_eq!(titles, vec!["ramen", "curry"]);
+
+    app.cleanup().await;
+}

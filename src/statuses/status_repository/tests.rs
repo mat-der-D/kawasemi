@@ -958,3 +958,107 @@ async fn media_ids_for_statuses_returns_empty_for_an_empty_slice_without_queryin
 
     app.cleanup().await;
 }
+
+// -- executor genericity (task 5.1) ----------------------------------------
+
+/// Task 5.1 / Requirement 6.3: [`insert_status`], [`attach_media`] and
+/// [`adjust_counts`] accept an open transaction as their executor, and a
+/// rollback of that transaction leaves *none* of the three writes behind —
+/// the property `StatusService::create_status` (task 5.2) needs in order to
+/// make post creation atomic. The pool-taking call sites in the rest of this
+/// module are unchanged, which is the other half of the task's contract.
+#[tokio::test]
+async fn write_functions_accept_a_transaction_and_roll_back_together() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+    let parent = sample_status(&app, actor_id, Visibility::Public, None, None);
+    insert(&app, &parent).await;
+
+    let child = sample_status(&app, actor_id, Visibility::Public, Some(parent.id), None);
+    let media_ids = vec![app.runtime.ids.next_id(), app.runtime.ids.next_id()];
+
+    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    insert_status(&mut *tx, &child)
+        .await
+        .expect("insert_status must succeed against a transaction");
+    attach_media(&mut *tx, child.id, &media_ids)
+        .await
+        .expect("attach_media must succeed against a transaction");
+    adjust_counts(&mut *tx, parent.id, CountKind::Replies, 1)
+        .await
+        .expect("adjust_counts must succeed against a transaction");
+    tx.rollback().await.expect("rollback must succeed");
+
+    let found = find_visible(&app.pool, child.id, None)
+        .await
+        .expect("find_visible must succeed");
+    assert!(found.is_none(), "a rolled-back insert must leave no row");
+
+    let attached = media_ids_for_status(&app.pool, child.id)
+        .await
+        .expect("media_ids_for_status must succeed");
+    assert!(
+        attached.is_empty(),
+        "a rolled-back attach_media must leave no status_media rows"
+    );
+
+    let parent_after = find_visible(&app.pool, parent.id, None)
+        .await
+        .expect("find_visible must succeed")
+        .expect("the parent status must still exist");
+    assert_eq!(
+        parent_after.replies_count, 0,
+        "a rolled-back adjust_counts must leave the counter untouched"
+    );
+
+    app.cleanup().await;
+}
+
+/// The commit half of [`write_functions_accept_a_transaction_and_roll_back_together`]:
+/// driven through a transaction that *is* committed, the three functions
+/// persist exactly what they persist when driven through the pool.
+#[tokio::test]
+async fn write_functions_committed_through_a_transaction_persist_normally() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+    let parent = sample_status(&app, actor_id, Visibility::Public, None, None);
+    insert(&app, &parent).await;
+
+    let child = sample_status(&app, actor_id, Visibility::Public, Some(parent.id), None);
+    let media_a = app.runtime.ids.next_id();
+    let media_b = app.runtime.ids.next_id();
+
+    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    insert_status(&mut *tx, &child)
+        .await
+        .expect("insert_status must succeed against a transaction");
+    attach_media(&mut *tx, child.id, &[media_a, media_b])
+        .await
+        .expect("attach_media must succeed against a transaction");
+    adjust_counts(&mut *tx, parent.id, CountKind::Replies, 1)
+        .await
+        .expect("adjust_counts must succeed against a transaction");
+    tx.commit().await.expect("commit must succeed");
+
+    let found = find_visible(&app.pool, child.id, None)
+        .await
+        .expect("find_visible must succeed");
+    assert_eq!(found.as_ref(), Some(&child));
+
+    let attached = media_ids_for_status(&app.pool, child.id)
+        .await
+        .expect("media_ids_for_status must succeed");
+    assert_eq!(
+        attached,
+        vec![media_a, media_b],
+        "attachment order (position) must survive the transaction-driven path"
+    );
+
+    let parent_after = find_visible(&app.pool, parent.id, None)
+        .await
+        .expect("find_visible must succeed")
+        .expect("the parent status must still exist");
+    assert_eq!(parent_after.replies_count, 1);
+
+    app.cleanup().await;
+}

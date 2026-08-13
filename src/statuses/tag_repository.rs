@@ -79,7 +79,16 @@ fn row_to_tag(row: TagRow) -> Tag {
 /// "`id` stability across re-upserts" discipline — the first upsert for a
 /// given `name` establishes that row's `id` permanently, exactly like
 /// `upsert_remote`'s `actor_uri`).
-pub async fn upsert_tag(pool: &PgPool, tag: &Tag) -> Result<Tag, AppError> {
+///
+/// Generic over `executor` (task 5.1, Requirement 6.3) so
+/// `StatusService::create_status` can drive it against an open
+/// `sqlx::Transaction` (`&mut *tx`) together with the post insertion whose
+/// hashtags it registers; every pre-existing caller keeps passing a bare
+/// `&PgPool` unchanged.
+pub async fn upsert_tag<'e, E>(executor: E, tag: &Tag) -> Result<Tag, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let row: TagRow = sqlx::query_as(
         "INSERT INTO tags (id, name, created_at) VALUES ($1, $2, $3) \
          ON CONFLICT (name) DO UPDATE SET name = tags.name \
@@ -88,7 +97,7 @@ pub async fn upsert_tag(pool: &PgPool, tag: &Tag) -> Result<Tag, AppError> {
     .bind(tag.id.as_i64())
     .bind(&tag.name)
     .bind(tag.created_at)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
     .map_err(map_server_error)?;
 
@@ -113,14 +122,21 @@ pub async fn find_tag_by_name(pool: &PgPool, name: &str) -> Result<Option<Tag>, 
 /// Idempotent: associating the same pair twice is a silent no-op
 /// (`ON CONFLICT (status_id, tag_id) DO NOTHING`), matching `status_tags`'
 /// own composite primary key's dedup guarantee.
-pub async fn associate_tag(pool: &PgPool, status_id: Id, tag_id: Id) -> Result<(), AppError> {
+///
+/// Generic over `executor` for the same reason as [`upsert_tag`] (task 5.1,
+/// Requirement 6.3) — every pre-existing caller keeps passing a bare
+/// `&PgPool` unchanged.
+pub async fn associate_tag<'e, E>(executor: E, status_id: Id, tag_id: Id) -> Result<(), AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     sqlx::query(
         "INSERT INTO status_tags (status_id, tag_id) VALUES ($1, $2) \
          ON CONFLICT (status_id, tag_id) DO NOTHING",
     )
     .bind(status_id.as_i64())
     .bind(tag_id.as_i64())
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(map_server_error)?;
 

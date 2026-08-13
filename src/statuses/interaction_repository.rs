@@ -246,12 +246,22 @@ fn row_to_status(row: StatusRow) -> Status {
 /// when `(actor_id, status_id)` was already favourited (Requirement 10.4's
 /// "重複したお気に入りを作成しない" — a silent idempotent no-op, not an
 /// error; see this module's doc comment, "Duplicate handling").
-pub async fn add_favourite(
-    pool: &PgPool,
+///
+/// Generic over `executor` (task 5.1, Requirement 6.3) so
+/// `InteractionService::favourite` can drive it against an open
+/// `sqlx::Transaction` (`&mut *tx`) together with the matching
+/// `status_repository::adjust_counts`, so the row and its counter can never
+/// diverge; every pre-existing caller keeps passing a bare `&PgPool`
+/// unchanged.
+pub async fn add_favourite<'e, E>(
+    executor: E,
     actor_id: Id,
     status_id: Id,
     now: OffsetDateTime,
-) -> Result<bool, AppError> {
+) -> Result<bool, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let result = sqlx::query(
         "INSERT INTO favourites (actor_id, status_id, created_at) VALUES ($1, $2, $3) \
          ON CONFLICT (actor_id, status_id) DO NOTHING",
@@ -259,7 +269,7 @@ pub async fn add_favourite(
     .bind(actor_id.as_i64())
     .bind(status_id.as_i64())
     .bind(now)
-    .execute(pool)
+    .execute(executor)
     .await
     .map_err(map_server_error)?;
 
@@ -271,15 +281,22 @@ pub async fn add_favourite(
 /// `(actor_id, status_id)` was not favourited to begin with — an idempotent
 /// no-op success, mirroring `StatusRepository::delete_status`'s "absence is
 /// not an error at this layer" convention.
-pub async fn remove_favourite(
-    pool: &PgPool,
+///
+/// Generic over `executor` for the same reason as [`add_favourite`] (task
+/// 5.1, Requirement 6.3) — every pre-existing caller keeps passing a bare
+/// `&PgPool` unchanged.
+pub async fn remove_favourite<'e, E>(
+    executor: E,
     actor_id: Id,
     status_id: Id,
-) -> Result<bool, AppError> {
+) -> Result<bool, AppError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let result = sqlx::query("DELETE FROM favourites WHERE actor_id = $1 AND status_id = $2")
         .bind(actor_id.as_i64())
         .bind(status_id.as_i64())
-        .execute(pool)
+        .execute(executor)
         .await
         .map_err(map_server_error)?;
 

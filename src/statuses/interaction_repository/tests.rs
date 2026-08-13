@@ -896,3 +896,93 @@ async fn batched_interaction_state_returns_empty_for_an_empty_slice_without_quer
 
     app.cleanup().await;
 }
+
+// -- executor genericity (task 5.1) ----------------------------------------
+
+/// Task 5.1 / Requirement 6.3: [`add_favourite`] accepts an open transaction,
+/// and rolling that transaction back leaves no `favourites` row behind — the
+/// property `InteractionService::favourite` (task 5.3) needs so a favourite
+/// row and its counter can never diverge.
+#[tokio::test]
+async fn add_favourite_accepts_a_transaction_and_rolls_back() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+    let status = insert_target_status(&app, app.runtime.ids.next_id()).await;
+
+    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    let created = add_favourite(&mut *tx, actor_id, status.id, app.runtime.clock.now())
+        .await
+        .expect("add_favourite must succeed against a transaction");
+    assert!(created, "first favourite of a status must be reported new");
+    tx.rollback().await.expect("rollback must succeed");
+
+    let exists = exists_favourite(&app.pool, actor_id, status.id)
+        .await
+        .expect("exists_favourite must succeed");
+    assert!(!exists, "a rolled-back add_favourite must leave no row");
+
+    app.cleanup().await;
+}
+
+/// Task 5.1 / Requirement 6.3, the deletion half: [`remove_favourite`] accepts
+/// an open transaction, and rolling that transaction back restores the row it
+/// deleted.
+#[tokio::test]
+async fn remove_favourite_accepts_a_transaction_and_rolls_back() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+    let status = insert_target_status(&app, app.runtime.ids.next_id()).await;
+    add_favourite(&app.pool, actor_id, status.id, app.runtime.clock.now())
+        .await
+        .expect("add_favourite must succeed");
+
+    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    let removed = remove_favourite(&mut *tx, actor_id, status.id)
+        .await
+        .expect("remove_favourite must succeed against a transaction");
+    assert!(removed, "an existing favourite must be reported deleted");
+    tx.rollback().await.expect("rollback must succeed");
+
+    let exists = exists_favourite(&app.pool, actor_id, status.id)
+        .await
+        .expect("exists_favourite must succeed");
+    assert!(
+        exists,
+        "a rolled-back remove_favourite must restore the row"
+    );
+
+    app.cleanup().await;
+}
+
+/// The commit half of the two tests above: driven through a committed
+/// transaction, add/remove persist exactly what the pool-driven path does.
+#[tokio::test]
+async fn favourite_writes_committed_through_a_transaction_persist_normally() {
+    let app = spawn_test_app().await;
+    let actor_id = app.runtime.ids.next_id();
+    let status = insert_target_status(&app, app.runtime.ids.next_id()).await;
+
+    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    add_favourite(&mut *tx, actor_id, status.id, app.runtime.clock.now())
+        .await
+        .expect("add_favourite must succeed against a transaction");
+    tx.commit().await.expect("commit must succeed");
+    assert!(
+        exists_favourite(&app.pool, actor_id, status.id)
+            .await
+            .expect("exists_favourite must succeed")
+    );
+
+    let mut tx = app.pool.begin().await.expect("begin must succeed");
+    remove_favourite(&mut *tx, actor_id, status.id)
+        .await
+        .expect("remove_favourite must succeed against a transaction");
+    tx.commit().await.expect("commit must succeed");
+    assert!(
+        !exists_favourite(&app.pool, actor_id, status.id)
+            .await
+            .expect("exists_favourite must succeed")
+    );
+
+    app.cleanup().await;
+}

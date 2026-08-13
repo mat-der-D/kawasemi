@@ -140,12 +140,27 @@ fn rejected(message: &'static str) -> AppError {
 /// to be `0` for a freshly-created poll, but this function does not itself
 /// enforce that — it persists whatever `options` already carries, matching
 /// `insert_status`'s "persists whatever `status` already carries" precedent.
-pub async fn insert_poll(
-    pool: &PgPool,
+///
+/// Generic over `executor` (task 5.1, Requirement 6.3) so
+/// `StatusService::create_status` can drive it against an open
+/// `sqlx::Transaction` (`&mut *tx`); every pre-existing caller keeps passing
+/// a bare `&PgPool` unchanged. The bound is [`sqlx::Acquire`], not
+/// `sqlx::PgExecutor` (`status_repository::insert_status`'s bound), because
+/// this function is multi-statement *and* keeps its own `begin`/`commit`.
+/// Given a pool, `Acquire::begin` opens the same standalone transaction this
+/// function always opened; given an already-open transaction it opens a
+/// `SAVEPOINT` nested inside it — so a partial failure here still undoes
+/// only this function's own writes, while the enclosing transaction stays in
+/// control of whether they are ultimately committed.
+pub async fn insert_poll<'a, A>(
+    executor: A,
     poll: &Poll,
     options: &[PollOption],
-) -> Result<(), AppError> {
-    let mut tx = pool.begin().await.map_err(map_server_error)?;
+) -> Result<(), AppError>
+where
+    A: sqlx::Acquire<'a, Database = sqlx::Postgres>,
+{
+    let mut tx = executor.begin().await.map_err(map_server_error)?;
 
     sqlx::query("INSERT INTO polls (id, status_id, expires_at, multiple) VALUES ($1, $2, $3, $4)")
         .bind(poll.id.as_i64())
