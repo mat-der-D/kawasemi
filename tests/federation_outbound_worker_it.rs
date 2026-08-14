@@ -1,36 +1,43 @@
-//! Integration-style tests for `DeliveryWorker` (Requirements 1.1, 3.1, 3.2,
-//! 3.3, 11.2, 11.3, 11.5), per task 4.3's observable completion condition:
-//! "ワーカーがジョブを送信して done にし、一時失敗で再スケジュール、上限で
-//! failed に遷移する統合テストが通る".
+//! Integration tests for `DeliveryWorker` (Requirements 1.1, 3.1, 3.2, 3.3,
+//! 11.2, 11.3, 11.5 of the federation-core spec), relocated here from
+//! `src/federation/outbound/worker/tests.rs` by
+//! `.kiro/specs/test-placement-migration` task 2.2: every test below needs a
+//! real, running instance (`spawn_test_app`), which steering
+//! `structure.md`'s test layout rule places under `tests/*_it.rs`.
 //!
-//! Mirrors `src/federation/outbound/queue/tests.rs`'s (real `DeliveryQueue`
-//! against a real, isolated-schema Postgres via `spawn_test_app`) and
-//! `src/federation/signatures/negotiation/tests.rs`'s (real actor/signing-key
+//! Combines the conventions of `src/federation/outbound/queue/tests.rs` (a
+//! real `DeliveryQueue` against a real, isolated-schema Postgres) and
+//! `tests/federation_signatures_negotiation_it.rs` (a real actor/signing-key
 //! fixture via `ActorService::create_actor`, `MockFederationHttpClient` as
-//! the network boundary) established conventions combined: this module's own
-//! job is composing both already-tested real boundaries plus the mocked
-//! network edge, never re-proving either boundary's own internals.
+//! the network boundary): this file's own job is composing both already-
+//! tested real boundaries plus the mocked network edge, never re-proving
+//! either boundary's own internals.
 
 use std::sync::Arc;
 
 use axum::http::StatusCode;
 use serde_json::json;
 
-use super::*;
-use crate::actor::model::ActorType;
-use crate::actor::owner::create_owner;
-use crate::actor::{NewActor, ResolvedActor};
-use crate::domain::Id;
-use crate::federation::outbound::queue::{DbDeliveryQueue, NewDeliveryJob};
-use crate::federation::signatures::{HttpResponse, MockFederationHttpClient, RequestSigner};
-use crate::federation::urls::ActorUrls;
-use crate::test_harness::{TestApp, spawn_test_app};
+use kawasemi::actor::model::ActorType;
+use kawasemi::actor::owner::create_owner;
+use kawasemi::actor::{Handle, NewActor, ResolvedActor};
+use kawasemi::domain::Id;
+use kawasemi::federation::outbound::queue::{DbDeliveryQueue, DeliveryQueue, NewDeliveryJob};
+use kawasemi::federation::outbound::{
+    DEFAULT_MAX_DELIVERY_ATTEMPTS, DeliveryWorker, backoff_delay,
+};
+use kawasemi::federation::signatures::{
+    HttpResponse, MockFederationHttpClient, RequestSigner, SignatureNegotiator,
+};
+use kawasemi::federation::urls::ActorUrls;
+use kawasemi::test_harness::{TestApp, spawn_test_app};
 
 const TARGET_INBOX: &str = "https://remote.example/inbox";
 
 /// Creates a real owner + a real local actor (via `ActorService::create_actor`,
 /// which provisions a real, currently valid RSA-2048 signing key) under
-/// `handle` -- mirrors `negotiation/tests.rs`'s own `create_signable_actor`.
+/// `handle` -- mirrors `tests/federation_signatures_negotiation_it.rs`'s own
+/// `create_signable_actor`.
 async fn create_signable_actor(app: &TestApp, handle: &str) -> ResolvedActor {
     let owner_id = app.runtime.ids.next_id();
     let now = app.runtime.clock.now();
@@ -43,7 +50,7 @@ async fn create_signable_actor(app: &TestApp, handle: &str) -> ResolvedActor {
         .actor_service()
         .create_actor(NewActor {
             owner_id,
-            handle: crate::actor::Handle::new(handle).expect("test handle must be valid"),
+            handle: Handle::new(handle).expect("test handle must be valid"),
             actor_type: ActorType::Person,
             display_name: "Worker Test Actor".to_string(),
             summary: String::new(),
@@ -62,7 +69,7 @@ async fn create_signable_actor(app: &TestApp, handle: &str) -> ResolvedActor {
 /// Builds a `DeliveryWorker` wired against `app`'s own real
 /// `DbDeliveryQueue`/`ActorDirectory`/`Clock`-backed `SignatureNegotiator`,
 /// and `mock` as the send boundary -- mirrors
-/// `negotiation/tests.rs`'s `negotiator_for`.
+/// `tests/federation_signatures_negotiation_it.rs`'s `negotiator_for`.
 fn worker_for(
     app: &TestApp,
     mock: Arc<MockFederationHttpClient>,

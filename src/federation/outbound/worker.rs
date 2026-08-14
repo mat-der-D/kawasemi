@@ -114,9 +114,17 @@
 //! `job.activity` directly via `serde_json::to_vec` for the request body,
 //! never re-running `crate::federation::jsonld::serialize` (which would
 //! stamp a second, redundant/conflicting `@context`).
-
-#[cfg(test)]
-mod tests;
+//!
+//! ## Where this module's tests live
+//! There is no `worker/tests.rs`. Every behavior above is observable only
+//! against a real `DbDeliveryQueue`/`ActorDirectory` pair, so all of this
+//! module's tests require a running instance (`spawn_test_app`) and live in
+//! `tests/federation_outbound_worker_it.rs` — placed there by
+//! `.kiro/specs/test-placement-migration` task 2.2 so that steering
+//! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
+//! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
+//! A module with no `tests.rs` therefore means "no pure unit test applies
+//! here", not "untested".
 
 use std::sync::Arc;
 

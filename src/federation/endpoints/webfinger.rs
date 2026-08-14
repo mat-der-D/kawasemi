@@ -13,8 +13,8 @@
 //! reasoning restated here): [`webfinger`] is a plain axum handler
 //! (`State<WebfingerState>`, `Query<WebfingerQuery>`) shaped so task 5.4 can
 //! mount it with `.route(...).with_state(...)` verbatim, but nothing in this
-//! crate currently does so. This module's own tests
-//! (`src/federation/endpoints/webfinger/tests.rs`) call it directly as an
+//! crate currently does so. This module's own handler tests
+//! (`tests/federation_webfinger_endpoint_it.rs`) call it directly as an
 //! ordinary async function; `tests/webfinger_nodeinfo_it.rs` additionally
 //! mounts it on a minimal, test-local `axum::Router` (per this task's own
 //! instructions, since no prior endpoint-shaped task exists yet in this
