@@ -1,10 +1,21 @@
-# 引き継ぎ: test-infrastructure（NO-GO の残件を解消済み・再検証待ち）
+# 引き継ぎ: test-infrastructure（**完了・handoff 済み**）
 
-最終更新: 2026-08-14 / HEAD `a1c6dd8` / 作業ツリー: クリーン
-`spec.json`: `ssot` フィールド無し（＝ `"spec"` 扱い）、`phase: "tasks-generated"` のまま。**まだ GO を取っていないので反転していない。**
+最終更新: 2026-08-14 / 作業ツリー: クリーン
+`spec.json`: `phase: "implemented"`、`ssot: "implementation"`。
 
-**前回の NO-GO で挙げた残件 4 つはすべて解消済み**（詳細は §2）。次にやることは
-`/kiro-validate-impl test-infrastructure` の再実行のみ。
+> **この spec はもうログである。** 現状を知りたい場合は実装（`src/test_harness*`、
+> `src/federation/test_harness.rs`）と steering `structure.md`「テストレイアウト」を読むこと。
+> 以下は当時どう作ったかの記録であり、現状説明として読んではならない。
+
+`/kiro-validate-impl` は一度 NO-GO を出し、その残件 4 つを解消したうえで再実行して **GO**（`f06149f`）。
+handoff 3 点セットは完了している:
+
+1. `ssot` 反転 — `f06149f`
+2. トレーサビリティ参照の除去 — `613118d`
+3. steering の同期 — `14391f7`
+
+**繰り越し**: 要件 4.5 は逐語的には未充足のまま。残存 208 箇所 / 21 ファイルの移設は
+後続 spec `test-placement-migration` が引き取る（決定の記録は `placement-audit.md` §2）。
 
 ---
 
@@ -13,13 +24,13 @@
 タスクは **全 15 件が `[x]`**、実装コミットは 13 本（`b50d8fd..f71c2de`）に
 残件解消の 4 本（`aeeefc5..a1c6dd8`）。
 最終ゲート `/kiro-validate-impl` を 4 次元で実行して一度 **NO-GO** と判定し、
-そこで挙げた残件 4 つを解消した（§2）。**再検証はまだ実行していない。**
+そこで挙げた残件 4 つを解消したうえで再実行して **GO**（詳細は §2・§3）。
 
 **本 spec の中核は達成済み**（後述の残件はいずれも中核と独立）:
 
 | | 着手前 | 現在 |
 |---|---|---|
-| `cargo test` 完全実行 | 一括不可（256 失敗・全件 `PoolTimedOut`） | **2286 passed / 0 failed**（89 ターゲット） |
+| `cargo test` 完全実行 | 一括不可（256 失敗・全件 `PoolTimedOut`） | **2286 passed / 0 failed**（90 ターゲット） |
 | `cargo test --lib` | 256 失敗 | **1779 passed / 0 failed** |
 | 事前のスキーマ掃除 | 必須 | 不要 |
 | モジュール分割 | 必須 | 不要 |
@@ -82,23 +93,21 @@ GO 判定はこの繰り越しを承認したうえで下すことになる（�
 
 ---
 
-## 3. 再開手順
+## 3. handoff の記録
 
-```
-# 1. 状態確認
-git log --oneline b50d8fd..HEAD        # 実装 13 本 + 残件解消 4 本
+`/kiro-validate-impl` の GO 後、委譲されていた 2 作業を実施した。
 
-# 2. 再検証（残件はすべて解消済み。これが唯一の次の作業）
-/kiro-validate-impl test-infrastructure
-```
+- **トレーサビリティ参照の除去**（`613118d`）: 本 spec が追加した参照のみを対象にした。
+  他 spec（core-runtime / api-foundation / media-pipeline / statuses-core）が入れた参照は
+  各 spec の境界に属するため残している。設計根拠と同じ文に参照が埋まっている箇所は
+  行ごと削らず文を書き直した。本 spec の新規ファイル（`sweep.rs` / `reaper.rs` /
+  `db_fixture.rs` とその `tests.rs`、`harness_release_it.rs` / `harness_sweep_it.rs`）は
+  参照ゼロに到達。
+- **steering の同期**（`14391f7`）: 実装を読んで書き起こした。フィクスチャの 2 段階・
+  隔離と回収・feature ゲートの恒久パターンは `structure.md`「テストレイアウト」へ、
+  コードから読み取れない事情は `tech.md` へ振り分けた。
 
-**GO が出たら** `/kiro-validate-impl` が `spec.json` の `ssot` を `"implementation"` へ反転する。
-そのうえで委譲されている 2 つの後続作業が残る:
-
-1. **トレーサビリティ参照の除去**（別コミット）: 本 spec が変更した 69 ファイルのうち **67 ファイル**が `task N.N` / `design.md` / `Requirements N.N` 参照を持つ。ハーネス自身の新規ファイル（`test_harness.rs`, `reaper.rs`, `sweep.rs`, `db_fixture.rs`）は特に多く、**設計根拠と同じ文の中に参照が埋まっている箇所がある**ので、行ごと削るのではなく文を書き直す必要がある。
-2. **steering の同期**: `/kiro-steering` を実行。**コードから**書き起こすこと（spec や計画から書くと steering 自体が予言＝ログになる）。
-
-さらにその先に、項目 3 で切り出した **`test-placement-migration` spec** がある
+**次の作業は `test-placement-migration` spec**
 （`/kiro-spec-requirements test-placement-migration` から。Dependencies: test-infrastructure）。
 
 ---
