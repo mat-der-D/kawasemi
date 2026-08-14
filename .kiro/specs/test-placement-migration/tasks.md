@@ -156,7 +156,7 @@
   - 当該ファイルは単体テスト位置に据え置かれ、`exceptions.md` に 13 箇所ぶんの根拠が項目名つきで記載されている
   - _Requirements: 2.3, 3.3, 4.1, 4.2_
 
-- [ ] 8.2 例外一覧を確定し、再現手順とともに記録する
+- [x] 8.2 例外一覧を確定し、再現手順とともに記録する
   - 各移設タスクが Tier 2 と判定した検証をファイル単位・件数つきで集約する
   - 到達不能な項目の名前と現在の可視性、および移設した場合に公開が必要になる項目の連鎖を、例外ごとに記載する
   - ゲート幅を調整したクエリ計測モジュールを、例外とは別の節に「緩和した項目」として記載する
@@ -190,6 +190,10 @@
 - 1.1: `src/test_harness/tests.rs` の「5 箇所」のうち L2 は `//!` ドキュメントコメント内の記述で、コード上の呼び出しは 4 箇所。対象 203 は不変（208−5 = 207−4）。要件 1.1 の完了判定は **grep 基準の 5** で行うこと。タスク 8.1/8.2 で内訳を明記する
 - 1.1: design.md「File Structure Plan」の移設先名 19 件のうち **`tests/timelines_endpoints_it.rs` のみ既存ファイル（1341 行）と衝突**。既存は `kawasemi::server::build_router` の実ルータ、移設元 `src/timelines/endpoints/tests.rs` は手組みのテスト専用ルータを対象としており、タスク 7.2 は改名前に要件 2.4 の重複判定を行うこと
 - 1.1: 要件 2.6 のテスト関数総数は、コメント・文字列をマスクした値で比較する（生 grep は doc コメント内の `#[tokio::test]` を拾う）。移設前 src 1779 / tests 507、移設後の期待値 src 1589 / tests 697、合計 2286 不変
+- 8.2: **保存則を独立な 2 経路で確認できた。** 移設元側 `208 − 18 = 190`、移設先側 `699 − 509 = 190`（`tests/*_it.rs` の呼び出し箇所を基準リビジョン 5ad15a5 と現在で比較）。片側だけでは取りこぼしも二重コピーも検出できないため、両側の一致が要件 1.5 の実質的な証明になる
+- 8.2: **design.md の Tier 2 予測の的中率は 3 分の 1。** 表の Tier 2 行は :108 `RenderContext` / :109 `RequiredPolls` / :110 `TolerantPolls` の 3 行で、成立したのは :108 のみ
+- 8.2: `query_log` の消費側は **2 ファイル**（`tests/statuses_account_provider_it.rs:37` と `tests/statuses_endpoints_it.rs:64`）。据え置いた `statements` / `per_kind` はどちらからも 0 件、`count_matching` は前者のみ。**「実使用 1 ファイルなら昇格に値し、0 ファイルなら値しない」という境界が実例で示された**（タスク 1.3 の差し戻しの二重の正当化）
+- 8.2: 隔離スキーマの残留は `src/test_harness/reaper.rs:112-113` が明文で述べる**設計上の意図**であって観測された欠陥ではない（"Requests still queued when the process exits are simply lost, and the startup sweep reclaims their schemas on a later run"）。要件 5.5 の判断材料
 - 8.1: **13 箇所は本物の例外だった**（3.2 / 4.2 のような蒸発なし）。`spawn_test_app()` 13 箇所と `RenderContext {` 構築 13 箇所が厳密に交互に並び 1:1 対応する。公開 API だけで移設できるテストはゼロ
 - 8.1: **公開が必要な連鎖は 7 項目**（タスク本文の 5 項目 + `PollResolver` :123 と `PollResolution` :111）。`RenderContext` の `polls: &'a dyn PollResolver`（:152）がトレイトと型エイリアスを連鎖に引き込む。すべて `pub(crate)`、すべて `src/statuses/render_assembler.rs`
 - 8.1: **Tier 1 が使えない理由は「モジュールが非公開だから」ではない。** `src/statuses.rs:198` は cfg ゲートなしの `pub mod render_assembler;` で、**広げるべきゲートが存在しない**。封じ込めは項目ごとの `pub(crate)` のみ。対比は `src/lib.rs:48-49` / `src/test_harness.rs:164-165` のゲート付き宣言
