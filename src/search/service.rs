@@ -163,9 +163,18 @@
 //! separately states "全失敗を core-runtime `AppError` に集約する", with no
 //! equivalent "keep responding 200" carve-out for a `SearchBackend`/
 //! `SearchHydrator` failure).
-
-#[cfg(test)]
-mod tests;
+//!
+//! ## Where this module's tests live
+//! There is no `service/tests.rs`. [`SearchService::new`] itself requires a
+//! fully-constructed [`RemoteResolver`]/[`SearchHydrator`] pair, both of
+//! which need a real `PgPool` to build, so every one of this module's tests
+//! requires a running instance (`spawn_test_app`) and lives in
+//! `tests/search_service_it.rs` — placed there by
+//! `.kiro/specs/test-placement-migration` task 3.1 so that steering
+//! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
+//! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
+//! A module with no `tests.rs` therefore means "no pure unit test applies
+//! here", not "untested".
 
 use crate::domain::{AccountRef, Id};
 use crate::error::AppError;

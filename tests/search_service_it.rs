@@ -1,11 +1,17 @@
-//! Tests for [`super::SearchService`] (task 5.1 completion definition:
+//! Integration tests for [`kawasemi::search::service::SearchService`] (task
+//! 5.1 completion definition:
 //! "type 絞り・空クエリ拒否・resolve 分岐・限定種別の空配列が一連で機能し、
 //! 呼び出し側がエンジン非依存（`SearchBackend` 経由）で、失敗時に種別・箇所
 //! を含む診断が出力される統合テストが通る"; Requirements 2.1, 2.2, 2.3, 2.5,
 //! 5.4, 6.3, 6.5, 7.1, 9.5).
 //!
 //! Every test below is a real, executable DB-backed integration test
-//! against `crate::test_harness::spawn_test_app` — mirroring
+//! against `kawasemi::test_harness::spawn_test_app`. These tests were moved
+//! here from `src/search/service/tests.rs` by
+//! `.kiro/specs/test-placement-migration` task 3.1, so that steering
+//! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
+//! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
+//! The helpers below mirror
 //! `search/hydrator/tests.rs`'/`search/remote_resolver/tests.rs`'
 //! established convention (`create_test_actor` is an exact copy of those
 //! modules' own helper of the same name; `resolver_for`/`FakeRemoteActors`
@@ -18,10 +24,10 @@
 //! build (Requirement 9.5's own diagnostics aside, this module never mocks
 //! the database itself -- only the federation HTTP boundary).
 //!
-//! [`crate::search::ports::StubSearchBackend`] stands in for
+//! [`kawasemi::search::ports::StubSearchBackend`] stands in for
 //! `SearchBackend` in most tests below specifically *because* it is a
-//! swap-in, engine-agnostic double (Requirement 7.5) -- this module's own
-//! code (`super::SearchService`) never once mentions `StubSearchBackend` by
+//! swap-in, engine-agnostic double (Requirement 7.5) -- the module under
+//! test (`kawasemi::search::service`) never once mentions `StubSearchBackend` by
 //! name, so every test that exercises it is direct evidence for this task's
 //! own "呼び出し側がエンジン非依存" completion condition (Requirement 7.1).
 //! One test ([`search_end_to_end_with_the_default_pg_backend`]) additionally
@@ -35,25 +41,30 @@ use std::sync::{Arc, Mutex};
 use axum::http::{HeaderMap, StatusCode};
 use serde_json::json;
 
-use super::*;
-use crate::accounts::DEFAULT_REMOTE_ACCOUNT_CACHE_TTL;
-use crate::accounts::remote_fetcher::RemoteAccountFetcher;
-use crate::actor::ActorDirectory;
-use crate::actor::owner::create_owner;
-use crate::actor::repository::insert_actor;
-use crate::actor::{ActorState, ActorType, Handle};
-use crate::domain::Visibility;
-use crate::error::AppError;
-use crate::federation::signatures::{HttpResponse, MockFederationHttpClient};
-use crate::search::hashtag_repository::upsert_tag_usage;
-use crate::search::model::SearchType;
-use crate::search::pg_backend::PgSearchBackend;
-use crate::search::ports::StubSearchBackend;
-use crate::statuses::inbound_handlers::RemoteActorResolver;
-use crate::statuses::ingest_service::StatusIngestService;
-use crate::statuses::model::Status;
-use crate::statuses::status_repository::insert_status;
-use crate::test_harness::{TestApp, spawn_test_app};
+use kawasemi::accounts::DEFAULT_REMOTE_ACCOUNT_CACHE_TTL;
+use kawasemi::accounts::remote_fetcher::RemoteAccountFetcher;
+use kawasemi::actor::ActorDirectory;
+use kawasemi::actor::owner::create_owner;
+use kawasemi::actor::repository::insert_actor;
+use kawasemi::actor::{ActorState, ActorType, Handle};
+use kawasemi::domain::{AccountRef, Id, Visibility};
+use kawasemi::error::AppError;
+use kawasemi::federation::signatures::{HttpResponse, MockFederationHttpClient};
+use kawasemi::search::hashtag_repository::upsert_tag_usage;
+use kawasemi::search::hydrator::SearchHydrator;
+use kawasemi::search::model::{SearchParams, SearchType};
+use kawasemi::search::pg_backend::PgSearchBackend;
+use kawasemi::search::ports::{
+    AccountQuery, HashtagQuery, SearchBackend, StatusQuery, StubSearchBackend,
+};
+use kawasemi::search::remote_resolver::RemoteResolver;
+use kawasemi::search::result_serializer::SearchResultSerializer;
+use kawasemi::search::service::SearchService;
+use kawasemi::statuses::inbound_handlers::RemoteActorResolver;
+use kawasemi::statuses::ingest_service::StatusIngestService;
+use kawasemi::statuses::model::Status;
+use kawasemi::statuses::status_repository::insert_status;
+use kawasemi::test_harness::{TestApp, spawn_test_app};
 
 // ---- shared fixtures --------------------------------------------------
 
@@ -65,7 +76,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
         .expect("creating the owner must succeed");
 
     let actor_id = app.runtime.ids.next_id();
-    let actor = crate::actor::model::LocalActor {
+    let actor = kawasemi::actor::model::LocalActor {
         id: actor_id,
         owner_id,
         handle: Handle::new(handle).expect("test handle must be valid"),
@@ -140,9 +151,9 @@ struct FakeRemoteActors {
 }
 
 // `RuntimeContext` itself is `Clone`; this thin alias keeps the struct
-// definition above readable without importing `crate::runtime::
+// definition above readable without importing `kawasemi::runtime::
 // RuntimeContext` under two different names.
-type RuntimeContextForFake = crate::runtime::RuntimeContext;
+type RuntimeContextForFake = kawasemi::runtime::RuntimeContext;
 
 impl FakeRemoteActors {
     fn new(runtime: RuntimeContextForFake) -> Self {
@@ -457,7 +468,7 @@ impl SearchBackend for FailingBackend {
     async fn search_hashtags(
         &self,
         _q: &HashtagQuery,
-    ) -> Result<Vec<crate::search::model::TagMatch>, AppError> {
+    ) -> Result<Vec<kawasemi::search::model::TagMatch>, AppError> {
         Ok(Vec::new())
     }
 }
