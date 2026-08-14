@@ -1,22 +1,22 @@
 {
   "feature_name": "test-placement-migration",
   "created_at": "2026-08-13T23:58:14Z",
-  "updated_at": "2026-08-13T23:58:14Z",
+  "updated_at": "2026-08-14T08:00:51Z",
   "language": "ja",
-  "phase": "initialized",
+  "phase": "tasks-generated",
   "approvals": {
     "requirements": {
-      "generated": false,
-      "approved": false
+      "generated": true,
+      "approved": true
     },
     "design": {
-      "generated": false,
-      "approved": false
+      "generated": true,
+      "approved": true
     },
     "tasks": {
-      "generated": false,
-      "approved": false
+      "generated": true,
+      "approved": true
     }
   },
-  "ready_for_implementation": false
+  "ready_for_implementation": true
 }
