@@ -1,14 +1,19 @@
-# 引き継ぎ: test-infrastructure（`/kiro-validate-impl` = NO-GO で停止中）
+# 引き継ぎ: test-infrastructure（NO-GO の残件を解消済み・再検証待ち）
 
-最終更新: 2026-08-14 / HEAD `02d4219` / 作業ツリー: クリーン
-`spec.json`: `ssot` フィールド無し（＝ `"spec"` 扱い）、`phase: "tasks-generated"` のまま。**GO ではないので反転していない。**
+最終更新: 2026-08-14 / HEAD `a1c6dd8` / 作業ツリー: クリーン
+`spec.json`: `ssot` フィールド無し（＝ `"spec"` 扱い）、`phase: "tasks-generated"` のまま。**まだ GO を取っていないので反転していない。**
+
+**前回の NO-GO で挙げた残件 4 つはすべて解消済み**（詳細は §2）。次にやることは
+`/kiro-validate-impl test-infrastructure` の再実行のみ。
 
 ---
 
 ## 1. 現在地
 
-タスクは **全 15 件が `[x]`**、実装コミットは 13 本（`b50d8fd..HEAD`）。
-最終ゲート `/kiro-validate-impl` を 4 次元で実行し、**NO-GO** と判定した。
+タスクは **全 15 件が `[x]`**、実装コミットは 13 本（`b50d8fd..f71c2de`）に
+残件解消の 4 本（`aeeefc5..a1c6dd8`）。
+最終ゲート `/kiro-validate-impl` を 4 次元で実行して一度 **NO-GO** と判定し、
+そこで挙げた残件 4 つを解消した（§2）。**再検証はまだ実行していない。**
 
 **本 spec の中核は達成済み**（後述の残件はいずれも中核と独立）:
 
@@ -18,7 +23,7 @@
 | `cargo test --lib` | 256 失敗 | **1779 passed / 0 failed** |
 | 事前のスキーマ掃除 | 必須 | 不要 |
 | モジュール分割 | 必須 | 不要 |
-| 実行後の残存スキーマ | 239 個 | 0 個（`--lib`）／ 1 個（完全実行、次回スイープで自動回収） |
+| 実行後の残存スキーマ | 239 個 | 0 個（`--lib`）／ 1 個（完全実行。回収漏れではなく回収の遅延、`final-metrics.md` §2.3） |
 | 一括実行時間 | 891 秒 | 約 330 秒（中央値、9 回計測） |
 | 実インスタンス起動を要するテスト | 750（出現回数）／745（関数） | 210 ／ 206 |
 | 接続ピーク | 上限 97 に到達して停止 | 17〜23（上限は**テスト件数ではなく同時実行スレッド数**で頭打ち） |
@@ -27,56 +32,53 @@
 
 ---
 
-## 2. 再開時にやること（NO-GO の解消）
+## 2. NO-GO 残件の解消（2026-08-14・完了）
 
-### 項目 1: steering の取り残し（実装で解消可能・最優先・小）
+### 項目 1: steering の取り残し → 解消
 
-`.kiro/steering/tech.md:88` の箇条書きが「孤立スキーマの**起動時スイープ未実装**」「恒久対応には実装が必要（**未着手**）」と書いたまま。
+`.kiro/steering/tech.md` の箇条書きが「孤立スキーマの起動時スイープ未実装」「恒久対応には
+実装が必要（未着手）」と書いたままだった。タスク 2.2 で実装済み・残存 0 件を実測しているので
+明確な誤り。リーパー + 起動時スイープの二段構え、真因（`Drop` が `pool.close()` を
+呼んでいなかったこと）、および隔離スキーマを作るフィクスチャは必ず `establish_isolated_db` を
+通す必要があることへ書き換えた（`46dae21`）。
 
-- requirements.md:28 と design の Steering compliance は **tech.md の既知の問題 2 項目とも本 spec が引き取る**と明記している。
-- タスク 5 で `federation::outbound::worker` の項目は実態へ更新済み。**こちらだけ取り残されている。**
-- タスク 2.2 で起動時スイープは実装済み、残存 0 件で実測済み。記述が明確に誤り。
+### 項目 2: 連合ペアハーネスの回収漏れ → 解消（選択肢 (a)）
 
-→ この箇条書きを実態（実装済み・リーパー + 起動時スイープで解決・残存 0）へ書き換える。
+`src/federation/test_harness.rs` が持っていた schema/pool/migrate の 3 つ目の複製を削除し、
+`spawn_paired_instance` を `crate::test_harness::establish_isolated_db()` 経由にした
+（`establish_isolated_db` を `pub(crate)` 化）。接頭辞が `kawasemi_test_harness_` に揃い、
+起動時スイープを通り、`max_connections` も 5 → 2 に揃う。削除したのは
+`PAIR_TEST_DB_URL_ENV` / `DEFAULT_PAIR_TEST_DB_URL` / `base_test_db_url` /
+`unique_pair_schema_name` / `admin_db_config` / `schema_scoped_url` / `create_schema`
+（`aeeefc5`）。
 
-### 項目 2: 連合ペアハーネスの回収漏れ（要件 3.1 の被覆欠落・中）
+判断の記録は `tasks.md` の Implementation Notes に移した（「一括実行前に判断が要る」と
+書きながらゲートを張らなかった手続き上の反省も含む）。
 
-`src/federation/test_harness.rs` は schema/pool/migrate の **3 つ目の複製**を持つ:
+### 項目 3: 要件 4.5 の解釈 → ユーザー判断で決着（選択肢 (b)）
 
-- `establish_isolated_db()` を通らない → **起動時スイープを呼ばない**
-- 接頭辞が `kawasemi_federation_pair_` → `HARNESS_SCHEMA_PREFIX`（`kawasemi_test_harness_`）に**一致しない**
-- 結果: **異常終了で孤立したペアのスキーマはどの機構でも永久に回収されない**（本 spec が終わらせるはずだった蓄積そのもの）
-- 加えて `max_connections: 5` のまま（`2703704` で本体は 5→2 にした）。ペア系バイナリでは最大約 80 接続（上限 97）に達しうる。cargo がテストターゲットを逐次実行するから安全なだけで、`cargo nextest` 等を入れると lib スイートより先に壊れる
+**残存 208 箇所 / 21 ファイルの移設は別 spec として切り出す。** 要件 4.5 の文言も
+steering の配置規約も書き換えず、208 箇所を本 spec からの明示的な繰り越しとして扱う。
+決着と後続 spec の範囲・論点は `placement-audit.md` §2「決着」に記録した。
+後続 spec `test-placement-migration` を初期化し、`roadmap.md` にも追加した（`a1c6dd8`）。
 
-正常終了時は `spawn_paired_instance` が `TestApp` を返すので `Drop` → リーパー経路に乗る。実測残存 0 で**実害は出ていない**（latent な欠陥）。
+**再検証時の含意**: 逐語的に読めば要件 4.5 は本 spec の内部では未充足のままである。
+GO 判定はこの繰り越しを承認したうえで下すことになる（未検出の欠落ではなく、記録された繰り越し）。
 
-→ どちらかを選ぶ:
-- (a) `establish_isolated_db` 経由にする（接頭辞・プールサイズ・スイープを一括で揃う。**推奨**）
-- (b) 接頭辞だけスイープ対象に加える
-- (c) 意図的に対象外とし、その理由を要件 3.1 の明示的な例外として記録する
+### 項目 4: `final-metrics.md` §2 のスコープ → 解消
 
-**手続き上の不備の記録**: tasks.md に「タスク 6.1 の一括実行前に判断が要る」と記録しながら、判断を記録せずに 6.1 を通過させた。ここで必ず決着させること。
+表と結論を 3 条件（`cargo test --lib` 一括 / フィルタ / `cargo test` 完全）に分け、
+完全実行の測定を §2.3 として追加した。あわせて「次回スイープで自動回収」を訂正した
+（`RECLAIM_THRESHOLD` は 2 時間なので、回収されるのは作成から 2 時間以上経った後の
+最初のスイープ。2 時間以内に完全実行を繰り返すと一時的に実行回数ぶん積み上がる）（`4252900`）。
 
-### 項目 3: 要件 4.5 の解釈（**ユーザー判断が必要**・実装では解けない）
+### 解消後の検証結果（実測）
 
-要件 4.5「実起動インスタンスを要する検証は統合テストの配置規約に従って配置する」に対し、`src/**/tests.rs` に `spawn_test_app` が **208 箇所 / 21 ファイル**残っている。
-
-**有能なレビュアー 2 名が読みで対立している**:
-- タスク 3.6 のレビュアー: 「本 spec が新たに置く／動かす配置の行き先制約」と読み、移設不要。design の Traceability 4.5 行の Summary が主語を「統合テスト」に限定していること、逐語的に読むと要件 4.1 の「削減する」が冗長になること、逐語的に従うと Out of Boundary の変更（`pub(crate) mod query_log` や private な `account_ref_id` の公開化）が実際に強制されることを根拠とする（3 ファイルを実際に移設して確認済み）
-- 最終ゲートの被覆検証: 「文言どおりには未充足」。EARS の `Where` 節は状態不変条件であり主語は「the Test Suite」。design の 1 行要約は承認済み要件の文言を狭められない、4.1 は件数・4.5 は配置を規律するので重複は冗長ではない、と反論
-
-前提として**これは完全に既存債務**（着手前 748 箇所 / 71 ファイル → 現在 208 / 21、新規追加ゼロ）。
-
-→ 選択肢（**私が一方に決めてよい問題ではない**）:
-- (a) 要件 4.5 を実態に合わせて改訂する
-- (b) 208 箇所の移設を別 spec として切る
-- (c) steering `structure.md` の「テストレイアウト」を実態に合わせ、4.5 を充足済みとする
-
-詳細な論証は `placement-audit.md` §2 にある（対立仮説も明記済み）。
-
-### 項目 4: `final-metrics.md` §2 のスコープ（軽微）
-
-「一括実行で残存 0 個」は `cargo test --lib` の測定値。`cargo test` の完全実行では 1 個残る（統合バイナリ由来の序数 `_2`。次回実行時のスイープで自動回収されるので要件違反ではない）。記述を `--lib` に限定する。
+- `cargo test`: **2286 passed / 0 failed / 5 ignored**、exit 0（90 ターゲット）
+- `federation_pair_it` 3 本 / `harness_release_it` 3 本 / `harness_sweep_it` 4 本: 全 pass、
+  実行後の残存スキーマ 0 個
+- `cargo clippy --all-targets`: 警告ゼロ / `cargo fmt --check`: OK
+- 完全実行後の残存スキーマ: 1 個（`kawasemi_test_harness_..._1`。§1 の表と `final-metrics.md` §2.3 のとおり）
 
 ---
 
@@ -84,22 +86,20 @@
 
 ```
 # 1. 状態確認
-git log --oneline b50d8fd..HEAD        # 13 コミット
-cat .kiro/specs/test-infrastructure/HANDOFF.md
+git log --oneline b50d8fd..HEAD        # 実装 13 本 + 残件解消 4 本
 
-# 2. 項目 3 の判断をユーザーから得る（項目 1・2・4 は判断不要で着手できる）
-
-# 3. 項目 1・2・4 を実装（/kiro-impl は全タスク [x] なので使わない。直接修正するか、
-#    項目 2 を独立タスクとして扱う）
-
-# 4. 再検証
+# 2. 再検証（残件はすべて解消済み。これが唯一の次の作業）
 /kiro-validate-impl test-infrastructure
 ```
 
-**GO が出たら** `/kiro-validate-impl` が `spec.json` の `ssot` を `"implementation"` へ反転する。そのうえで委譲されている 2 つの後続作業が残る:
+**GO が出たら** `/kiro-validate-impl` が `spec.json` の `ssot` を `"implementation"` へ反転する。
+そのうえで委譲されている 2 つの後続作業が残る:
 
 1. **トレーサビリティ参照の除去**（別コミット）: 本 spec が変更した 69 ファイルのうち **67 ファイル**が `task N.N` / `design.md` / `Requirements N.N` 参照を持つ。ハーネス自身の新規ファイル（`test_harness.rs`, `reaper.rs`, `sweep.rs`, `db_fixture.rs`）は特に多く、**設計根拠と同じ文の中に参照が埋まっている箇所がある**ので、行ごと削るのではなく文を書き直す必要がある。
 2. **steering の同期**: `/kiro-steering` を実行。**コードから**書き起こすこと（spec や計画から書くと steering 自体が予言＝ログになる）。
+
+さらにその先に、項目 3 で切り出した **`test-placement-migration` spec** がある
+（`/kiro-spec-requirements test-placement-migration` から。Dependencies: test-infrastructure）。
 
 ---
 
@@ -152,3 +152,5 @@ psql "<url>" -c "select count(*) from information_schema.schemata where schema_n
 - **配送ワーカーのクレーム 0 件**は解決済み。`spawn_test_app` が同じプール・同じスキーマで本物の配送ループを走らせていた競合。テスト固有でプロダクション欠陥ではない。**プール 2 でも低頻度（約 1/35）で再現するので、今後この 1 件が落ちても資源枯渇ではない**
 - **要件 4 の Objective「DB なし」は未達**（`TestDb` も隔離スキーマ + 11 本のマイグレーションを要する）。ただし Objective は受入基準ではないので 4.1〜4.5 の被覆には影響しない
 - **`LIKE 'kawasemi_test_harness_%'` を使わない。** `_` は LIKE のワイルドカードなので見た目より広く一致する
+- **起動時スイープは「次回実行で必ず消す」機構ではない。** `RECLAIM_THRESHOLD` は 2 時間（`src/test_harness/sweep.rs:99`）で、生存中のフィクスチャを誤射しないために埋め込み時刻がそれより古いものだけを回収する。完全実行後に残る 1 個は、直後に再実行しても残ったままになる
+- **隔離スキーマを作るフィクスチャは必ず `establish_isolated_db` を通す。** 回収の 2 経路（`HarnessReaper` と起動時スイープ）はどちらも接頭辞 `kawasemi_test_harness_` だけを手がかりに対象を決めるので、独自の接頭辞を持つ複製はどの回収経路からも見えなくなる。連合ペアハーネスがまさにこれだった
