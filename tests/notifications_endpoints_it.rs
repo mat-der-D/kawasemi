@@ -1,35 +1,33 @@
-//! Router-level tests for `endpoints.rs`'s four handlers (Requirements 2.1,
-//! 2.2, 2.3, 2.5, 3.1, 3.2, 4.1, 4.2, 4.3, 9.1, 9.2, 9.3), driven through a
-//! real, test-only axum `Router` dispatched via `tower::ServiceExt::oneshot`
-//! against a real, `spawn_test_app`-backed Postgres schema — mirrors
-//! `crate::social_graph::endpoints::tests`'s/`crate::timelines::endpoints::
-//! tests`'s own established "real router, real DB, no mocked auth" precedent
-//! (see `endpoints.rs`'s own doc comment, "Not wired into the module tree
-//! yet", for why this module builds its own router here instead of dispatching
-//! through the real production one — nothing mounts this module onto it yet,
-//! task 4.2's job).
+//! Router-level integration tests for `kawasemi::notifications::endpoints`'s
+//! four handlers (Requirements 2.1, 2.2, 2.3, 2.5, 3.1, 3.2, 4.1, 4.2, 4.3,
+//! 9.1, 9.2, 9.3), driven through a real, test-only axum `Router` dispatched
+//! via `tower::ServiceExt::oneshot` against a real, `spawn_test_app`-backed
+//! Postgres schema.
+//!
+//! These tests were moved here from `src/notifications/endpoints/tests.rs`
+//! by `.kiro/specs/test-placement-migration` task 4.1, so that steering
+//! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
+//! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
+//! Every assertion is unchanged from before the move; only import
+//! qualification changed (`crate::` -> `kawasemi::`, and the glob over the
+//! production module expanded into explicit imports).
 //!
 //! Coverage is deliberately scoped to what is genuinely new at this HTTP
 //! layer — auth/scope enforcement, response codes, `Link`-header attachment,
-//! `types[]`/`exclude_types[]`/`account_id` query-parameter wiring, and this
-//! module's own `account_id` resolution ([`resolve_account_id_filter`],
+//! `types[]`/`exclude_types[]`/`account_id` query-parameter wiring, and that
+//! module's own `account_id` resolution (`resolve_account_id_filter`,
 //! including the "unresolved -> 200 + empty array, not 404" branch,
 //! Requirement 2.3) — not `NotificationService`'s own list/single/dismiss/
-//! clear business logic, which `notifications/service/tests.rs` (task 3.2)
-//! already covers.
+//! clear business logic, which `tests/notifications_service_it.rs` covers.
 //!
-//! ## Sandbox DB availability (see this task's own status report)
-//! Every handler here calls straight into `NotificationService`, which calls
-//! straight into `NotificationRepository` — real SQL on every path, no
-//! collaborator-order short-circuit that could make any test genuinely
-//! DB-independent (mirrors `notifications/service/tests.rs`'s own identical
-//! situation). This sandbox has no reachable Postgres (confirmed the same way
-//! every prior notifications task's own status report confirms it), so every
-//! `#[tokio::test]` below is written as a real, executable integration test
-//! against `crate::test_harness::spawn_test_app` but could not be run to
-//! completion here; see this task's own status report for the manual trace
-//! of each one, and for the compile-only verification this file's tests
-//! contributed via a temporary, reverted `pub mod endpoints;` probe.
+//! ## Relationship to the production-router notification integration tests
+//! `tests/notification_list_it.rs`, `tests/notification_show_dismiss_it.rs`
+//! and `tests/notification_contract_it.rs` drive the same four handlers
+//! through the *real, fully-wired* production router
+//! (`kawasemi::server::build_router`). This file instead mounts the handlers
+//! onto a router it builds itself, which is a different entry point: it is
+//! the component-level check of the handlers themselves, not of the module
+//! wiring. Both sets are kept as-is; neither subsumes the other.
 
 use std::sync::Arc;
 
@@ -39,18 +37,25 @@ use axum::http::{Request, StatusCode, header};
 use axum::routing::{get, post};
 use tower::ServiceExt;
 
-use super::*;
-use crate::accounts::model::{ProfileField, RemoteAccount};
-use crate::accounts::remote_repository::upsert_remote;
-use crate::actor::owner::create_owner;
-use crate::actor::repository::insert_actor;
-use crate::actor::{ActorState, ActorType, Handle};
-use crate::notifications::model::Notification;
-use crate::notifications::repository::insert_dedup;
-use crate::oauth::app_repository::{self, NewApp};
-use crate::oauth::model::ScopeSet as ModelScopeSet;
-use crate::oauth::token_repository::{self, NewAccessToken};
-use crate::test_harness::{TestApp, spawn_test_app};
+use kawasemi::accounts::model::{ProfileField, RemoteAccount};
+use kawasemi::accounts::remote_repository::upsert_remote;
+use kawasemi::actor::owner::create_owner;
+use kawasemi::actor::repository::insert_actor;
+use kawasemi::actor::{ActorState, ActorType, Handle};
+use kawasemi::domain::{AccountRef, Id};
+use kawasemi::notifications::endpoints::{
+    NOTIFICATION_DISMISS_PATH, NOTIFICATION_SHOW_PATH, NOTIFICATIONS_CLEAR_PATH,
+    NOTIFICATIONS_LIST_PATH, NotificationEndpointsState, clear_notifications, dismiss_notification,
+    list_notifications, show_notification,
+};
+use kawasemi::notifications::model::{Notification, NotificationType};
+use kawasemi::notifications::repository::insert_dedup;
+use kawasemi::notifications::service::NotificationService;
+use kawasemi::oauth::app_repository::{self, NewApp};
+use kawasemi::oauth::middleware::AuthState;
+use kawasemi::oauth::model::ScopeSet as ModelScopeSet;
+use kawasemi::oauth::token_repository::{self, NewAccessToken};
+use kawasemi::test_harness::{TestApp, spawn_test_app};
 
 // ---- Fixture plumbing (mirrors `notifications/service/tests.rs`'s own
 // established `create_test_actor`/`sample_notification`/`seed_notification`
@@ -64,7 +69,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
         .expect("creating the owner must succeed");
 
     let actor_id = app.runtime.ids.next_id();
-    let actor = crate::actor::model::LocalActor {
+    let actor = kawasemi::actor::model::LocalActor {
         id: actor_id,
         owner_id,
         handle: Handle::new(handle).expect("test handle must be valid"),

@@ -155,7 +155,7 @@
 //! check it by itself. To still obtain a real compiler signal despite that
 //! constraint, this task validated the file by *temporarily* adding `pub mod
 //! endpoints;` to `src/notifications.rs`, running `cargo check` (and this
-//! module's own `#[cfg(test)] mod tests` suite), capturing the output as this
+//! module's own test suite), capturing the output as this
 //! task's compile-correctness evidence, and then reverting that one line —
 //! confirmed via `git diff -- src/notifications.rs` showing no residual
 //! change — mirroring this exact spec's own task 3.1 precedent for a
@@ -184,9 +184,17 @@
 //! exemption or opt-out of any kind, so once task 4.2 merges this module's
 //! router into `router()`, every one of these four routes is covered by the
 //! same global layer automatically, with no further action needed here.
-
-#[cfg(test)]
-mod tests;
+//!
+//! ## Where this module's tests live
+//! There is no `endpoints/tests.rs`. Every one of this module's own tests
+//! drives a real axum `Router` against a real Postgres schema and therefore
+//! requires a running instance (`spawn_test_app`); they all live in
+//! `tests/notifications_endpoints_it.rs` — placed there by
+//! `.kiro/specs/test-placement-migration` task 4.1 so that steering
+//! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
+//! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
+//! A module with no `tests.rs` therefore means "no pure unit test applies
+//! here", not "untested".
 
 use std::sync::Arc;
 

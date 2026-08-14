@@ -80,7 +80,7 @@
 
 - [ ] 4. 移設: notifications 系 3 ファイル
 
-- [ ] 4.1 (P) 通知エンドポイントの検証を統合テストへ移す
+- [x] 4.1 (P) 通知エンドポイントの検証を統合テストへ移す
   - 対象は 24 箇所（単一ファイルとして最大）
   - OAuth アプリ・アクセストークンの生成ヘルパーを多用する。これらは公開リポジトリ関数であり、明示 import で解決する（Tier 0）
   - 移設先ファイルが `cargo test` で通り、移設元の `spawn_test_app` 呼び出しが 0 になっている
@@ -190,6 +190,9 @@
 - 1.1: `src/test_harness/tests.rs` の「5 箇所」のうち L2 は `//!` ドキュメントコメント内の記述で、コード上の呼び出しは 4 箇所。対象 203 は不変（208−5 = 207−4）。要件 1.1 の完了判定は **grep 基準の 5** で行うこと。タスク 8.1/8.2 で内訳を明記する
 - 1.1: design.md「File Structure Plan」の移設先名 19 件のうち **`tests/timelines_endpoints_it.rs` のみ既存ファイル（1341 行）と衝突**。既存は `kawasemi::server::build_router` の実ルータ、移設元 `src/timelines/endpoints/tests.rs` は手組みのテスト専用ルータを対象としており、タスク 7.2 は改名前に要件 2.4 の重複判定を行うこと
 - 1.1: 要件 2.6 のテスト関数総数は、コメント・文字列をマスクした値で比較する（生 grep は doc コメント内の `#[tokio::test]` を拾う）。移設前 src 1779 / tests 507、移設後の期待値 src 1589 / tests 697、合計 2286 不変
+- 4.1: `tests/notifications_endpoints_it.rs:21` が `tests/notifications_service_it.rs` を先行参照している（4.2 の移設先名。現時点では未存在）。**4.2 の実装者はこの参照が自タスクで実際に成立することを確認すること**
+- 4.1: `src/notifications/endpoints.rs:147-165`「Not wired into the module tree yet」節は陳腐化しているが**本 spec の移設に起因しない**（notifications spec 側の配線完了による）。境界外限定の 8.4 掃除からも漏れるので、後続 spec 候補として HANDOFF に残す
+- 4.1: `tests/notification_list_it.rs:9,12` が移設元を名指し。8.4 の対象。行をまたがない通常表記なので行単位 grep で拾える
 - 3.3: **【要件 2.4 の解釈を確定】移設は要件 2.4 に違反しない。** 規範動詞が「重複する検証を**新たに作らない**」であり、移設は既存検証の再配置であって新規作成ではない。「移設後の `tests/` に重複が存在してはならない」と読むと、2.1（同一保持）・2.2（削除禁止）・1.1（移設せよ）が同時に充足不能になるため誤読。spec が用意した出口は 2.3 →要件 4 の例外（弱めずに元位置へ）だけで、重複を理由とした統合・削除を認める条項はない。Boundary Context の Out of scope に「検証内容そのものの追加・拡張・改善」が明記されている
 - 3.3: 波で初めて実質重複を観測。3 組を検証し**真の重複は 1 組のみ** — 移設した `search_module_it::search_end_to_end_through_the_real_router_with_the_default_pg_backend` が既存 `search_type_scope_it::type_statuses_narrows_to_statuses_only` に包含され、かつ**既存側のほうが証明力が強い**（競合する account / hashtag を実在させたうえで空配列を主張している）。他の 2 組は入口かアサーション軸が異なる。**これは要件 4 の例外ではない**（4.2 の「公開面の拡大を強いる」に該当しないため、`exceptions.md` の例外台帳に載せると台帳の意味が壊れる）。8.2 の判断記録欄に書き、整理は後続 spec の候補として HANDOFF に残す
 - 3.3: **【波の標準に追加】部分移設で `tests.rs` が残るモジュールは、親 `.rs` の doc（「Testing approach」節など）も同タスク内で直すこと。** `cargo doc` に描画される本番 doc が移設で偽になり、8.4 の掃除範囲（境界外ファイル限定）からも漏れる。3.3 で `src/search/endpoint.rs:45, 179-186` が該当し修正済み。以降 4.1 / 5.1 / 6.1 / 7.1 など多数が同型
