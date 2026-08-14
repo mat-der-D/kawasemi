@@ -175,7 +175,7 @@ async fn claim_due_returns_none_when_nothing_is_due() {
 /// Requirement 4.2 (this task's core concurrency claim): two concurrent
 /// `claim_due` calls against the same single queued job, issued from two
 /// genuinely separate pooled connections (`tokio::join!`, pool
-/// `max_connections = 5` per `test_harness.rs`), never both return the job.
+/// `max_connections = 2` per `test_harness.rs`), never both return the job.
 /// `FOR UPDATE SKIP LOCKED` guarantees whichever call's subquery locks the
 /// row first wins; the other observes it already gone (state no longer
 /// `'queued'`) and returns `None`.

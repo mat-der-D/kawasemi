@@ -4,7 +4,7 @@
 //!
 //! Mirrors `src/db/tests.rs`'s/`src/migrate/tests.rs`'s established
 //! convention of a sibling `tests.rs` module, but reuses
-//! `crate::test_harness::db_fixture::spawn_test_db` (task 8.1, already available) for
+//! `crate::test_harness::db_fixture::spawn_test_db` for
 //! an isolated, already-migrated schema and a deterministic
 //! `RuntimeContext` rather than re-deriving schema isolation from scratch —
 //! this is genuinely repository-level integration coverage (a real

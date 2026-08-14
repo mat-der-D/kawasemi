@@ -1,6 +1,6 @@
-//! Unit tests for the resident reaper (task 1.1, Requirements 2.1/2.3).
+//! Unit tests for the resident reaper.
 //!
-//! The completion condition for this boundary is a property no
+//! The property that matters here is one no
 //! same-runtime test can demonstrate: *after* a reclaim request has been
 //! submitted, the pool is closed and the schema is dropped **even though the
 //! runtime the caller submitted from has already been destroyed**. Both tests
@@ -109,8 +109,7 @@ fn await_reclaimed(observer_pool: &PgPool, schema: &str) {
     });
 }
 
-/// Requirement 2.1 / 2.3, and this task's stated completion condition: a
-/// request submitted from a runtime that is subsequently destroyed still
+/// A request submitted from a runtime that is subsequently destroyed still
 /// results in the pool being closed and the schema dropped.
 #[test]
 fn reclaims_pool_and_schema_after_the_submitting_runtime_is_destroyed() {
@@ -143,8 +142,8 @@ fn reclaims_pool_and_schema_after_the_submitting_runtime_is_destroyed() {
 }
 
 /// Submits from inside a `Drop` implementation running on a thread with no
-/// Tokio runtime reachable at all — the exact shape `Drop for TestApp` will
-/// take in task 1.2. Proves the submission path neither panics (which inside
+/// Tokio runtime reachable at all — the exact shape `Drop for TestApp`
+/// takes. Proves the submission path neither panics (which inside
 /// a destructor risks a double panic aborting the process) nor blocks waiting
 /// for a runtime that is not there, and that the request is still honored.
 #[test]

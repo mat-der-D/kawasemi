@@ -1,6 +1,5 @@
 //! The lightweight fixture tier: an isolated, migrated database with no
-//! running instance around it (design.md's "TestDb" component, Requirements
-//! 4.1-4.5).
+//! running instance around it.
 //!
 //! Scope: this module owns [`TestDb`] and [`spawn_test_db`]. What it owns is
 //! best described by what it deliberately does *not* do, since it is the
@@ -61,8 +60,8 @@ use crate::runtime::RuntimeContext;
 use super::{IsolatedDb, default_test_seed, drop_schema, establish_isolated_db, reaper};
 
 /// An isolated, migrated database and the deterministic injection boundaries
-/// to go with it (design.md's "TestDb" Service Interface) — the fixture for
-/// tests that need real SQL but no running instance.
+/// to go with it — the fixture for tests that need real SQL but no running
+/// instance.
 ///
 /// [`TestDb::cleanup`] is the explicit release path, and the only one that
 /// has provably finished by the time it returns. Omitting it does not leak:
@@ -97,12 +96,12 @@ pub struct TestDb {
 /// Panics if the shared test database (see `super::base_test_db_url`,
 /// overridable via `KAWASEMI_TEST_DATABASE_URL`) is not reachable, or if any
 /// setup step fails, for the same reason [`super::spawn_test_app`] does:
-/// design.md's signature returns `TestDb` directly, not a `Result`, so
+/// this returns `TestDb` directly rather than a `Result`, so
 /// callers that need to skip in an environment with no local PostgreSQL check
 /// reachability themselves first (this crate's own
 /// `should_run_against_real_database` convention).
 pub async fn spawn_test_db() -> TestDb {
-    // Also triggers the once-per-process startup sweep (Requirement 1.2):
+    // Also triggers the once-per-process startup sweep:
     // `spawn_test_db` is an entry point of its own, and a suite made entirely
     // of lightweight fixtures must still not require a manual pre-run
     // cleanup.

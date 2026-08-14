@@ -1,7 +1,8 @@
-//! Unit tests for the lightweight fixture tier (task 3.1, Requirement 4.2).
+//! Unit tests for the lightweight fixture tier.
 //!
-//! The completion condition has two halves, and a test that only exercised
-//! the pool would prove just one of them. "A migrated pool is available" is
+//! What `spawn_test_db` promises has two halves, and a test that only
+//! exercised the pool would prove just one of them. "A migrated pool is
+//! available" is
 //! the easy half — a query against a table only the embedded migrations
 //! create settles it. "No real instance was started" is the half that needs
 //! deliberate evidence, because *not doing something* leaves no trace by
@@ -88,8 +89,7 @@ async fn current_schema(db: &TestDb) -> String {
         .expect("the fixture's pool must report the schema it is pinned to")
 }
 
-/// Requirement 4.2 and this task's stated completion condition: a migrated
-/// pool, with no real instance started to obtain it.
+/// A migrated pool, with no real instance started to obtain it.
 #[tokio::test]
 async fn spawn_test_db_yields_a_migrated_pool_without_starting_a_real_instance() {
     if !should_run_against_real_database(
@@ -194,7 +194,7 @@ async fn spawn_test_db_yields_a_migrated_pool_without_starting_a_real_instance()
     );
 }
 
-/// Requirement 2.3/2.4 for this fixture: omitting `cleanup()` must not leak.
+/// Omitting `cleanup()` must not leak.
 /// `Drop` cannot do the work itself (it is synchronous, the work is not), so
 /// it hands the pool and schema to the resident reaper; this test observes
 /// the reclaim actually completing.

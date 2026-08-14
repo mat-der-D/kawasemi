@@ -9,13 +9,13 @@
 //! This module owns exactly [`spawn_federation_pair`] and [`FederationPair`].
 //! It deliberately reassembles the same startup steps
 //! `crate::test_harness::spawn_test_app` itself reassembles
-//! ([`crate::db::establish_pool`], [`crate::migrate::apply_migrations`],
-//! [`crate::runtime::RuntimeContext::deterministic`],
+//! ([`crate::runtime::RuntimeContext::deterministic`],
 //! [`crate::actor::build_actor_module`],
 //! [`crate::bootstrap::wiring::compose_modules`],
 //! [`crate::state::AppState::new`], [`crate::server::build_router`]) rather
 //! than calling `spawn_test_app` itself, for the one reason this module's doc
-//! comment below explains in full ("Why not `spawn_test_app`"). It reuses
+//! comment below explains in full ("Why not `spawn_test_app`"). The isolated
+//! database is not among those steps — see "Isolated database" below. It reuses
 //! [`crate::test_harness::TestApp`] unchanged as each paired instance's own
 //! type (same `cleanup()`/`Drop` lifecycle, same
 //! isolated-schema/deterministic-runtime guarantees) via `TestApp`'s

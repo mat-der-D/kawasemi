@@ -1,12 +1,11 @@
-//! Orphan-schema reclaim judgement (OrphanSchemaSweeper boundary,
-//! test-infrastructure Requirement 3.2, design.md's "Components and
-//! Interfaces" -> "Test Infrastructure" -> "OrphanSchemaSweeper").
+//! Orphan-schema reclaim: deciding which abandoned schemas from earlier runs
+//! are safe to drop, and dropping them.
 //!
-//! This module owns both halves of that boundary: the predicate deciding
+//! This module owns both halves: the predicate deciding
 //! whether one schema name is old enough that no live process can still be
-//! using it ([`is_reclaimable`], task 2.1), and the pass that enumerates the
+//! using it ([`is_reclaimable`]), and the pass that enumerates the
 //! server's schemas, applies the predicate, and drops what it claims — once
-//! per process, from the first fixture created ([`sweep_orphans`], task 2.2).
+//! per process, from the first fixture created ([`sweep_orphans`]).
 //!
 //! ## Why the name is the only evidence
 //! The reaper (`super::reaper`) is best-effort at process exit, so residue
@@ -14,9 +13,9 @@
 //! schema a *concurrently running* test process is actively using needs an
 //! age, and the only age available is the wall-clock nanosecond timestamp
 //! [`super::unique_schema_name`] already embeds in every name it mints. That
-//! keeps the sweeper free of any DB-side bookkeeping table (design.md: 「閾値
-//! 判定は名前に埋まったナノ秒だけで行うため、DB へのメタデータ追加を必要としない」)
-//! at the price of a hard coupling to the naming convention — made structural
+//! keeps the sweeper free of any DB-side bookkeeping table — no metadata to
+//! add, migrate, or keep in sync with the schemas it describes —
+//! at the price of a hard coupling to the naming convention, made structural
 //! here by owning [`HARNESS_SCHEMA_PREFIX`], which `unique_schema_name`
 //! consumes, rather than re-spelling the literal on the reading side where it
 //! could silently drift.
@@ -43,8 +42,8 @@
 //! ## Why the sweep sits on the critical path
 //! [`sweep_orphans`] is awaited *before* the first fixture is handed out, so
 //! every test binary in this workspace pays for it once. That placement is what
-//! makes Requirement 1.2 (「実行前の孤立スキーマ掃除を前提条件とせずに完了する」)
-//! true without a wrapper script, and it is why every step here is bounded:
+//! lets a suite run without a manual pre-run cleanup step or a wrapper
+//! script, and it is why every step here is bounded:
 //! [`SWEEP_TIMEOUT`] caps the whole pass and [`SWEEP_LOCK_TIMEOUT_MS`] caps any
 //! single lock wait, so a database in a bad state costs a fixed number of
 //! seconds once rather than hanging a suite that has not run a line of test
@@ -73,8 +72,8 @@ mod tests;
 pub(crate) const HARNESS_SCHEMA_PREFIX: &str = "kawasemi_test_harness_";
 
 /// How long a harness schema must have existed before this module will claim
-/// it (Requirement 3.2's 「現在実行中のテストが使用しているスキーマ ... を回収
-/// 対象に含めない」 stated as a number).
+/// it — "do not reclaim what a running test is still using", stated as a
+/// number.
 ///
 /// Two hours, chosen from the asymmetry of the two ways it can be wrong. Too
 /// short destroys a concurrently running process's database state, silently and
@@ -83,16 +82,17 @@ pub(crate) const HARNESS_SCHEMA_PREFIX: &str = "kawasemi_test_harness_";
 /// use, with a large multiplier on top:
 ///
 /// - A schema never outlives the process that made it, and the longest run in
-///   this workspace is the full `cargo test --lib` suite at ~891 seconds
-///   (design.md's baseline table). Two hours is roughly eight times that, so
-///   even a machine several times slower than the one that produced the
-///   baseline stays inside it.
+///   this workspace was the full `cargo test --lib` suite at ~891 seconds when
+///   this bound was chosen. Two hours is roughly eight times that, so
+///   even a machine several times slower than the one that produced that
+///   figure stays inside it.
 /// - The one case that legitimately holds a *single* fixture open far longer
 ///   than the suite takes is a developer stopped in a debugger. Two hours
 ///   covers a long interactive session; minutes would not.
 ///
 /// Against that, the cost of waiting: an unreclaimed schema consumes catalog
-/// rows and disk, not connections — the resource this spec exists to protect —
+/// rows and disk, not connections — the resource whose exhaustion actually
+/// stops a suite —
 /// so residue that lingers a couple of hours changes nothing about whether a
 /// suite can run. That is why the number is biased long rather than split down
 /// the middle.
@@ -102,10 +102,11 @@ const RECLAIM_THRESHOLD: Duration = Duration::from_secs(2 * 60 * 60);
 ///
 /// The sweep runs before the first fixture of a test binary is handed out, so
 /// an unbounded one would turn any database-side stall into a suite that hangs
-/// having executed no test at all — the failure shape this spec exists to
-/// remove, in a new place. Thirty seconds is far above what the work costs (one
-/// catalog query plus a `DROP SCHEMA` per orphan, all on one connection: the
-/// 239-schema backlog design.md records drains in well under a second) and far
+/// having executed no test at all — reintroducing, in a new place, exactly the
+/// failure shape this module removes. Thirty seconds is far above what the
+/// work costs (one
+/// catalog query plus a `DROP SCHEMA` per orphan, all on one connection: a
+/// backlog of 239 schemas drains in well under a second) and far
 /// below anything a caller would experience as a hang.
 const SWEEP_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -128,27 +129,27 @@ const SWEEP_LOCK_TIMEOUT_MS: u32 = 3_000;
 /// before that.
 static STARTUP_SWEEPS: AtomicUsize = AtomicUsize::new(0);
 
-/// The one-shot guard behind [`sweep_orphans`] (Requirement 3.4).
+/// The one-shot guard behind [`sweep_orphans`].
 ///
 /// `tokio::sync::OnceCell` rather than `std::sync::Once` because the
 /// initializer awaits: concurrent callers arriving during the first sweep wait
-/// for *that* sweep to finish rather than starting a second one, which both
-/// gives the requirement its meaning and keeps the number of admin connections
-/// this module opens at one no matter how many fixtures race to be first.
+/// for *that* sweep to finish rather than starting a second one, which is what
+/// makes "once per process" mean once, and keeps the number of admin
+/// connections this module opens at one no matter how many fixtures race to
+/// be first.
 static STARTUP_SWEEP: OnceCell<()> = OnceCell::const_new();
 
-/// Reclaims schemas earlier runs left behind, once per process (Requirements
-/// 1.2, 3.1, 3.3, 3.4).
+/// Reclaims schemas earlier runs left behind, once per process.
 ///
-/// Called at the head of every fixture constructor (`super::spawn_test_app`,
-/// and `spawn_test_db` when task 3.1 adds it); the guard lives here rather than
+/// Reached from every fixture constructor through
+/// `super::establish_isolated_db`; the guard lives here rather than
 /// at the call sites so that adding a constructor cannot accidentally add a
 /// sweep. The first caller in the process performs the pass and every later
 /// one returns immediately.
 ///
 /// Never fails and never panics: everything it could not reclaim is logged and
-/// left for a future run (Requirement 3.3 — 「回収処理が失敗したとき ... テスト
-/// 自体の実行を妨げない」).
+/// left for a future run, so a reclaim failure never keeps a test from
+/// running.
 pub(crate) async fn sweep_orphans() {
     STARTUP_SWEEP
         .get_or_init(|| async {
@@ -158,10 +159,10 @@ pub(crate) async fn sweep_orphans() {
         .await;
 }
 
-/// How many startup sweeps have run in this process. Exactly the quantity
-/// Requirement 3.4 bounds, exposed so that `tests/harness_sweep_it.rs` can
-/// state the requirement over the real trigger (`spawn_test_app`) instead of
-/// over an internal flag it would have to trust.
+/// How many startup sweeps have run in this process. Exposed so that
+/// `tests/harness_sweep_it.rs` can assert the once-per-process property over
+/// the real trigger (`spawn_test_app`) instead of over an internal flag it
+/// would have to trust.
 pub fn startup_sweeps_performed() -> usize {
     STARTUP_SWEEPS.load(Ordering::Relaxed)
 }
@@ -174,7 +175,8 @@ pub fn startup_sweeps_performed() -> usize {
 /// making a sweep happen on demand, and the guarded entry point deliberately
 /// refuses to sweep a second time. Ordinary callers want [`sweep_orphans`];
 /// this is the harness's own test surface, and like the rest of
-/// `super`, it leaves the crate entirely once task 4.2 gates the module.
+/// `super` it leaves the crate entirely in a build without the
+/// `test-harness` feature.
 ///
 /// Bounded by [`SWEEP_TIMEOUT`] and, like the guarded entry point, infallible
 /// from the caller's point of view.
@@ -196,8 +198,8 @@ pub async fn sweep_orphans_now() {
 /// convenience: `super::drop_schema` opens and closes an admin pool per schema,
 /// which is right for the reaper's one-off requests but would mean a couple of
 /// hundred connection handshakes here, and fanning the drops out concurrently
-/// would spend exactly the shared server's connection budget this spec exists
-/// to protect (see task 1.1's note in tasks.md). One connection also lets the
+/// would spend exactly the shared server's connection budget this whole
+/// mechanism exists to protect. One connection also lets the
 /// `lock_timeout` below apply to every statement in the pass, which a
 /// pool-per-drop arrangement could not guarantee.
 async fn reclaim_orphans(now: SystemTime, threshold: Duration) {
@@ -260,8 +262,8 @@ async fn reclaim_orphans(now: SystemTime, threshold: Duration) {
     {
         // `IF EXISTS` because another process's sweep may have reclaimed this
         // same schema between the listing above and this statement, which is
-        // not an error but the two passes agreeing (design.md: 「削除は
-        // `IF EXISTS` 相当で冪等」). Interpolation is safe by construction:
+        // not an error but the two passes agreeing. Interpolation is safe
+        // by construction:
         // `is_reclaimable` accepted this name, and it accepts only the fixed
         // prefix followed by two runs of ASCII digits.
         let dropped = sqlx::query(sqlx::AssertSqlSafe(format!(
@@ -317,9 +319,9 @@ async fn list_schema_names(
         .collect())
 }
 
-/// Decides whether `schema_name` names a harness schema old enough to reclaim
-/// (Requirement 3.2: 「現在実行中のテストが使用しているスキーマ... を回収対象に
-/// 含めない」).
+/// Decides whether `schema_name` names a harness schema old enough to
+/// reclaim — old enough that no currently running test can still be using
+/// it.
 ///
 /// Returns `true` only when all of the following hold:
 /// - the name is exactly `{HARNESS_SCHEMA_PREFIX}{nanos}_{seq}` with both

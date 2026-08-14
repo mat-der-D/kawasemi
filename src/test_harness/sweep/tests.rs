@@ -1,12 +1,12 @@
-//! Unit tests for the reclaim predicate (task 2.1, Requirement 3.2).
+//! Unit tests for the reclaim predicate.
 //!
 //! No database, no sleeping, no `SystemTime::now()`: `is_reclaimable` takes
 //! the current instant as a parameter, so every case here — including the
 //! ones real time cannot be made to produce on demand, like a schema stamped
 //! in the *future* by a skewed clock — is exercised as pure logic.
 //!
-//! The three cases the task's completion condition names (an old name, a
-//! fresh name, an unparseable name) are the first three tests; the rest close
+//! The three basic cases (an old name, a fresh name, an unparseable name)
+//! are the first three tests; the rest close
 //! the ways a predicate can be accidentally right — matching too broadly,
 //! ignoring the threshold, saturating on overflow — which is what makes the
 //! judgement safe to point at a shared database holding other people's
@@ -21,8 +21,9 @@ use crate::test_harness::unique_schema_name;
 /// creation instants both well before and well after it.
 const NOW_SECS: u64 = 1_700_000_000;
 
-/// Threshold used by the age cases. The value is task 2.2's decision; here it
-/// only needs to be a duration the tests can straddle.
+/// Threshold used by the age cases. Deliberately unrelated to the real
+/// `RECLAIM_THRESHOLD`: here it only needs to be a duration the tests can
+/// straddle.
 const THRESHOLD: Duration = Duration::from_secs(600);
 
 fn now() -> SystemTime {

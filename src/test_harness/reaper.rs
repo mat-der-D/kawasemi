@@ -1,15 +1,14 @@
-//! Resident reclaim executor (HarnessReaper boundary, test-infrastructure
-//! Requirements 2.1-2.5, design.md's "Components and Interfaces" ->
-//! "Test Infrastructure" -> "HarnessReaper").
+//! Resident reclaim executor: releases a fixture's connection pool and drops
+//! its isolated schema, off the caller's runtime.
 //!
 //! ## Why a resident executor at all
 //! A fixture's `Drop` runs synchronously, typically on a `#[tokio::test]`
 //! runtime that is *about to be destroyed*: the release work it needs done
 //! (`pool.close()`, then `DROP SCHEMA`) is asynchronous, and anything the
 //! destructor spawns onto that dying runtime never runs to completion. That
-//! is the exact mechanism behind this spec's connection leak — 750
-//! `spawn_test_app` calls against 619 `cleanup()` calls, with `Drop`
-//! releasing not one connection.
+//! was the exact mechanism behind the harness's original connection leak:
+//! against 750 `spawn_test_app` calls the suite made only 619 `cleanup()`
+//! calls, and `Drop` released not one connection of the difference.
 //!
 //! This module moves the *execution* of release off the caller's runtime
 //! entirely. [`HarnessReaper::global`] owns one Tokio runtime on one
@@ -31,12 +30,13 @@
 //! failed close still frees the server-side backend once the process-wide
 //! socket is torn down, and the schema drop proceeds regardless.
 //!
-//! ## Failure policy (design.md: "解放の成否でテストを失敗させない")
+//! ## Failure policy: a failed release must never fail a test
 //! Nothing in this module returns an error to a caller or panics. Every
 //! failure — a full channel receiver gone, a stuck close, a `DROP SCHEMA`
 //! that could not be issued — is reported on stderr and abandoned. Whatever
 //! this module fails to reclaim stays a stale schema, which is precisely the
-//! residue `OrphanSchemaSweeper` (task 2.2) exists to collect on a later run.
+//! residue the startup sweep ([`super::sweep`]) exists to collect on a later
+//! run.
 
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -54,8 +54,8 @@ mod tests;
 /// the caller already destroyed, and `DROP SCHEMA ... CASCADE` blocks on
 /// locks still held by a backend that has not noticed its client is gone.
 /// Without the bound, one such request would stall every request queued
-/// behind it and the leak this spec exists to fix would come back in a new
-/// shape.
+/// behind it, and the connection leak this module exists to prevent would
+/// come back in a new shape.
 const RECLAIM_STEP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Maximum number of requests taken off the channel per iteration. Batching
@@ -110,7 +110,7 @@ impl HarnessReaper {
     /// of the very last fixture in the process, and there is no point in the
     /// lifetime of a test binary at which it is provably safe to stop it.
     /// Requests still queued when the process exits are simply lost, and the
-    /// startup sweep (task 2.2) reclaims their schemas on a later run.
+    /// startup sweep ([`super::sweep`]) reclaims their schemas on a later run.
     pub(crate) fn global() -> &'static HarnessReaper {
         static REAPER: OnceLock<HarnessReaper> = OnceLock::new();
         REAPER.get_or_init(HarnessReaper::start)
@@ -140,9 +140,8 @@ impl HarnessReaper {
 
     /// Hands `request` to the resident runtime.
     ///
-    /// Never blocks and never panics, so it is safe to call from inside
-    /// `Drop` (design.md: "`Drop` から呼ばれるため、送信操作はブロックせず、
-    /// パニックしてはならない"). Returns as soon as the request is queued;
+    /// Never blocks and never panics, which is what makes it safe to call
+    /// from inside `Drop`. Returns as soon as the request is queued;
     /// the reclaim itself completes later, independently of whether the
     /// caller's runtime still exists.
     ///

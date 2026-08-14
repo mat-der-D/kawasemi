@@ -58,8 +58,7 @@
 //! the identical clock/id/rng/key sequence, which is the more useful
 //! property for a caller asserting on those values.
 //!
-//! ## Release path: `cleanup()` vs `Drop` (Requirement 8.5,
-//! test-infrastructure Requirements 2.1-2.5)
+//! ## Release path: `cleanup()` vs `Drop`
 //! [`TestApp::cleanup`] is the explicit, synchronous release path: it signals
 //! the listener's graceful shutdown and awaits it actually stopping, closes
 //! the shared pool, and then drops the isolated schema — in that order, so
@@ -75,9 +74,9 @@
 //! `tokio::runtime::Handle::try_current`, but a `#[tokio::test]`'s runtime is
 //! destroyed the moment the test function returns, so a task spawned from a
 //! destructor running on that runtime never completes — and the pool was
-//! never closed at all, only the schema drop was attempted. That is the
-//! measured leak this harness is being fixed for (requirements.md's
-//! Introduction: 8 dropped instances still holding 40 connections).
+//! never closed at all, only the schema drop was attempted. The leak was
+//! measured directly: 8 dropped instances still holding 40 connections three
+//! seconds later.
 //!
 //! `Drop` now (a) fires the same shutdown signal `cleanup` would (sending on
 //! a `oneshot::Sender` is synchronous, non-blocking and infallible here) and
@@ -94,7 +93,7 @@
 //! exit: the reaper is deliberately never shut down, so requests still queued
 //! when the test binary exits are simply lost together with it (see
 //! [`reaper::HarnessReaper::global`]). Their schemas stay on the server as
-//! residue for the startup sweep (task 2.2) to reclaim on a later run. What
+//! residue for the startup sweep ([`sweep`]) to reclaim on a later run. What
 //! `Drop` guarantees is that a leaked fixture is *queued* for release, not
 //! that it has been released by any particular moment — only `cleanup()`
 //! guarantees that.
@@ -112,14 +111,14 @@
 mod tests;
 
 /// The resident reclaim executor every `TestApp`/`TestDb` destructor hands
-/// its pool and isolated schema to (test-infrastructure Requirements 2.1-2.5).
+/// its pool and isolated schema to.
 /// Not `#[cfg(test)]`: `tests/*.rs` integration binaries drop harness
 /// fixtures too, and their destructors need the same release path this
 /// crate's own unit tests get.
 pub(crate) mod reaper;
 
-/// Startup reclaim of schemas earlier runs left behind (test-infrastructure
-/// Requirements 1.2, 3.1-3.4). Not `#[cfg(test)]` for the same reason
+/// Startup reclaim of schemas earlier runs left behind.
+/// Not `#[cfg(test)]` for the same reason
 /// [`reaper`] is not: `tests/*.rs` integration binaries spawn fixtures too,
 /// and the safety net has to cover the residue they leave.
 ///
@@ -128,13 +127,13 @@ pub(crate) mod reaper;
 /// the ones that happened by themselves; both entry points it needs are
 /// documented as the harness's own test surface. The module's internals —
 /// [`sweep::is_reclaimable`], the prefix, the threshold — stay crate-private,
-/// and the whole of `test_harness` leaves the shipped library together once
-/// task 4.2 gates it.
+/// and the whole of `test_harness` leaves the shipped library together in a
+/// build without the `test-harness` feature.
 pub mod sweep;
 
 /// The lightweight fixture tier: an isolated schema and a migrated pool with
-/// no running instance around them (test-infrastructure Requirements
-/// 4.1-4.5). Not `#[cfg(test)]`, for the same reason [`reaper`] is not:
+/// no running instance around them. Not `#[cfg(test)]`, for the same reason
+/// [`reaper`] is not:
 /// `tests/*.rs` integration binaries are a separate crate and can only see
 /// `pub` items.
 pub mod db_fixture;
@@ -390,14 +389,14 @@ pub(crate) struct IsolatedDb {
 }
 
 /// Creates a fresh isolated schema and returns a migrated pool pinned to it
-/// (Requirements 8.2, 8.4), running the once-per-process startup sweep first.
+/// running the once-per-process startup sweep first.
 /// Panics on any failure, for the reason [`create_schema`] documents: a
 /// caller cannot do anything useful with a partially-initialized fixture.
 pub(crate) async fn establish_isolated_db() -> IsolatedDb {
     // Before anything else in the process's first fixture: reclaim what
     // earlier runs abandoned, so a suite never has to be preceded by a manual
-    // cleanup step (Requirement 1.2). Subsequent calls return immediately —
-    // the once-per-process guard (Requirement 3.4) lives inside
+    // cleanup step. Subsequent calls return immediately —
+    // the once-per-process guard lives inside
     // `sweep_orphans`, so every fixture built on this helper inherits it by
     // calling the same function rather than by repeating the trigger.
     sweep::sweep_orphans().await;
@@ -429,8 +428,8 @@ pub(crate) async fn establish_isolated_db() -> IsolatedDb {
     // whereas at 1 its already-queued `acquire` is served the moment the
     // test's `enqueue` releases the sole connection, i.e. always just
     // before the test's own claim. The race exists at 2 as well, only far
-    // more rarely (measured 1 failure in 34 runs). Full evidence:
-    // `.kiro/specs/test-infrastructure/worker-claim-investigation.md`.
+    // more rarely (measured 1 failure in 34 runs). Pool size only decides who
+    // wins the race, never whether the row is processed exactly once.
     let db_config = DatabaseConfig {
         url: Secret::new(schema_scoped_url(&base_test_db_url(), &schema)),
         max_connections: 2,
@@ -461,8 +460,8 @@ pub(crate) async fn establish_isolated_db() -> IsolatedDb {
 /// prefer (Requirement 8.5): it is the only one that has provably finished by
 /// the time it returns. Omitting it no longer leaks for the rest of the
 /// process, though — `Drop` hands the pool and schema to
-/// [`reaper::HarnessReaper`] instead (test-infrastructure Requirements 2.3,
-/// 2.4). That hand-off is best-effort at process exit: a request still queued
+/// [`reaper::HarnessReaper`] instead. That hand-off is best-effort at process
+/// exit: a request still queued
 /// when the test binary exits is lost with the reaper, leaving a stale schema
 /// for the startup sweep to reclaim on a later run. See this module's doc
 /// comment ("Release path") for how the two differ.
@@ -615,7 +614,7 @@ impl TestApp {
 
 impl Drop for TestApp {
     /// Delegates release to the process-resident [`reaper::HarnessReaper`]
-    /// (test-infrastructure Requirements 2.1-2.5), covering the case where a
+    /// covering the case where a
     /// test panics or otherwise returns without calling [`TestApp::cleanup`].
     /// Every step here is synchronous, non-blocking and infallible, because a
     /// panic in a destructor running during an unwind aborts the process. See

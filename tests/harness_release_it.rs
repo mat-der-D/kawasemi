@@ -1,16 +1,14 @@
-//! Integration tests for test-infrastructure task 1.2 ("TestApp の解放を
-//! リーパー委譲に置き換える"), covering Requirements 2.1, 2.2, 2.3, 2.4 and
-//! 2.5 — design.md's "Testing Strategy" -> "Integration Tests", whose first
-//! entry ("`cleanup()` を呼ばずに多数の `TestApp` を生成・破棄したとき、保持
-//! 接続数が生存インスタンス数に比例する範囲に留まる") it calls **本 spec の
-//! 中核**.
+//! Integration tests for `TestApp`'s release path: creating and dropping
+//! many fixtures without calling `cleanup()` must keep the connections held
+//! proportional to the number of instances alive at once, not to the number
+//! ever created.
 //!
 //! ## Why this can only be an integration test
 //! The property under test is a *process-wide, server-observed* one: how many
 //! backends the shared `kawasemi_test` database is still holding open for
 //! this process after N fixtures have been created and dropped. Nothing
 //! inside the harness can answer that — `PgPool` reports its own idle/size
-//! counters, but the leak this spec exists to fix is precisely the case where
+//! counters, but the leak under test is precisely the case where
 //! the pool object is gone while its server-side backends are not. So the
 //! measurement is taken from `pg_stat_activity` over a connection that
 //! belongs to no fixture at all (see [`AdminProbe`]), and the fixtures are
@@ -20,11 +18,11 @@
 //! instances plus a database belong in `tests/*_it.rs`.
 //!
 //! ## What makes the assertion decisive rather than incidental
-//! Before this task, `Drop for TestApp` closed no connections at all: it
+//! `Drop for TestApp` once closed no connections at all: it
 //! detached a schema-drop onto whatever runtime happened to be current and
-//! left the pool entirely alone (requirements.md's Introduction records the
-//! measurement — 8 dropped instances still holding 40 connections three
-//! seconds later). With `spawn_test_app`'s current `max_connections: 2`, the
+//! left the pool entirely alone. That was measured directly — 8 dropped
+//! instances still holding 40 connections three
+//! seconds later. With `spawn_test_app`'s current `max_connections: 2`, the
 //! loop below would therefore end holding roughly `2 * DROPPED_INSTANCES`
 //! extra backends against a server whose global ceiling is 100. The
 //! tolerances here ([`SETTLED_ALLOWANCE`], [`PEAK_ALLOWANCE`]) are far below
@@ -86,8 +84,8 @@ const HARNESS_SCHEMA_PREFIX: &str = "kawasemi_test_harness_";
 /// `pg_stat_activity` count, and a sibling's not-yet-reclaimed schema shows
 /// up in another test's schema listing. Held for the whole body of each test,
 /// this lock removes that overlap at the source instead of absorbing it into
-/// wider tolerances — which would cost exactly the discriminating power
-/// Requirement 2.5's bound is there to have.
+/// wider tolerances — which would cost exactly the discriminating power the
+/// proportionality bound is there to have.
 ///
 /// A `tokio::sync::Mutex` rather than a `std::sync::Mutex`: it has no poison
 /// state, so the deliberately panicking test below cannot turn a lock it once
@@ -110,7 +108,7 @@ const DROPPED_INSTANCES: usize = 40;
 const SETTLED_ALLOWANCE: i64 = 6;
 
 /// Connections above baseline tolerated *during* the loop. This is the
-/// "生存インスタンス数に比例する" bound of Requirement 2.5 stated concretely:
+/// "proportional to the instances alive" bound stated concretely:
 /// the loop keeps exactly one instance alive at a time, so the steady-state
 /// cost is that instance's pool plus the handful of transient admin
 /// connections the harness and the reaper open to create and drop schemas —
@@ -305,14 +303,13 @@ async fn wait_until_reclaimed(
     }
 }
 
-/// Requirements 2.1, 2.3, 2.4, 2.5: creating and dropping many `TestApp`s
+/// Creating and dropping many `TestApp`s
 /// **without ever calling `cleanup()`** must not accumulate connections. The
 /// count is allowed to sit at "baseline + what the one live instance costs"
 /// throughout, and must return to baseline once none are live — never to grow
 /// with the number of instances already dropped.
 ///
-/// This is the completion condition of task 1.2 and, per design.md, the
-/// central integration test of this spec.
+/// This is the central integration test of the harness's release path.
 #[tokio::test]
 async fn dropping_many_test_apps_without_cleanup_does_not_accumulate_connections() {
     let _exclusive = EXCLUSIVE_DATABASE_ACCESS.lock().await;
@@ -327,7 +324,7 @@ async fn dropping_many_test_apps_without_cleanup_does_not_accumulate_connections
 
     // The whole point of the loop: `app` is bound and then dropped at the end
     // of each iteration with no `cleanup()` anywhere — the exact usage
-    // Requirement 2.4 says must not leak, and which 131 call sites in this
+    // must not leak, and which 131 call sites in this
     // repository already exhibit.
     let mut own_schemas = BTreeSet::new();
     let mut peak_connections = baseline_connections;
@@ -343,7 +340,7 @@ async fn dropping_many_test_apps_without_cleanup_does_not_accumulate_connections
         peak_connections = peak_connections.max(observed);
         assert!(
             observed <= baseline_connections + PEAK_ALLOWANCE,
-            "Requirement 2.5: after dropping instance {index} of {DROPPED_INSTANCES}, the \
+            "after dropping instance {index} of {DROPPED_INSTANCES}, the \
              connections held ({observed}) exceeded the baseline ({baseline_connections}) by \
              more than the {PEAK_ALLOWANCE} attributable to the single live instance and the \
              harness's transient admin connections — held connections are growing with the \
@@ -359,7 +356,7 @@ async fn dropping_many_test_apps_without_cleanup_does_not_accumulate_connections
 
     assert!(
         settled.connections <= baseline_connections + SETTLED_ALLOWANCE,
-        "Requirements 2.1/2.4: {DROPPED_INSTANCES} instances were created and dropped without \
+        "{DROPPED_INSTANCES} instances were created and dropped without \
          cleanup(); after waiting {SETTLE_TIMEOUT:?} the process still holds {} connections \
          against a baseline of {baseline_connections} (allowance {SETTLED_ALLOWANCE}, peak \
          observed during the loop {peak_connections}). Dropping a TestApp is not releasing its \
@@ -373,7 +370,7 @@ async fn dropping_many_test_apps_without_cleanup_does_not_accumulate_connections
         // it cannot be another test's schema that merely has not been
         // reclaimed yet.
         settled.surviving_schemas.is_empty(),
-        "Requirement 2.1: {} of the {} isolated schemas created by this test's dropped \
+        "{} of the {} isolated schemas created by this test's dropped \
          instances are still present, so the reclaim's DROP SCHEMA half did not run: {:?}",
         settled.surviving_schemas.len(),
         own_schemas.len(),
@@ -381,7 +378,7 @@ async fn dropping_many_test_apps_without_cleanup_does_not_accumulate_connections
     );
 }
 
-/// Requirement 2.2: a test that ends by panicking must still have its
+/// A test that ends by panicking must still have its
 /// connections and schema released. The panic is staged inside a spawned task
 /// so this test can observe the aftermath — `TestApp::drop` runs during that
 /// task's unwind, which is the situation in which a panicking destructor
@@ -407,7 +404,7 @@ async fn a_panicking_test_still_releases_its_connections_and_schema() {
     let panicked = tokio::spawn(async move {
         // Deliberately never cleaned up: the panic unwinds straight past any
         // release call a well-written test would have made, which is exactly
-        // the abnormal termination Requirement 2.2 covers.
+        // the abnormal termination this test covers.
         let app = spawn_test_app().await;
         let _ = schema_tx.send(isolated_schema_of(&app.pool).await);
         panic!("deliberate panic standing in for a failing test assertion");
@@ -429,19 +426,19 @@ async fn a_panicking_test_still_releases_its_connections_and_schema() {
 
     assert!(
         settled.connections <= baseline_connections + SETTLED_ALLOWANCE,
-        "Requirement 2.2: after a panicking test, {} connections are still held against a \
+        "after a panicking test, {} connections are still held against a \
          baseline of {baseline_connections} (allowance {SETTLED_ALLOWANCE})",
         settled.connections
     );
     assert!(
         settled.surviving_schemas.is_empty(),
-        "Requirement 2.2: the panicking task's own isolated schema {own_schema} is still \
+        "the panicking task's own isolated schema {own_schema} is still \
          present after waiting {SETTLE_TIMEOUT:?} — detected residue: {:?}",
         settled.surviving_schemas
     );
 }
 
-/// Third bullet of task 1.2: the explicit path and the reaper path must
+/// The explicit path and the reaper path must
 /// coexist on the same pool without breaking. `cleanup()` takes `self` by
 /// value, so `Drop` *always* runs immediately afterwards on an
 /// already-released instance — the one case where both paths meet on the same

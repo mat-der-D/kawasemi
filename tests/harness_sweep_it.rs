@@ -1,8 +1,7 @@
-//! Integration tests for test-infrastructure task 2.2 ("起動時スイープを実装し
-//! 初回フィクスチャ生成に接続する"), covering Requirements 1.2, 3.1, 3.3 and
-//! 3.4 — design.md's "Testing Strategy" -> "Integration Tests", entries
-//! 「古い孤立スキーマを人工的に作った状態でプロセスを起動すると回収され、新しい
-//! ものは残る」 and 「回収処理が失敗する状況でもテスト自体は実行される」.
+//! Integration tests for the startup sweep: planting old orphan schemas
+//! before a process starts must leave them reclaimed and newer ones
+//! untouched, and a sweep that cannot reclaim something must still let the
+//! run proceed.
 //!
 //! ## Why this can only be an integration test
 //! The sweep's contract is stated over *the database*, not over any value the
@@ -217,7 +216,7 @@ impl SchemaProbe {
     }
 }
 
-/// Requirements 3.1 and 3.2: a sweep reclaims the schemas an earlier run left
+/// A sweep reclaims the schemas an earlier run left
 /// behind, and leaves alone both a freshly created harness schema (which may
 /// belong to a process running right now) and a schema outside the harness's
 /// naming convention (which belongs to something else entirely).
@@ -251,12 +250,12 @@ async fn old_orphan_schemas_are_reclaimed_while_new_and_foreign_ones_are_kept() 
 
     assert!(
         !surviving.contains(&old),
-        "Requirement 3.1: the sweep must reclaim {old}, whose embedded timestamp is \
+        "the sweep must reclaim {old}, whose embedded timestamp is \
          {PLANTED_AGE:?} old, but it survived — surviving: {surviving:?}"
     );
     assert!(
         surviving.contains(&fresh),
-        "Requirement 3.2: the sweep must keep {fresh}, stamped just now and therefore possibly \
+        "the sweep must keep {fresh}, stamped just now and therefore possibly \
          in use by a process running right now, but it was dropped — surviving: {surviving:?}"
     );
     assert!(
@@ -266,8 +265,7 @@ async fn old_orphan_schemas_are_reclaimed_while_new_and_foreign_ones_are_kept() 
     );
 }
 
-/// Requirement 3.3: 「回収処理が失敗したとき, the Test Harness shall テスト自体の
-/// 実行を妨げない」.
+/// A failing reclaim must not stop the test run.
 ///
 /// The failure is real rather than mocked: a transaction on a separate
 /// connection holds `ACCESS EXCLUSIVE` on a table inside one planted orphan, so
@@ -315,7 +313,7 @@ async fn a_failing_reclaim_stops_neither_the_rest_of_the_sweep_nor_the_test_run(
     .expect("taking the blocking lock must succeed");
 
     // Must return normally. A panic or a propagated error here fails the test
-    // by itself, which is the primary assertion of Requirement 3.3.
+    // by itself, which is this test's primary assertion.
     sweep_orphans_now().await;
 
     let surviving = probe.surviving(&planted).await;
@@ -348,12 +346,12 @@ async fn a_failing_reclaim_stops_neither_the_rest_of_the_sweep_nor_the_test_run(
     );
     assert!(
         !surviving.contains(&droppable),
-        "Requirement 3.3: one failed reclaim must not abandon the rest of the sweep, but \
+        "one failed reclaim must not abandon the rest of the sweep, but \
          {droppable} was left behind — surviving: {surviving:?}"
     );
 }
 
-/// Requirement 3.4: 「回収を 1 プロセスにつき 1 回だけ実行する」.
+/// The sweep runs exactly once per process.
 ///
 /// Stated over the real trigger rather than over the sweep function: several
 /// fixtures are spawned through `spawn_test_app`, which is where the startup
@@ -379,12 +377,12 @@ async fn the_startup_sweep_runs_exactly_once_per_process() {
     assert_eq!(
         startup_sweeps_performed(),
         1,
-        "Requirement 3.4: the startup sweep must have run exactly once in this process, no \
+        "the startup sweep must have run exactly once in this process, no \
          matter how many fixtures were created"
     );
 }
 
-/// Requirement 1.2: 「実行前の孤立スキーマ掃除を前提条件とせずに完了する」.
+/// A run completes without a manual pre-run cleanup step.
 ///
 /// A database that already holds a pile of old orphans when the run starts is
 /// the normal state of affairs after any abnormal exit, and it must simply not
@@ -419,7 +417,7 @@ async fn a_run_that_starts_with_old_orphans_present_needs_no_manual_cleanup() {
 
     assert_eq!(
         alive, 1,
-        "Requirement 1.2: a run must complete with pre-existing old orphan schemas present, \
+        "a run must complete with pre-existing old orphan schemas present, \
          without any manual cleanup step"
     );
 }
