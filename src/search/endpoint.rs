@@ -42,8 +42,9 @@
 //! endpoints`'s identical documented choice: every existing sibling
 //! module's actual router-building function lives in `src/server.rs`, not
 //! inside its own `endpoints.rs`/`endpoint.rs`. This module therefore
-//! defines no `router()` function; [`tests`] builds a small test-only
-//! `Router::new().route(SEARCH_PATH, get(search::<..>))` directly, and task
+//! defines no `router()` function; `tests/search_endpoint_it.rs` builds a
+//! small test-only `Router::new().route(SEARCH_PATH, get(search::<..>))`
+//! directly, and task
 //! 5.3 (`SearchModule` wiring, `src/server.rs`) is unblocked to build
 //! `search_router()` there exactly the way it builds every other module's
 //! router.
@@ -176,15 +177,17 @@
 //! ## Testing approach: DB-backed HTTP integration tests for the genuinely
 //! new HTTP-layer behavior, pure unit tests for the parsing/rounding helpers
 //! (judgment call)
-//! [`tests`] drives a real, test-only axum `Router` via
-//! `tower::ServiceExt::oneshot` against a real `crate::test_harness::
-//! spawn_test_app`-backed Postgres schema for auth/scope/response-code/
-//! wiring coverage — mirrors `crate::notifications::endpoints::tests`'s/
-//! `crate::search::service::tests`'s identical "real router, real DB, no
+//! `tests/search_endpoint_it.rs` drives a real, test-only axum `Router` via
+//! `tower::ServiceExt::oneshot` against a real `test_harness`-backed
+//! Postgres schema for auth/scope/response-code/wiring coverage — mirrors
+//! `tests/search_service_it.rs`'s identical "real router, real DB, no
 //! mocked auth" precedent (`SearchService::new` itself requires a fully
 //! built `RemoteResolver`/`SearchHydrator`, both of which need a real
-//! `PgPool`, exactly as `search::service::tests`'s own doc comment already
-//! establishes). [`resolve_search_limit`]/[`resolve_search_offset`]/
+//! `PgPool`, exactly as that file's own doc comment already establishes).
+//! Those tests live under `tests/` rather than in [`tests`] because they
+//! need a running instance, which steering `structure.md`'s test layout
+//! rule places there; [`tests`] keeps only the DB-independent parsing
+//! coverage. [`resolve_search_limit`]/[`resolve_search_offset`]/
 //! [`parse_search_type`]/[`parse_optional_bool_query`]/
 //! [`parse_optional_account_id`] are additionally covered by plain,
 //! DB-independent unit tests that exhaustively prove the api-foundation

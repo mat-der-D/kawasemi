@@ -1,23 +1,30 @@
 //! Wiring-assembly tests for task 5.3 (`Boundary: SearchModule, Bootstrap,
 //! AppState, Server`) — see `src/search.rs`'s own doc comment ("Task 5.3")
-//! for what [`crate::search::build_search_module`] does.
+//! for what [`kawasemi::search::build_search_module`] does.
 //!
-//! Mirrors `crate::notifications::tests`'s own established "prove the
+//! Mirrors `kawasemi::notifications::tests`'s own established "prove the
 //! composition-root wiring itself, via the real fully-assembled router"
 //! technique for the structurally identical situation (task 4.2's own
-//! wiring test, `src/notifications/tests.rs`'s own doc comment): kept as an
-//! inline `#[cfg(test)] mod tests` rather than a new `tests/*.rs` file, and
+//! wiring test, `src/notifications/tests.rs`'s own doc comment), and
 //! deliberately narrow — proving the wiring itself connects (this task's
 //! own observable completion condition: "起動後に `/api/v2/search` が一連で
 //! 機能し、既定バックエンドが必須拡張なしで配線され、`X-RateLimit-*`
 //! 付与・レート制限装着点に乗ることが確認できる"), not a re-verification of
 //! already-approved task 1.x-5.2 business logic (that is
-//! `search::service::tests`'s/`search::endpoint::tests`'s own job, driven
-//! through their own hand-built test-only routers).
+//! `tests/search_service_it.rs`'s/`tests/search_endpoint_it.rs`'s own job,
+//! driven through their own hand-built test-only routers).
+//!
+//! These tests were moved here from `src/search/tests.rs` by
+//! `.kiro/specs/test-placement-migration` task 3.3, so that steering
+//! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
+//! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
+//! Every test in that file required a running instance, so the file itself
+//! is gone and `src/search.rs` no longer declares a `tests` submodule — see
+//! that file's own doc comment, "Where this module's tests live".
 //!
 //! Two things are proven here, both through the *real*, fully-assembled
-//! router ([`crate::server::build_router`], the exact `AppState`
-//! [`crate::test_harness::spawn_test_app`] itself serves — never a
+//! router ([`kawasemi::server::build_router`], the exact `AppState`
+//! [`kawasemi::test_harness::spawn_test_app`] itself serves — never a
 //! hand-built test-only router the way task 5.1/5.2's own tests use):
 //!
 //! 1. [`search_endpoint_requires_bearer_auth_and_carries_rate_limit_headers`]:
@@ -37,8 +44,8 @@
 //!    parse -> match -> hydrate -> assemble pipeline (task 5.1, already
 //!    reviewed) runs unmodified against the real production backend when
 //!    reached through the real mounted endpoint (task 5.2, already
-//!    reviewed), not merely through `search::service::tests`'s/
-//!    `search::endpoint::tests`'s own StubSearchBackend/hand-built-router
+//!    reviewed), not merely through `tests/search_service_it.rs`'s/
+//!    `tests/search_endpoint_it.rs`'s own StubSearchBackend/hand-built-router
 //!    coverage (Requirements 7.3, 7.4). No `CREATE EXTENSION` is required
 //!    anywhere in this path (Requirement 8.1) — `spawn_test_app` runs
 //!    `migrate::apply_migrations` against a schema with no PostgreSQL
@@ -51,18 +58,18 @@ use axum::http::{Request, StatusCode, header};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use crate::actor::owner::create_owner;
-use crate::actor::{ActorType, Handle};
-use crate::domain::{Id, Visibility};
-use crate::oauth::app_repository::{self, NewApp};
-use crate::oauth::model::ScopeSet as ModelScopeSet;
-use crate::oauth::token_repository::{self, NewAccessToken};
-use crate::server;
-use crate::statuses::model::Status;
-use crate::statuses::status_repository::insert_status;
-use crate::test_harness::{TestApp, spawn_test_app};
+use kawasemi::actor::owner::create_owner;
+use kawasemi::actor::{ActorType, Handle};
+use kawasemi::domain::{Id, Visibility};
+use kawasemi::oauth::app_repository::{self, NewApp};
+use kawasemi::oauth::model::ScopeSet as ModelScopeSet;
+use kawasemi::oauth::token_repository::{self, NewAccessToken};
+use kawasemi::server;
+use kawasemi::statuses::model::Status;
+use kawasemi::statuses::status_repository::insert_status;
+use kawasemi::test_harness::{TestApp, spawn_test_app};
 
-// ---- Fixture plumbing (mirrors `crate::notifications::tests`'s own
+// ---- Fixture plumbing (mirrors `kawasemi::notifications::tests`'s own
 // established helpers). ----
 
 async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
@@ -75,7 +82,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
     let actor = app
         .actor
         .actor_service()
-        .create_actor(crate::actor::NewActor {
+        .create_actor(kawasemi::actor::NewActor {
             owner_id,
             handle: Handle::new(handle).expect("test handle must be valid"),
             actor_type: ActorType::Person,

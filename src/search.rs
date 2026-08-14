@@ -182,6 +182,18 @@
 //!   initialization step here beyond `PgSearchBackend::new`'s own `runtime`
 //!   argument — see [`build_search_module`]'s own doc comment,
 //!   "`HashtagIndexer`: no separate initialization step", for why.
+//!
+//! ## Where this module's tests live
+//! There is no `search/tests.rs`. Both of this file's own tests prove
+//! [`build_search_module`]'s wiring through the *real*, fully-assembled
+//! [`crate::server::build_router`], which requires a running instance
+//! (`crate::test_harness`'s own `spawn_test_app`), so they live in
+//! `tests/search_module_it.rs` — placed there by
+//! `.kiro/specs/test-placement-migration` task 3.3 so that steering
+//! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
+//! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
+//! A module with no `tests.rs` therefore means "no pure unit test applies
+//! here", not "untested".
 
 pub mod endpoint;
 pub mod hashtag_indexer;
@@ -211,9 +223,6 @@ pub use tag_serializer::TagSerializer;
 
 // ---- Task 5.3 (Boundary: SearchModule, Bootstrap, AppState, Server):
 // module wiring -----------------------------------------------------------
-
-#[cfg(test)]
-mod tests;
 
 use std::sync::Arc;
 
