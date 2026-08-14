@@ -1,6 +1,6 @@
 # 引き継ぎ: test-placement-migration（**全タスク完了・検証済み**）
 
-最終更新: 2026-08-15 / 全 20 タスク完了、`/kiro-validate-impl` の判定待ち
+最終更新: 2026-08-15 / 全 20 タスク完了、`/kiro-validate-impl` **GO**（`spec.json` は `ssot: "implementation"`）
 
 > **この spec はもうログである。** 実装が真実であり、`requirements.md` / `design.md` は
 > 「どう作ったか」の記録に降格する。コードとの差異は**設計文書側の陳腐化**として扱う。
@@ -114,6 +114,19 @@ steering 文言の両方が同じ問題を指している。
 ユーザーの明示的な判断（「小さい修正なので合わせて修正してください」）に基づいて実施した。
 加えたのは teardown のみで検証内容は不変。
 
+### B-6b. 配送ダブルを誰も観測していないファイルが 2 つある
+
+孤児則を避けるテストローカル newtype を 3 ファイルに入れたが、**共有セマンティクスを
+テストが実際に強制しているのは 1 ファイルだけ**である。
+
+- `tests/social_graph_follow_request_service_it.rs` — `calls().len() == 1` を主張し直後に `[0]` を索引する。
+  共有が壊れれば必ず落ちる
+- `tests/social_graph_endpoints_it.rs` / `tests/statuses_endpoints_it.rs` — **どのテストも `calls` を読まない**
+  （全呼び出し箇所が `_local` / `_http` とアンダースコア束縛）。共有が壊れても検出されない
+
+移設前から同じ性質で本 spec が作ったものではないが、**配送ダブルを持ちながらその挙動を何も主張していない**
+状態なので、静かな弱体化が起きうる唯一の場所である。
+
 ### B-7. 唯一の例外はコンパイラの制約ではなく方針判断
 
 `src/statuses/render_assembler/tests.rs` の 13 箇所を移設するには 7 項目
@@ -199,6 +212,24 @@ comm -13 <(sort pre.txt) <(sort post.txt)   # この実行が新たに残した�
 本 spec で実際に起きた 3 型:
 ヘルパー関数（`create_test_actor`）、テスト内の構築（`Router::new().route(...)`）、
 ハンドラ double（`scoped_probe` / `test_router`）。
+
+### D-12b. 本 spec で確定した 2 つの運用規約（task ノートにしか無い）
+
+どちらも spec 中盤で決めて以降の全タスクに適用した。**再利用可能な規約なので steering 候補**。
+
+- **空になった `tests.rs` は削除し、`#[cfg(test)] mod tests;` も外す。** 移設先へのポインタは
+  本番モジュール自身の `//!` doc に畳み込む（`#[cfg(test)]` 配下の doc は `cargo doc` に描画されないため
+  案内板として機能しない）。worked example: `src/search.rs` / `src/accounts/account_service.rs`
+- **部分移設で `tests.rs` が残る場合も、親 `.rs` の doc が偽になっていないか確認して同タスク内で直す。**
+  D-11 は掃除の欠陥を記録しているが、この規約は**そもそも陳腐化を作らないための予防**にあたる
+
+### D-12c. 未処理のまま残った軽微な項目
+
+- `tests/*_it.rs` の**コメント内**に `crate::` 表記が 105 行残っている。タスク 5.2 のノートは
+  8.4 の掃除対象として挙げていたが、8.4 の実際の職掌は陳腐化した相互参照になったため未実施。
+  既存からの慣行で無害だが、ノートの期待は満たされていない
+- `research.md` にも事実誤認が 1 件ある（「エラー 0 件だった 4 ファイルは `use super::` を持たない」— 実際は
+  `account_service/tests.rs:39` が持つ）。C-10 は `design.md` の訂正だけを扱っており `research.md` に触れていない
 
 ### D-13. 参照の絶対数が大きいのは慣行の裏返し
 
