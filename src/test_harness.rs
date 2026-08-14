@@ -138,12 +138,31 @@ pub mod sweep;
 /// `pub` items.
 pub mod db_fixture;
 
-/// SQL-statement counting for this crate's own unit tests. `#[cfg(test)]`
-/// because it exists only to measure the lib's tests and must not reach the
-/// shipped library, unlike the rest of this module — which `tests/*.rs`
-/// integration binaries link against and so cannot be gated.
-#[cfg(test)]
-pub(crate) mod query_log;
+/// SQL-statement counting for the tests that pin what a code path costs in
+/// queries.
+///
+/// Gated exactly like the rest of this module rather than at `#[cfg(test)]`,
+/// for the same reason [`reaper`] is not `#[cfg(test)]`: the paths whose query
+/// counts are worth pinning are exercised from `tests/*.rs` integration
+/// binaries as well as from this crate's own unit tests, and the narrower gate
+/// would let the measurement decide where such a test is allowed to live —
+/// a placement constraint, not a property of the measurement.
+///
+/// Widening the gate does not widen the shipped library. `src/lib.rs` declares
+/// `test_harness` itself under this very `cfg`, so a build without the
+/// `test-harness` feature drops the module declaration and the whole subtree
+/// under it, this one included; the counting machinery leaves the distributed
+/// artifact together with the fixed credentials it sits beside, exactly as
+/// before. What the change moves is the boundary between "compiled for the
+/// lib's own tests" and "compiled for every test build", never the boundary
+/// between test builds and shipped ones.
+///
+/// `pub` rather than `pub(crate)` (like [`sweep`] and [`db_fixture`], unlike
+/// [`reaper`]) because `tests/*.rs` is a separate crate and can only see `pub`
+/// items — and no re-export can stand in for that, since `pub use` cannot
+/// widen the visibility an item declares for itself.
+#[cfg(any(test, feature = "test-harness"))]
+pub mod query_log;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

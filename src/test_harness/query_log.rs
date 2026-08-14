@@ -25,7 +25,11 @@
 //! `pg_stat_database`) or in a process-global subscriber would count other
 //! tests' queries as well as its own. A per-future dispatcher counts exactly
 //! the statements issued while the measured future is being polled, and
-//! nothing else. `tracing::subscriber::set_default` — the pattern
+//! nothing else. That is also what makes the measurement indifferent to
+//! which test binary it runs in: a `tests/*.rs` integration binary shares
+//! the same database with every other binary the runner has in flight, and
+//! the scope of a capture is still the one future, not the process.
+//! `tracing::subscriber::set_default` — the pattern
 //! `server/tests.rs` and `telemetry/tests.rs` use — would be *nearly*
 //! equivalent here, but it scopes to the thread rather than to the task, so
 //! it would silently stop being correct if a measured path were ever polled
@@ -114,7 +118,7 @@ const SUMMARY_FIELD: &str = "summary";
 /// per-row one against the same table are different kinds — that
 /// distinction is the whole point of measuring here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum QueryKind {
+pub enum QueryKind {
     /// Batched: `status_media` rows, and the `media` rows they point at.
     Media,
     /// Per status: one `status_media` lookup for a single `status_id`.
@@ -225,7 +229,7 @@ fn is_account_resolution(sql: &str) -> bool {
 /// Every statement executed while a measured future was being polled, in
 /// execution order.
 #[derive(Clone, Default)]
-pub(crate) struct QueryLog {
+pub struct QueryLog {
     statements: Arc<Mutex<Vec<String>>>,
 }
 
@@ -250,7 +254,7 @@ impl QueryLog {
     ///
     /// `BTreeMap` so that an assertion failure prints the two sides in the
     /// same, stable order and the offending statement is findable by eye.
-    pub(crate) fn per_statement(&self) -> BTreeMap<String, usize> {
+    pub fn per_statement(&self) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
         for statement in self.statements() {
             *counts.entry(statement).or_insert(0) += 1;
@@ -272,7 +276,7 @@ impl QueryLog {
     }
 
     /// How many statements of `kind` ran.
-    pub(crate) fn count(&self, kind: QueryKind) -> usize {
+    pub fn count(&self, kind: QueryKind) -> usize {
         self.per_kind().get(&kind).copied().unwrap_or(0)
     }
 
@@ -281,7 +285,7 @@ impl QueryLog {
     /// For pinning one specific lookup that no [`QueryKind`] names — a
     /// residual a test wants on the record rather than a category the
     /// requirements enumerate.
-    pub(crate) fn count_matching(&self, needle: &str) -> usize {
+    pub fn count_matching(&self, needle: &str) -> usize {
         self.statements()
             .iter()
             .filter(|sql| sql.contains(needle))
@@ -293,7 +297,7 @@ impl QueryLog {
     /// The guard against a vacuous count-independence assertion: two runs
     /// that both issue zero poll queries have trivially equal poll counts,
     /// and would keep having them after the batching was torn out.
-    pub(crate) fn require_kinds(&self, kinds: &[QueryKind]) {
+    pub fn require_kinds(&self, kinds: &[QueryKind]) {
         let observed = self.per_kind();
         for kind in kinds {
             assert!(
@@ -411,10 +415,7 @@ const WARMUP_ATTEMPTS: usize = 8;
 /// If the warm-up statement is not captured, i.e. if the mechanism is not
 /// actually recording. Failing here rather than returning an empty log keeps
 /// a broken measurement from being read as "this code issues no queries".
-pub(crate) async fn record_queries<F: Future>(
-    pool: &sqlx::PgPool,
-    fut: F,
-) -> (F::Output, QueryLog) {
+pub async fn record_queries<F: Future>(pool: &sqlx::PgPool, fut: F) -> (F::Output, QueryLog) {
     let log = QueryLog::default();
     let subscriber = tracing_subscriber::registry().with(log.clone());
     let warmup = log.clone();
