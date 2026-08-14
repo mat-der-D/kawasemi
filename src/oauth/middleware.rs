@@ -131,13 +131,15 @@
 //! type, because the *required* `ScopeSet` a route demands is itself
 //! per-endpoint data an extractor has no way to receive.
 //!
-//! `tests.rs` proves all of the above through a real, test-only axum
-//! `Router` dispatched via `tower::ServiceExt::oneshot` against a real,
-//! `spawn_test_app`-backed Postgres schema (per this task's brief: unlike
-//! `ratelimit`'s tests, resolution genuinely needs the database, so nothing
-//! here is faked) — not a `tests/*_it.rs` full production-router
-//! integration test, since nothing wires this middleware into that router
-//! yet (task 7.1's job, same boundary tasks 6.1-6.3 already established).
+//! ## Where this module's tests live
+//! The integration test file `tests/oauth_middleware_it.rs` proves all of
+//! the above through a
+//! real, test-only axum `Router` dispatched via `tower::ServiceExt::oneshot`
+//! against a real, `spawn_test_app`-backed Postgres schema (resolution
+//! genuinely needs the database, so nothing here is faked). It requires a
+//! running instance, so steering `structure.md`'s test layout rule places it
+//! under `tests/*_it.rs`. `tests.rs` keeps only the two pure-function
+//! [`require_scope`] unit tests, which need neither.
 
 #[cfg(test)]
 mod tests;

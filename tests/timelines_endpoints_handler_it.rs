@@ -2,10 +2,23 @@
 //! 1.1, 1.6, 2.1, 2.3, 3.1, 4.1, 7.2, 9.1, 9.2, 9.3, 9.4), driven through a
 //! real, test-only axum `Router` dispatched via `tower::ServiceExt::oneshot`
 //! against a real, `spawn_test_app`-backed Postgres schema — mirrors
-//! `crate::social_graph::endpoints::tests`'s own established "real router,
-//! real DB, no mocked auth" precedent (see `endpoints.rs`'s own doc comment,
-//! "Testing strategy", for why this is the chosen approach over a new
-//! `tests/*_it.rs` integration test).
+//! `kawasemi::social_graph::endpoints`'s own established "real router, real
+//! DB, no mocked auth" precedent.
+//!
+//! These tests were moved here from `src/timelines/endpoints/tests.rs` by
+//! `.kiro/specs/test-placement-migration` task 7.2, so that steering
+//! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
+//! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
+//! All seven tests moved; that source file is gone.
+//!
+//! ## Why this file is separate from `tests/timelines_endpoints_it.rs`
+//! The name `tests/timelines_endpoints_it.rs` was already taken by the
+//! timelines spec's own task-6.1 integration file, which drives the three
+//! handlers through the *fully-wired production* router
+//! (`kawasemi::server::build_router`, as booted by `spawn_test_app`). This
+//! file keeps a different entry point: the handlers mounted by hand onto a
+//! bare `TimelineEndpointsState` router, with no production wiring around
+//! them, which is why the two are not merged and neither is reduced.
 //!
 //! Coverage is deliberately scoped to what is genuinely new at this HTTP
 //! layer — auth/scope enforcement, response codes, `Link`-header
@@ -23,19 +36,23 @@ use axum::http::{Request, StatusCode, header};
 use axum::routing::get;
 use tower::ServiceExt;
 
-use super::*;
-use crate::actor::owner::create_owner;
-use crate::actor::{ActorType, Handle, NewActor};
-use crate::domain::{Id, Visibility};
-use crate::oauth::app_repository::{self, NewApp};
-use crate::oauth::model::ScopeSet as ModelScopeSet;
-use crate::oauth::token_repository::{self, NewAccessToken};
-use crate::social_graph::model::Follow;
-use crate::social_graph::repository as sg_repository;
-use crate::statuses::{Status, Tag, status_repository, tag_repository};
-use crate::test_harness::{TestApp, spawn_test_app};
-use crate::timelines::hydrator::StatusHydrator;
-use crate::timelines::service::TimelineService;
+use kawasemi::actor::owner::create_owner;
+use kawasemi::actor::{ActorType, Handle, NewActor};
+use kawasemi::domain::{Id, Visibility};
+use kawasemi::oauth::app_repository::{self, NewApp};
+use kawasemi::oauth::middleware::AuthState;
+use kawasemi::oauth::model::ScopeSet as ModelScopeSet;
+use kawasemi::oauth::token_repository::{self, NewAccessToken};
+use kawasemi::social_graph::model::Follow;
+use kawasemi::social_graph::repository as sg_repository;
+use kawasemi::statuses::{Status, Tag, status_repository, tag_repository};
+use kawasemi::test_harness::{TestApp, spawn_test_app};
+use kawasemi::timelines::endpoints::{
+    HOME_TIMELINE_PATH, PUBLIC_TIMELINE_PATH, TAG_TIMELINE_PATH, TimelineEndpointsState,
+    home_timeline, public_timeline, tag_timeline,
+};
+use kawasemi::timelines::hydrator::StatusHydrator;
+use kawasemi::timelines::service::TimelineService;
 
 // ---- Fixture plumbing (mirrors `tests/timeline_service_it.rs`'s own
 // established conventions for this crate's timeline fixtures) -------------
@@ -125,8 +142,8 @@ async fn upsert_follow(app: &TestApp, follower: Id, followee: Id) {
         &app.pool,
         app.runtime.ids.next_id(),
         &Follow {
-            follower: crate::domain::AccountRef::Local(follower),
-            followee: crate::domain::AccountRef::Local(followee),
+            follower: kawasemi::domain::AccountRef::Local(follower),
+            followee: kawasemi::domain::AccountRef::Local(followee),
             reblogs: true,
             notify: false,
             languages: Vec::new(),

@@ -13,7 +13,7 @@
 
 ---
 
-- [ ] 1. 基盤: インベントリ・ベースライン・唯一の crate 変更
+- [x] 1. 基盤: インベントリ・ベースライン・唯一の crate 変更
 
 - [x] 1.1 移設対象テスト関数のインベントリを確定する
   - 対象 20 ファイルについて、テスト関数ごとに `spawn_test_app` の呼び出し有無を判定し、移設対象／対象外に分類する
@@ -35,7 +35,7 @@
   - 既定フィーチャの `cargo build` が成功し、成果物にクエリ計測モジュールが含まれない。`cargo check --tests` も成功する
   - _Requirements: 3.2, 3.4_
 
-- [ ] 2. 移設: federation 系 4 ファイル
+- [x] 2. 移設: federation 系 4 ファイル
 
 - [x] 2.1 (P) 署名生成と署名方式ネゴシエーションの検証を統合テストへ移す
   - 対象は署名生成 8 箇所・ネゴシエーション 6 箇所
@@ -53,7 +53,7 @@
   - _Requirements: 1.2, 1.3, 2.1, 2.2, 2.4_
   - _Boundary: federation::endpoints::webfinger, federation::outbound::worker_
 
-- [ ] 3. 移設: search 系 4 ファイル
+- [x] 3. 移設: search 系 4 ファイル
 
 - [x] 3.1 (P) 検索サービスの検証を統合テストへ移す
   - 対象は 11 箇所
@@ -78,7 +78,7 @@
   - _Requirements: 1.2, 1.3, 2.1, 2.2, 2.4_
   - _Boundary: search::endpoint, search_
 
-- [ ] 4. 移設: notifications 系 3 ファイル
+- [x] 4. 移設: notifications 系 3 ファイル
 
 - [x] 4.1 (P) 通知エンドポイントの検証を統合テストへ移す
   - 対象は 24 箇所（単一ファイルとして最大）
@@ -95,7 +95,7 @@
   - _Requirements: 1.2, 1.3, 2.1, 2.2, 2.3, 2.4, 3.3_
   - _Boundary: notifications::service, notifications_
 
-- [ ] 5. 移設: social_graph 系 3 ファイル
+- [x] 5. 移設: social_graph 系 3 ファイル
 
 - [x] 5.1 (P) ソーシャルグラフのエンドポイント検証を統合テストへ移す
   - 対象は 22 箇所
@@ -112,7 +112,7 @@
   - _Requirements: 1.2, 1.3, 2.1, 2.2, 2.4_
   - _Boundary: social_graph::follow_request_service, social_graph_
 
-- [ ] 6. 移設: statuses 系 2 ファイル
+- [x] 6. 移設: statuses 系 2 ファイル
 
 - [x] 6.1 (P) 投稿エンドポイントの検証を統合テストへ移す
   - 対象は 21 箇所
@@ -132,7 +132,7 @@
   - _Requirements: 1.2, 1.3, 2.1, 2.2, 2.4_
   - _Boundary: statuses::account_provider_
 
-- [ ] 7. 移設: 残る 3 ファイル
+- [x] 7. 移設: 残る 3 ファイル
 
 - [x] 7.1 (P) アカウントサービスの検証を統合テストへ移す
   - 対象は 16 箇所
@@ -141,7 +141,7 @@
   - _Requirements: 1.2, 1.3, 2.1, 2.2, 2.4_
   - _Boundary: accounts::account_service_
 
-- [ ] 7.2 (P) OAuth ミドルウェアとタイムラインエンドポイントの検証を統合テストへ移す
+- [x] 7.2 (P) OAuth ミドルウェアとタイムラインエンドポイントの検証を統合テストへ移す
   - 対象は OAuth ミドルウェア 7 箇所・タイムラインエンドポイント 7 箇所
   - 認証状態の型は公開済み。トークンハッシュ鍵の構築に必要な設定型も公開済みで、明示 import で解決する（Tier 0）
   - 移設先 2 ファイルが `cargo test` で通り、移設元の当該 2 ファイルの `spawn_test_app` 呼び出しが 0 になっている
@@ -190,6 +190,11 @@
 - 1.1: `src/test_harness/tests.rs` の「5 箇所」のうち L2 は `//!` ドキュメントコメント内の記述で、コード上の呼び出しは 4 箇所。対象 203 は不変（208−5 = 207−4）。要件 1.1 の完了判定は **grep 基準の 5** で行うこと。タスク 8.1/8.2 で内訳を明記する
 - 1.1: design.md「File Structure Plan」の移設先名 19 件のうち **`tests/timelines_endpoints_it.rs` のみ既存ファイル（1341 行）と衝突**。既存は `kawasemi::server::build_router` の実ルータ、移設元 `src/timelines/endpoints/tests.rs` は手組みのテスト専用ルータを対象としており、タスク 7.2 は改名前に要件 2.4 の重複判定を行うこと
 - 1.1: 要件 2.6 のテスト関数総数は、コメント・文字列をマスクした値で比較する（生 grep は doc コメント内の `#[tokio::test]` を拾う）。移設前 src 1779 / tests 507、移設後の期待値 src 1589 / tests 697、合計 2286 不変
+- 7.2: **【spec の終端状態が確定】残存 18 = `render_assembler` 13（唯一の例外）+ `test_harness` 5（対象外）。他ファイルはゼロ。** 他 12 ファイルに残る `spawn_test_app` の言及はすべて doc コメント内（括弧なし）で計数を汚染しない
+- 7.2: **タスク 1.1 の事前予測と実測が完全一致** — src 1779 → **1589**、tests 507 → **697**、合計 **2286** 不変。要件 2.6 の保存則はこの等値で検証できる
+- 7.2: 移設先名の衝突は `tests/timelines_endpoints_handler_it.rs` で解決（既存との唯一の差が「ハンドラ直付け vs 実ルータ」のため）。既存 `tests/timelines_endpoints_it.rs` は無変更・17 本通過
+- 7.2: **【8.2 の判断記録へ】`tag_timeline_any_filter_requires_at_least_one_additional_tag` は既存 `timelines_endpoints_it.rs:965` の `any` 節にクエリ文字列・フィクスチャ・アサーションのすべてで包含され、既存側が厳密な上位集合。** 3.3 の `search_module_it` に続く**実質的冗長の 2 例目**。要件 2.4 違反ではない（規範動詞が「新たに作らない」）し 2.2 が削除を禁じるため現状維持。`exceptions.md` の例外台帳には載せない（4.2 の「公開面の拡大を強いる」に該当せず台帳の意味が壊れる）
+- 7.2: **【8.4 の掃除対象・具体箇所】** `tests/auth_scope_it.rs:8,56` / `tests/media_endpoints_it.rs:51,60,90` / `tests/timelines_endpoints_it.rs:10,15,50,265` / `tests/timelines_bootstrap_wiring_it.rs:14,150`。後者 2 ファイルの参照先 `src/timelines/endpoints/tests.rs` は削除済み
 - 7.1: **`research.md` の記述に誤りがある（8.2 の記録対象・4 件目）。** 「エラー 0 件だった 4 ファイルは `use super::` を持たず `crate::` の公開パスだけで書かれている」とあるが、`account_service/tests.rs` は `use super::{AccountService, MAX_PROFILE_FIELDS, ...}` を持つ。6 項目とも既に `pub` なので Tier 0・crate 無変更という**結論は無傷**。前提の誤りであって結論の誤りではない
 - 7.1: **spec 全体で唯一、既存統合テストと入口が実際に一致した箇所**（`tests/remote_account_fetch_it.rs` もルータを経由せず `AccountService` を直接構築する）。判定基準の「同じ入口」が使えないため「同じことを主張しているか」だけで判定した。最接近ペアは移設側が分岐到達（`fetched_urls() == [(uri, None)]`）を、既存側が Mastodon 互換エラーボディとキャッシュ非書き込みを検証しており非重複
 - 6.2: **【design.md 表の欠落・第 3 カテゴリ】トレイトメソッド呼び出しにトレイトのスコープが要る（E0599）。** `use super::*` が親のトレイト import ごと引き込んでいたため移設前は見えていなかった。既に `pub` なトレイトの import で解決（Tier 0、crate 無変更）。**なお design.md:328 は E0599 を列挙してはいるが原因を「非公開項目への到達不能」に帰しており、誤っているのはエラーコードの一覧ではなく原因の分類。** 8.2 はこの区別を記録すること

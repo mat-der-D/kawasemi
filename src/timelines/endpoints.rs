@@ -102,25 +102,29 @@
 //! flags (never `remote`); [`tag_timeline`] does not parse a `remote` query
 //! parameter at all and always forwards `TimelineParams.remote = false`.
 //!
-//! ## Testing strategy: `#[cfg(test)] mod tests` only, no new `tests/*_it.rs`
-//! (mirrors `social_graph::endpoints`'s task-5.1 precedent — the most recent
-//! sibling "new, not-yet-mounted endpoint module" task in this codebase)
-//! `tests.rs` builds its own small, test-only axum `Router` mounting exactly
-//! these three handlers against [`TimelineEndpointsState`], dispatched via
-//! `tower::ServiceExt::oneshot` against a real, `spawn_test_app`-backed
-//! Postgres schema (mirroring `social_graph::endpoints::tests`'s own
-//! `build_router`/`spawn_test_app` combination) — not the real production
-//! router (nothing mounts this module onto it yet, task 5.2's job) and not a
-//! new `tests/*_it.rs` integration test (this task's own instruction reuses
-//! `social_graph::endpoints`'s established boundary: HTTP-layer concerns —
-//! scope/auth/response-code/`Link`-header wiring — belong in this module's
-//! own `#[cfg(test)] mod tests`, while `TimelineService`'s own aggregation
-//! behavior is already exhaustively proven end to end by
-//! `tests/timeline_service_it.rs`, task 4.2, and is not re-tested here).
-//! Real Bearer tokens are issued through
-//! `crate::oauth::token_repository::issue_token` (mirrors
-//! `social_graph::endpoints::tests::issue_test_token`) — no handler here or
-//! in its tests hand-constructs a `RequestActorContext`.
+//! ## Testing strategy: this module has no `#[cfg(test)] mod tests`
+//! Every test of these handlers needs a real, running instance, so steering
+//! `structure.md`'s test layout rule places them all under `tests/*_it.rs`.
+//! They live in two files, each with a different entry point:
+//!
+//! - `tests/timelines_endpoints_handler_it.rs` — a small, test-only axum
+//!   `Router` mounting exactly these three handlers against
+//!   [`TimelineEndpointsState`], dispatched via `tower::ServiceExt::oneshot`
+//!   against a real, `spawn_test_app`-backed Postgres schema. This covers
+//!   the HTTP-layer concerns that are this module's own responsibility:
+//!   scope/auth enforcement, response codes, `Link`-header attachment, and
+//!   this module's query-parameter wiring. Relocated here from this
+//!   module's former `tests.rs` by
+//!   `.kiro/specs/test-placement-migration` task 7.2.
+//! - `tests/timelines_endpoints_it.rs` — the same three handlers driven
+//!   through the fully-wired production router
+//!   (`crate::server::build_router`), plus filter/pagination coverage.
+//!
+//! `TimelineService`'s own aggregation behavior is proven end to end by
+//! `tests/timeline_service_it.rs` (task 4.2) and is not re-tested at this
+//! layer. Real Bearer tokens are issued through
+//! `crate::oauth::token_repository::issue_token` — no handler here or in its
+//! tests hand-constructs a `RequestActorContext`.
 //!
 //! ## Feature Flag Protocol: not applicable (brand-new, not-yet-mounted
 //! module)
@@ -153,9 +157,6 @@
 //! wiring, `src/server.rs`) is unblocked to build `timelines_router()` there
 //! exactly the way it builds every other module's router, with no
 //! now-orphaned, never-called function left behind by this task.
-
-#[cfg(test)]
-mod tests;
 
 use axum::extract::{FromRef, Query, State};
 use axum::http::{StatusCode, header};
