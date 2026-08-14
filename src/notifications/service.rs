@@ -123,8 +123,9 @@
 //! policy, and doing so would pull in `RelationshipQueryRegistry` purely for
 //! one nested field those Requirements do not exercise). That narrowing
 //! predates the batching refactor and is preserved by it, pinned by
-//! `tests::list_renders_a_mixed_page_of_every_status_shape_in_order`'s
-//! `private` boost target — flagged as a CONCERN, not silently dropped.
+//! `tests/notifications_service_it.rs`'s own
+//! `list_renders_a_mixed_page_of_every_status_shape_in_order`'s `private`
+//! boost target — flagged as a CONCERN, not silently dropped.
 //!
 //! ## Dangling references are not errors
 //! A notification's `origin`/`status_id` are logical references
@@ -170,6 +171,14 @@
 //! before calling it, mirroring `repository.rs`'s own "no redundant
 //! pre-check" discipline `generator.rs`'s doc comment already establishes
 //! for `insert_dedup`.
+//!
+//! ## Tests
+//! [`NotificationService`]'s own `list`/`show`/`dismiss`/`clear` tests
+//! require a real running instance and live in
+//! `tests/notifications_service_it.rs`, moved there by
+//! `.kiro/specs/test-placement-migration` task 4.2. The `tests` submodule
+//! below retains only the `RequiredPolls` resolver's unit tests, which run
+//! on the lighter `spawn_test_db` fixture.
 
 #[cfg(test)]
 mod tests;

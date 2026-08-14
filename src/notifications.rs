@@ -95,6 +95,14 @@
 //!   [`NotificationModule`]/[`build_notification_module`]'s full doc
 //!   comments, and `src/state.rs`/`src/bootstrap.rs`/`src/server.rs`'s own
 //!   doc comments at each of their call sites.
+//!
+//! ## Tests
+//! This module's own wiring tests — that the notification routes are
+//! actually mounted and that an emitted event traverses every seam
+//! [`build_notification_module`] connects — require a real running instance
+//! and live in `tests/notifications_module_it.rs`, moved there from this
+//! module's former `tests` submodule by
+//! `.kiro/specs/test-placement-migration` task 4.2.
 
 pub mod endpoints;
 pub mod event_sink;
@@ -121,9 +129,6 @@ pub use serializer::{
 pub use service::NotificationService;
 
 // ---- Task 4.2 (Boundary: NotificationModule): module wiring -------------
-
-#[cfg(test)]
-mod tests;
 
 use std::future::Future;
 use std::pin::Pin;

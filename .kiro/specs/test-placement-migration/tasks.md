@@ -87,7 +87,7 @@
   - _Requirements: 1.2, 1.3, 2.1, 2.2, 2.4_
   - _Boundary: notifications::endpoints_
 
-- [ ] 4.2 (P) 通知サービスとモジュール直下の検証を統合テストへ移す
+- [x] 4.2 (P) 通知サービスとモジュール直下の検証を統合テストへ移す
   - 対象は通知サービス 17 箇所・モジュール直下 2 箇所
   - ポール解決の厳格側実装は非公開の型であり、テスト 2 本がこれを構築して注入する。Tier 2 と判定し、当該 2 本は移設せず例外として記録する
   - 通知サービスのファイルは `TestDb` を使うテストも含む。これらは実インスタンスを起動しないため移設対象ではなく、元位置に残す
@@ -190,6 +190,9 @@
 - 1.1: `src/test_harness/tests.rs` の「5 箇所」のうち L2 は `//!` ドキュメントコメント内の記述で、コード上の呼び出しは 4 箇所。対象 203 は不変（208−5 = 207−4）。要件 1.1 の完了判定は **grep 基準の 5** で行うこと。タスク 8.1/8.2 で内訳を明記する
 - 1.1: design.md「File Structure Plan」の移設先名 19 件のうち **`tests/timelines_endpoints_it.rs` のみ既存ファイル（1341 行）と衝突**。既存は `kawasemi::server::build_router` の実ルータ、移設元 `src/timelines/endpoints/tests.rs` は手組みのテスト専用ルータを対象としており、タスク 7.2 は改名前に要件 2.4 の重複判定を行うこと
 - 1.1: 要件 2.6 のテスト関数総数は、コメント・文字列をマスクした値で比較する（生 grep は doc コメント内の `#[tokio::test]` を拾う）。移設前 src 1779 / tests 507、移設後の期待値 src 1589 / tests 697、合計 2286 不変
+- 4.2: **予測された Tier 2 例外は再び存在しなかった（3.2 と同型）。** `RequiredPolls` を構築する 3 本はいずれも `spawn_test_db` 使用で、移設対象 17 本のどれも当該型に触れない。`inventory.md` §6.3 が実装前から独立に同じ分類を記録していた
+- 4.2: **design.md:109 は二重に誤り** — `RequiredPolls` を「Tier 2・対象テスト 2 本」としているが、実際は 3 本でありいずれも移設候補ですらない。8.2 で訂正を記録すること
+- 4.2: **【例外台帳の確定】これで spec 全体に残る Tier 2 例外は `statuses::render_assembler::RenderContext`（8.1、13 箇所）のみ。** 8.1 / 8.2 はこの前提で `exceptions.md` を組み立てること。design.md 阻害要因表の過大計上は累計 6 項目（2.1 ×3、2.2 ×1、3.2 ×1、4.2 ×1）
 - 4.1: `tests/notifications_endpoints_it.rs:21` が `tests/notifications_service_it.rs` を先行参照している（4.2 の移設先名。現時点では未存在）。**4.2 の実装者はこの参照が自タスクで実際に成立することを確認すること**
 - 4.1: `src/notifications/endpoints.rs:147-165`「Not wired into the module tree yet」節は陳腐化しているが**本 spec の移設に起因しない**（notifications spec 側の配線完了による）。境界外限定の 8.4 掃除からも漏れるので、後続 spec 候補として HANDOFF に残す
 - 4.1: `tests/notification_list_it.rs:9,12` が移設元を名指し。8.4 の対象。行をまたがない通常表記なので行単位 grep で拾える
