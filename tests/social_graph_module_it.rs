@@ -1,51 +1,56 @@
-//! Wiring-assembly tests for task 5.2 (`Boundary: SocialGraphModule`) — see
-//! `src/social_graph.rs`'s own doc comment ("Task 5.2") for what
-//! [`build_social_graph_module`]/[`register_downstream_handlers`] do.
+//! Wiring-assembly tests for `social_graph`'s module-level assembly --
+//! `build_social_graph_module`/`register_downstream_handlers`; see
+//! `src/social_graph.rs`'s own doc comment ("Task 5.2") for what they do.
 //!
-//! Per this task's own instructions these are deliberately narrow: "does the
-//! wiring actually connect the pieces", not a re-verification of already-
-//! approved task 3.x/4.x business logic (that is `follow_service/tests.rs`'
-//! /`inbound/tests.rs`'s/`providers/tests.rs`'s own job). Three things are
-//! proven here, matching this task's own completion condition
-//! ("起動後に受信 Activity がハンドラへ届き、accounts の relationships と
-//! counts…が実値を返し、ブロック判定が連合受信に効き、フォロー確立/受信保留
-//! で notifications へイベントが渡る状態"):
+//! Relocated from `src/social_graph/tests.rs` (spec
+//! `test-placement-migration`, task 5.2): every verification here needs a
+//! real running instance, so it belongs under `tests/` per steering
+//! `structure.md`'s test-layout rule. That file had no instance-free unit
+//! tests left at the unit-test position, so it is gone entirely.
 //!
-//! 1. [`follow_via_the_live_router_wires_endpoints_and_providers`][]: `POST
+//! Per the originating task's own instructions these are deliberately
+//! narrow: "does the wiring actually connect the pieces", not a
+//! re-verification of already-approved task 3.x/4.x business logic (that is
+//! `follow_service/tests.rs`'/`inbound/tests.rs`'s/`providers/tests.rs`'s own
+//! job). Three things are proven here, matching that task's own completion
+//! condition ("起動後に受信 Activity がハンドラへ届き、accounts の
+//! relationships と counts…が実値を返し、ブロック判定が連合受信に効き、
+//! フォロー確立/受信保留で notifications へイベントが渡る状態"):
+//!
+//! 1. `follow_via_the_live_router_wires_endpoints_and_providers`: `POST
 //!    /api/v1/accounts/:id/follow` through the *real*, fully-assembled
-//!    router (`crate::server::build_router`, the exact `AppState`
-//!    `spawn_test_app` itself serves — mirrors
+//!    router (`kawasemi::server::build_router`, the exact `AppState`
+//!    `spawn_test_app` itself serves -- mirrors
 //!    `tests/statuses_bootstrap_wiring_it.rs`'s own established "drive the
-//!    real router in-process via `tower::ServiceExt::oneshot`" technique,
-//!    adapted to an inline `#[cfg(test)]` module per this task's own
-//!    instruction not to add a new `tests/*_it.rs` file) actually reaches
-//!    [`crate::social_graph::follow_service::FollowService::follow`]
-//!    (proving `SocialGraphEndpointsState`/the router mount/`AppState`'s new
+//!    real router in-process via `tower::ServiceExt::oneshot`" technique)
+//!    actually reaches
+//!    `kawasemi::social_graph::follow_service::FollowService::follow`
+//!    (proving `SocialGraphEndpointsState`/the router mount/`AppState`'s
 //!    `social_graph` field all connect), and the resulting relationship
 //!    state is then independently observed through
-//!    `AppState::accounts().ports()` — the *real*
-//!    `RelationshipStateProvider`/`AccountCountsProvider` registries this
+//!    `AppState::accounts().ports()` -- the *real*
+//!    `RelationshipStateProvider`/`AccountCountsProvider` registries that
 //!    task registers into (Requirements 8.2, 10.1).
-//! 2. [`blocking_via_the_service_makes_the_live_block_policy_report_blocked`][]:
-//!    `BlockService::block` (via [`SocialGraphModule::block`]) followed by a
-//!    direct query against `AppState::federation().block_policy()` — the
-//!    *real* `BlockPolicyRegistry` this task registers `BlockPolicyImpl`
-//!    into (Requirement 6.1) — proves the registration is live and its
+//! 2. `blocking_via_the_service_makes_the_live_block_policy_report_blocked`:
+//!    `BlockService::block` (via `SocialGraphModule::block`) followed by a
+//!    direct query against `AppState::federation().block_policy()` -- the
+//!    *real* `BlockPolicyRegistry` that task registers `BlockPolicyImpl`
+//!    into (Requirement 6.1) -- proves the registration is live and its
 //!    verdict flips on block/unblock.
-//! 3. [`register_downstream_handlers_wires_a_dispatch_reachable_handler`][]:
-//!    calls [`register_downstream_handlers`] directly against a freshly
+//! 3. `register_downstream_handlers_wires_a_dispatch_reachable_handler`:
+//!    calls `register_downstream_handlers` directly against a freshly
 //!    built `InboundActivityDispatcher` (mirroring how
 //!    `federation::build_federation_module`'s own "DOWNSTREAM DISPATCHER
 //!    REGISTRATION POINT" uses it) and dispatches a hand-built Follow
 //!    Activity from a genuinely *remote* signer (a pre-seeded
 //!    `remote_accounts` cache row, so `ProdActorUriResolver`'s resolution
-//!    needs no live network fetch) addressed to a locked local target —
-//!    proving this task's own registration closure produces a real,
-//!    dispatch-reachable [`SocialGraphInboundHandler`] (Requirement 7.1),
+//!    needs no live network fetch) addressed to a locked local target --
+//!    proving that task's own registration closure produces a real,
+//!    dispatch-reachable `SocialGraphInboundHandler` (Requirement 7.1),
 //!    distinct from test 1's local-to-local scenario (which does not by
 //!    itself distinguish "the sender's own direct `establish_follow` call"
 //!    from "the inbound handler's own establish_follow call", since both
-//!    are idempotent no-ops the second time — a genuinely remote signer
+//!    are idempotent no-ops the second time -- a genuinely remote signer
 //!    with a locked target does distinguish them: only the inbound handler
 //!    can create the pending inbound `follow_requests` row this test
 //!    asserts on).
@@ -60,31 +65,31 @@ use axum::http::{Request, StatusCode, header};
 use serde_json::Value;
 use tower::ServiceExt;
 
-use crate::accounts::DEFAULT_REMOTE_ACCOUNT_CACHE_TTL;
-use crate::accounts::RemoteAccountFetcher;
-use crate::accounts::model::{ProfileField, ProfilePatch, RemoteAccount};
-use crate::accounts::profile_repository::upsert_profile;
-use crate::accounts::remote_repository::upsert_remote;
-use crate::actor::owner::create_owner;
-use crate::actor::{ActorType, Handle, NewActor};
-use crate::domain::{AccountRef, Id, Visibility};
-use crate::error::AppError;
-use crate::federation::inbound::{InboundActivityDispatcher, InboundContext};
-use crate::federation::jsonld::ParsedActivity;
-use crate::federation::signatures::{ReqwestFederationHttpClient, VerifiedSigner};
-use crate::federation::{BlockPolicy, LocalRecipientContext};
-use crate::oauth::app_repository::{self, NewApp};
-use crate::oauth::model::ScopeSet as ModelScopeSet;
-use crate::oauth::token_repository::{self, NewAccessToken};
-use crate::server;
-use crate::social_graph::repository;
-use crate::social_graph::{self};
-use crate::statuses::model::Status;
-use crate::statuses::notification_sink::{
+use kawasemi::accounts::DEFAULT_REMOTE_ACCOUNT_CACHE_TTL;
+use kawasemi::accounts::RemoteAccountFetcher;
+use kawasemi::accounts::model::{ProfileField, ProfilePatch, RemoteAccount};
+use kawasemi::accounts::profile_repository::upsert_profile;
+use kawasemi::accounts::remote_repository::upsert_remote;
+use kawasemi::actor::owner::create_owner;
+use kawasemi::actor::{ActorType, Handle, NewActor};
+use kawasemi::domain::{AccountRef, Id, Visibility};
+use kawasemi::error::AppError;
+use kawasemi::federation::inbound::{InboundActivityDispatcher, InboundContext};
+use kawasemi::federation::jsonld::ParsedActivity;
+use kawasemi::federation::signatures::{ReqwestFederationHttpClient, VerifiedSigner};
+use kawasemi::federation::{BlockPolicy, LocalRecipientContext};
+use kawasemi::oauth::app_repository::{self, NewApp};
+use kawasemi::oauth::model::ScopeSet as ModelScopeSet;
+use kawasemi::oauth::token_repository::{self, NewAccessToken};
+use kawasemi::server;
+use kawasemi::social_graph::repository;
+use kawasemi::social_graph::{self};
+use kawasemi::statuses::model::Status;
+use kawasemi::statuses::notification_sink::{
     NotificationEvent, NotificationEventSink, NotificationSinkRegistry, NotificationType,
 };
-use crate::statuses::status_repository;
-use crate::test_harness::{TestApp, spawn_test_app};
+use kawasemi::statuses::status_repository;
+use kawasemi::test_harness::{TestApp, spawn_test_app};
 use time::OffsetDateTime;
 
 // ---- Shared fixtures (mirrors `follow_service/tests.rs`'s established
@@ -480,7 +485,7 @@ async fn register_downstream_handlers_wires_a_dispatch_reachable_handler() {
 
 /// A minimal recording [`NotificationEventSink`] double. Reimplemented here
 /// (rather than imported) because
-/// `crate::statuses::notification_sink::tests::RecordingSink` is private to
+/// `kawasemi::statuses::notification_sink::tests::RecordingSink` is private to
 /// its own module's `#[cfg(test)]` block.
 struct RecordingNotificationSink {
     events: std::sync::Mutex<Vec<NotificationEvent>>,

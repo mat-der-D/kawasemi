@@ -103,9 +103,18 @@
 //! `FollowService<AL, AR, D, LS, HS>`'s established shape exactly — see that
 //! module's own doc comment ("Generic shape mirrors `InteractionService`")
 //! for the full rationale, which applies here unchanged.
-
-#[cfg(test)]
-mod tests;
+//!
+//! ## Where this module's tests live
+//! There is no `follow_request_service/tests.rs`. Every one of this module's
+//! tests drives [`FollowRequestService`] against real `actor`/
+//! `remote_accounts`/`follow_requests` rows, so all of them require a
+//! running instance (`crate::test_harness`'s own `spawn_test_app`) and live
+//! in `tests/social_graph_follow_request_service_it.rs` — placed there by
+//! `.kiro/specs/test-placement-migration` task 5.2 so that steering
+//! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
+//! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
+//! A module with no `tests.rs` therefore means "no pure unit test applies
+//! here", not "untested".
 
 use std::sync::Arc;
 

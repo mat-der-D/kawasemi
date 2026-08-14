@@ -3,8 +3,14 @@
 //! フォローが保留として一覧に現れ、承認でフォロー確立 + Accept 配送、拒否で
 //! 削除 + Reject 配送が起こる状態".
 //!
+//! Relocated from `src/social_graph/follow_request_service/tests.rs` (spec
+//! `test-placement-migration`, task 5.2): every verification here needs a
+//! real running instance, so it belongs under `tests/` per steering
+//! `structure.md`'s test-layout rule. That file had no instance-free unit
+//! tests left behind, so it is gone entirely.
+//!
 //! Mirrors `follow_service/tests.rs`'s established conventions
-//! (`crate::test_harness::spawn_test_app`, a `RecordingSink` `DeliverySink`
+//! (`kawasemi::test_harness::spawn_test_app`, a `RecordingSink` `DeliverySink`
 //! double capturing every dispatched Activity, real `actor`/
 //! `remote_accounts` rows) closely — see that module's own doc comment for
 //! the base rationale this file does not repeat. This service only ever
@@ -21,21 +27,23 @@ use std::sync::{Arc, Mutex};
 
 use axum::http::StatusCode;
 
-use super::*;
-use crate::accounts::model::{ProfileField, RemoteAccount};
-use crate::accounts::remote_repository::upsert_remote;
-use crate::actor::owner::create_owner;
-use crate::actor::repository::insert_actor;
-use crate::actor::{ActorDirectory, ActorState, ActorType, Handle};
-use crate::domain::Id;
-use crate::error::ErrorKind;
-use crate::federation::outbound::target::RecipientTargetResolver;
-use crate::federation::{CanonicalActivity, DeliveryTarget};
-use crate::runtime::SeqIdGenerator;
-use crate::social_graph::activity_builder::PgRemoteActorLookup;
-use crate::social_graph::model::FollowRequest;
-use crate::statuses::notification_sink::NotificationSinkRegistry;
-use crate::test_harness::{TestApp, spawn_test_app};
+use kawasemi::accounts::model::{ProfileField, RemoteAccount};
+use kawasemi::accounts::remote_repository::upsert_remote;
+use kawasemi::actor::owner::create_owner;
+use kawasemi::actor::repository::insert_actor;
+use kawasemi::actor::{ActorDirectory, ActorState, ActorType, Handle};
+use kawasemi::api::pagination::PageParams;
+use kawasemi::domain::{AccountRef, Id};
+use kawasemi::error::{AppError, ErrorKind};
+use kawasemi::federation::outbound::target::RecipientTargetResolver;
+use kawasemi::federation::{CanonicalActivity, DeliveryService, DeliverySink, DeliveryTarget};
+use kawasemi::runtime::SeqIdGenerator;
+use kawasemi::social_graph::activity_builder::{ActivityBuilder, PgRemoteActorLookup};
+use kawasemi::social_graph::follow_request_service::FollowRequestService;
+use kawasemi::social_graph::model::FollowRequest;
+use kawasemi::social_graph::transitions::Transitions;
+use kawasemi::statuses::notification_sink::NotificationSinkRegistry;
+use kawasemi::test_harness::{TestApp, spawn_test_app};
 use time::OffsetDateTime;
 
 // --- Test fixtures ----------------------------------------------------------
@@ -50,7 +58,7 @@ async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
         .expect("creating the owner must succeed");
 
     let actor_id = app.runtime.ids.next_id();
-    let actor = crate::actor::model::LocalActor {
+    let actor = kawasemi::actor::model::LocalActor {
         id: actor_id,
         owner_id,
         handle: Handle::new(handle).expect("test handle must be valid"),
@@ -129,7 +137,7 @@ async fn record_inbound_request(
     let req = FollowRequest {
         requester,
         target,
-        direction: crate::social_graph::model::FollowRequestDirection::Inbound,
+        direction: kawasemi::social_graph::model::FollowRequestDirection::Inbound,
         activity_id: activity_id.to_string(),
         created_at: app.runtime.clock.now(),
     };
@@ -172,14 +180,36 @@ impl DeliverySink for RecordingSink {
     }
 }
 
-impl DeliverySink for Arc<RecordingSink> {
+/// Test-local newtype standing in for the unit-test position's
+/// `impl DeliverySink for Arc<RecordingSink>`, which is not expressible from
+/// an integration-test crate: both `DeliverySink` and `Arc` are foreign here
+/// and `Arc` is not `#[fundamental]`, so that impl is rejected by the orphan
+/// rule (E0117). Mirrors `tests/social_graph_endpoints_it.rs::SharedNoopSink`.
+///
+/// The derived `Clone` clones the inner `Arc`, so every clone handed to
+/// `DeliveryService` observes the **same** `RecordingSink` the test holds —
+/// which is exactly what the dispatch-count assertions below depend on.
+#[derive(Clone)]
+struct SharedRecordingSink(Arc<RecordingSink>);
+
+impl SharedRecordingSink {
+    fn new() -> Self {
+        Self(Arc::new(RecordingSink::new()))
+    }
+
+    fn calls(&self) -> Vec<(DeliveryTarget, CanonicalActivity, Handle)> {
+        self.0.calls()
+    }
+}
+
+impl DeliverySink for SharedRecordingSink {
     async fn dispatch(
         &self,
         target: DeliveryTarget,
         activity: &CanonicalActivity,
         sender: &Handle,
     ) -> Result<(), AppError> {
-        (**self).dispatch(target, activity, sender).await
+        self.0.dispatch(target, activity, sender).await
     }
 }
 
@@ -187,20 +217,20 @@ type TestService = FollowRequestService<
     ActorDirectory,
     PgRemoteActorLookup,
     ActorDirectory,
-    Arc<RecordingSink>,
-    Arc<RecordingSink>,
+    SharedRecordingSink,
+    SharedRecordingSink,
 >;
 
-fn build_service(app: &TestApp) -> (TestService, Arc<RecordingSink>, Arc<RecordingSink>) {
-    let local_sink = Arc::new(RecordingSink::new());
-    let http_sink = Arc::new(RecordingSink::new());
+fn build_service(app: &TestApp) -> (TestService, SharedRecordingSink, SharedRecordingSink) {
+    let local_sink = SharedRecordingSink::new();
+    let http_sink = SharedRecordingSink::new();
     let delivery = DeliveryService::new(
         RecipientTargetResolver::new(ActorDirectory::new(app.pool.clone())),
-        Arc::clone(&local_sink),
-        Arc::clone(&http_sink),
+        local_sink.clone(),
+        http_sink.clone(),
     );
-    let urls = crate::federation::urls::ActorUrls::new("kawasemi.example");
-    let ids = Arc::new(SeqIdGenerator::new(90_000)) as Arc<dyn crate::runtime::IdGenerator>;
+    let urls = kawasemi::federation::urls::ActorUrls::new("kawasemi.example");
+    let ids = Arc::new(SeqIdGenerator::new(90_000)) as Arc<dyn kawasemi::runtime::IdGenerator>;
     let activity_builder = ActivityBuilder::new(
         urls,
         ids,
@@ -413,7 +443,7 @@ async fn authorize_request_delivers_locally_when_the_requester_is_local() {
         .record_pending(&FollowRequest {
             requester: AccountRef::Local(requester),
             target: AccountRef::Local(owner),
-            direction: crate::social_graph::model::FollowRequestDirection::Outbound,
+            direction: kawasemi::social_graph::model::FollowRequestDirection::Outbound,
             activity_id: "https://kawasemi.example/acts/follow-5".to_string(),
             created_at: app.runtime.clock.now(),
         })

@@ -145,6 +145,19 @@
 //!   call these two functions to actually wire this spec into the running
 //!   application — see each of those files' own doc comments at their call
 //!   sites.
+//!
+//! ## Where this module's tests live
+//! There is no `social_graph/tests.rs`. Every one of this file's own tests
+//! is a wiring-assembly check against the *real*, fully-assembled
+//! [`crate::server::build_router`]/`AppState` (or a real
+//! `InboundActivityDispatcher` built over a live pool), so all of them
+//! require a running instance (`crate::test_harness`'s own `spawn_test_app`)
+//! and live in `tests/social_graph_module_it.rs` — placed there by
+//! `.kiro/specs/test-placement-migration` task 5.2 so that steering
+//! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
+//! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
+//! A module with no `tests.rs` therefore means "no pure unit test applies
+//! here", not "untested".
 
 pub mod activity_builder;
 pub mod approval_policy;
@@ -180,9 +193,6 @@ pub use relationship_mapper::RelationshipMapper;
 pub use transitions::Transitions;
 
 // ---- Task 5.2 (Boundary: SocialGraphModule): module wiring --------------
-
-#[cfg(test)]
-mod tests;
 
 use std::future::Future;
 use std::pin::Pin;
