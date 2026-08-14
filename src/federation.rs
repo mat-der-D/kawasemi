@@ -146,7 +146,8 @@ pub mod module;
 pub mod outbound;
 pub mod signatures;
 // The federation-pair harness boots two full instances from its own fixed
-// credentials and test database URL; same reasoning as `crate::test_harness`.
+// test-only credentials, on top of `crate::test_harness`'s shared test
+// database; same reasoning as that module's own gate.
 #[cfg(any(test, feature = "test-harness"))]
 pub mod test_harness;
 pub mod urls;

@@ -22,14 +22,26 @@
 //! `pub(crate)` `from_parts` constructor — it does not duplicate `TestApp`'s
 //! own struct fields or release logic.
 //!
+//! ## Isolated database
+//! The isolated schema, its pinned pool and the migrations applied to it are
+//! likewise not recomposed here: [`spawn_paired_instance`] calls
+//! [`crate::test_harness::establish_isolated_db`], the same helper
+//! `spawn_test_app` and `spawn_test_db` build on. A paired instance therefore
+//! carries the crate-wide `kawasemi_test_harness_` schema prefix, the same
+//! pool size, and the same once-per-process startup sweep. That is not
+//! cosmetic: both the startup sweep and `HarnessReaper` recognize a
+//! reclaimable schema by that prefix alone, so a paired instance's schema
+//! abandoned by an abnormal process exit is reclaimed on a later run instead
+//! of accumulating unreachable to every reclamation path.
+//!
 //! ## Module wiring lives elsewhere
 //! The 11-stage feature-module wiring sequence itself is **not** here: this
 //! module calls [`crate::bootstrap::wiring::compose_modules`] — the single
 //! implementation production startup and `spawn_test_app` also run. What
-//! remains below is only the genuinely per-startup-path work: the isolated
-//! schema/pool/migrations, the deterministic [`RuntimeContext`] and
-//! actor-model wiring, the synthesized [`AppConfig`], the ephemeral listener
-//! bind, and the shutdown signal. Going through `compose_modules` also
+//! remains below is only the genuinely per-startup-path work: the
+//! deterministic [`RuntimeContext`] and actor-model wiring, the synthesized
+//! [`AppConfig`], the ephemeral listener bind, and the shutdown signal.
+//! Going through `compose_modules` also
 //! *fixed* a pre-existing divergence: this module's own open-coded sequence
 //! never called `crate::statuses::register_account_ports`, so a paired
 //! instance served Account representations built from
@@ -107,7 +119,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sqlx::Executor;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
@@ -118,28 +129,14 @@ use crate::bootstrap::wiring::{
     ComposedModules, FederationPollCadence, ModuleWiringInput, compose_modules,
 };
 use crate::config::{
-    ActorConfig, AppConfig, DatabaseConfig, FederationConfig, LogConfig, LogLevel, MediaConfig,
-    OauthConfig, OwnerConfig, Secret, ServerConfig, StatusesConfig,
+    ActorConfig, AppConfig, FederationConfig, LogConfig, LogLevel, MediaConfig, OauthConfig,
+    OwnerConfig, Secret, ServerConfig, StatusesConfig,
 };
-use crate::db;
 use crate::federation::signatures::ReqwestFederationHttpClient;
-use crate::migrate;
 use crate::runtime::{DeterministicSeed, RuntimeContext};
 use crate::server;
 use crate::state::AppState;
-use crate::test_harness::{TestApp, TestAppParts};
-
-/// Same shared-test-database override convention as
-/// `crate::test_harness::TEST_DB_URL_ENV` (duplicated, not imported — that
-/// constant is private to `crate::test_harness`, and this module's own doc
-/// comment explains why this module recomposes rather than calls into that
-/// module's internals).
-const PAIR_TEST_DB_URL_ENV: &str = "KAWASEMI_TEST_DATABASE_URL";
-
-/// Same fixed default shared test database URL as
-/// `crate::test_harness::DEFAULT_TEST_DB_URL`.
-const DEFAULT_PAIR_TEST_DB_URL: &str =
-    "postgres://kawasemi_test:kawasemi_test_pw@127.0.0.1:5432/kawasemi_test";
+use crate::test_harness::{IsolatedDb, TestApp, TestAppParts, establish_isolated_db};
 
 /// Fixed numeric seed both paired instances build their deterministic
 /// [`RuntimeContext`] from (Requirement 13.2). A single fixed seed shared by
@@ -176,27 +173,6 @@ const PAIR_DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// mirroring `crate::test_harness::TEST_PRUNING_INTERVAL`.
 const PAIR_PRUNING_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Resolves the shared test database's connection URL, mirroring
-/// `crate::test_harness`'s own private `base_test_db_url`.
-fn base_test_db_url() -> String {
-    std::env::var(PAIR_TEST_DB_URL_ENV).unwrap_or_else(|_| DEFAULT_PAIR_TEST_DB_URL.to_string())
-}
-
-/// Generates a schema name unique to this process/run, with its own prefix
-/// (`kawasemi_federation_pair_`, distinct from
-/// `crate::test_harness::unique_schema_name`'s `kawasemi_test_harness_`
-/// prefix, though collision is already structurally impossible either way —
-/// each combines a monotonic counter with wall-clock nanoseconds).
-fn unique_pair_schema_name() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is after the Unix epoch")
-        .as_nanos();
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("kawasemi_federation_pair_{nanos}_{seq}")
-}
-
 /// Generates a `LocalFsStore` root unique to this call, under the OS temp
 /// directory (task 5.2). Mirrors `crate::test_harness::unique_media_storage_root`'s
 /// own doc comment for why: reusing `MediaConfig::storage_root`'s fixed
@@ -215,44 +191,6 @@ fn unique_pair_media_storage_root() -> std::path::PathBuf {
     ))
 }
 
-/// Builds a `DatabaseConfig` pointed at the shared test database, with no
-/// per-schema `search_path` pinning applied — used only for the throwaway
-/// admin connection that creates a paired instance's isolated schema,
-/// mirroring `crate::test_harness`'s own private `admin_db_config`.
-fn admin_db_config() -> DatabaseConfig {
-    DatabaseConfig {
-        url: Secret::new(base_test_db_url()),
-        max_connections: 1,
-        acquire_timeout: Duration::from_secs(5),
-    }
-}
-
-/// Builds the connection URL a paired instance's own pool uses: the shared
-/// test database's URL with a `search_path`-pinning startup option appended,
-/// mirroring `crate::test_harness`'s own private `schema_scoped_url`.
-fn schema_scoped_url(base_url: &str, schema: &str) -> String {
-    let separator = if base_url.contains('?') { '&' } else { '?' };
-    format!("{base_url}{separator}options[search_path]={schema}")
-}
-
-/// Creates `schema` in the shared test database via a throwaway admin
-/// connection, mirroring `crate::test_harness`'s own private `create_schema`.
-/// Panics on failure, for the same reason that module's own copy does: an
-/// inability to create the isolated schema means the environment this
-/// harness needs is not available.
-async fn create_schema(schema: &str) {
-    let admin_pool = db::establish_pool(&admin_db_config())
-        .await
-        .expect("establishing an admin connection to the shared test database must succeed");
-    admin_pool
-        .execute(sqlx::query(sqlx::AssertSqlSafe(format!(
-            r#"CREATE SCHEMA "{schema}""#
-        ))))
-        .await
-        .expect("creating an isolated federation-pair instance schema must succeed");
-    admin_pool.close().await;
-}
-
 /// Boots one paired instance: the same composition
 /// `crate::test_harness::spawn_test_app` performs, except `domain` is set to
 /// this instance's own real bound address (not a fixed placeholder) and
@@ -260,21 +198,15 @@ async fn create_schema(schema: &str) {
 /// `ReqwestFederationHttpClient::new()`) — see this module's doc comment
 /// ("Why not `spawn_test_app`") for why both differences are necessary.
 async fn spawn_paired_instance(http_client: Arc<ReqwestFederationHttpClient>) -> TestApp {
-    let schema = unique_pair_schema_name();
-    create_schema(&schema).await;
-
-    let db_config = DatabaseConfig {
-        url: Secret::new(schema_scoped_url(&base_test_db_url(), &schema)),
-        max_connections: 5,
-        acquire_timeout: Duration::from_secs(5),
-    };
-    let pool = db::establish_pool(&db_config)
-        .await
-        .expect("establishing an isolated per-paired-instance connection pool must succeed");
-
-    migrate::apply_migrations(&pool)
-        .await
-        .expect("applying embedded migrations to an isolated federation-pair schema must succeed");
+    // The schema/pool/migrate sequence is the crate-wide one, not a third
+    // copy of it — see this module's doc comment ("Isolated database") for
+    // why the shared schema-name prefix in particular is what keeps an
+    // abandoned paired-instance schema reclaimable.
+    let IsolatedDb {
+        pool,
+        schema,
+        db_config,
+    } = establish_isolated_db().await;
 
     // Requirement 13.2: non-determinism boundaries replaced with
     // deterministic implementations, mirroring

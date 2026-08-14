@@ -368,14 +368,17 @@ async fn drop_schema(schema: &str) {
 /// pool pinned to it with the embedded migrations already applied, and the
 /// `DatabaseConfig` that pool was established from.
 ///
-/// Exists so the two fixtures in this module tree — [`spawn_test_app`] and
-/// [`db_fixture::spawn_test_db`] — share one implementation of the
-/// schema/pool/migrate sequence rather than each carrying its own copy. That
-/// sequence is exactly the part they have in common, and the part whose
-/// details (the `search_path` pinning convention, the pool size, the startup
-/// sweep) must not drift between them: a second copy would mean a `TestDb`
-/// isolated by different rules than a `TestApp`, which the isolation
-/// guarantee both rely on cannot survive.
+/// Exists so every fixture in this crate — [`spawn_test_app`],
+/// [`db_fixture::spawn_test_db`] and
+/// [`crate::federation::test_harness::spawn_federation_pair`]'s own paired
+/// instances — shares one implementation of the schema/pool/migrate sequence
+/// rather than each carrying its own copy. That sequence is exactly the part
+/// they have in common, and the part whose details (the `search_path` pinning
+/// convention, the pool size, the schema-name prefix, the startup sweep) must
+/// not drift between them: a second copy would mean a fixture isolated by
+/// different rules than a `TestApp`, and — because both the startup sweep and
+/// [`reaper::HarnessReaper`] recognize a reclaimable schema by that one
+/// prefix — one whose abandoned schemas no reclamation path would ever find.
 pub(crate) struct IsolatedDb {
     pub(crate) pool: PgPool,
     pub(crate) schema: String,
@@ -390,7 +393,7 @@ pub(crate) struct IsolatedDb {
 /// (Requirements 8.2, 8.4), running the once-per-process startup sweep first.
 /// Panics on any failure, for the reason [`create_schema`] documents: a
 /// caller cannot do anything useful with a partially-initialized fixture.
-async fn establish_isolated_db() -> IsolatedDb {
+pub(crate) async fn establish_isolated_db() -> IsolatedDb {
     // Before anything else in the process's first fixture: reclaim what
     // earlier runs abandoned, so a suite never has to be preceded by a manual
     // cleanup step (Requirement 1.2). Subsequent calls return immediately —
