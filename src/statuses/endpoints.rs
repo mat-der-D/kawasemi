@@ -63,9 +63,10 @@
 //! value, so cloning the bundle only ever needs to clone those `Arc`s (plus
 //! `PgPool`/`RuntimeContext`/`LocalFsStore`/`AuthState`, each already `Clone`
 //! in its own right) — `#[derive(Clone)]` would otherwise add a spurious
-//! `where A: Clone, D: Clone, ...` bound this module's own test doubles
-//! (mirroring `status_service/tests.rs`'s `MockLocalActorLookup`, which is
-//! not `Clone`) do not actually need to satisfy.
+//! `where A: Clone, D: Clone, ...` bound this surface's own test doubles
+//! (`tests/statuses_endpoints_it.rs`'s, mirroring `status_service/tests.rs`'s
+//! `MockLocalActorLookup`, which is not `Clone`) do not actually need to
+//! satisfy.
 //!
 //! `AccountService`/`LocalFsStore` (for account/media rendering) are, by
 //! contrast, **not** additional generic parameters — this crate has exactly
