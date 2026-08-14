@@ -226,6 +226,8 @@ async fn list_returns_only_the_requesting_recipients_notifications() {
         page.items[0].get("type").and_then(|v| v.as_str()),
         Some("follow")
     );
+
+    app.cleanup().await;
 }
 
 /// Requirement 2.4: a dismissed notification never appears in `list`.
@@ -264,6 +266,8 @@ async fn list_excludes_dismissed_notifications() {
         page.items.is_empty(),
         "a dismissed notification must not appear in list"
     );
+
+    app.cleanup().await;
 }
 
 /// Requirement 2.2: `types`/`exclude_types` narrow the result set.
@@ -306,6 +310,8 @@ async fn list_applies_types_filter() {
         page.items[0].get("type").and_then(|v| v.as_str()),
         Some("follow")
     );
+
+    app.cleanup().await;
 }
 
 /// Requirement 2.3: `account_id` (already-resolved `AccountRef`) narrows to
@@ -353,6 +359,8 @@ async fn list_applies_account_id_filter() {
             .and_then(|v| v.as_str()),
         Some(origin_a.as_i64().to_string()).as_deref()
     );
+
+    app.cleanup().await;
 }
 
 /// Requirement 1.2: a post-related notification embeds the related status,
@@ -393,6 +401,8 @@ async fn list_embeds_related_status_for_post_related_kinds() {
         status.get("id").and_then(|v| v.as_str()),
         Some(status_id.as_i64().to_string()).as_deref()
     );
+
+    app.cleanup().await;
 }
 
 /// Requirement 1.4: `follow`/`follow_request` never embed a status.
@@ -429,6 +439,8 @@ async fn list_null_status_for_follow_kinds() {
             .expect("status key present")
             .is_null()
     );
+
+    app.cleanup().await;
 }
 
 // -- show ---------------------------------------------------------------------
@@ -459,6 +471,8 @@ async fn show_returns_the_notification_for_its_own_recipient() {
         json.get("id").and_then(|v| v.as_str()),
         Some(notification_id.as_i64().to_string()).as_deref()
     );
+
+    app.cleanup().await;
 }
 
 /// Requirement 3.2: another recipient's notification 404s.
@@ -484,6 +498,8 @@ async fn show_404_for_another_recipients_notification() {
         .await
         .expect_err("another recipient's notification must 404");
     assert_eq!(err.status, StatusCode::NOT_FOUND);
+
+    app.cleanup().await;
 }
 
 /// Requirement 3.2: a nonexistent id 404s.
@@ -498,6 +514,8 @@ async fn show_404_for_a_nonexistent_notification() {
         .await
         .expect_err("a nonexistent notification must 404");
     assert_eq!(err.status, StatusCode::NOT_FOUND);
+
+    app.cleanup().await;
 }
 
 // -- dismiss / clear ------------------------------------------------------------
@@ -540,6 +558,8 @@ async fn dismiss_excludes_from_subsequent_show_and_list() {
         .await
         .expect("list must succeed");
     assert!(page.items.is_empty());
+
+    app.cleanup().await;
 }
 
 /// Requirement 4.3: dismissing another recipient's notification 404s.
@@ -565,6 +585,8 @@ async fn dismiss_404_for_another_recipients_notification() {
         .await
         .expect_err("another recipient's notification must 404 on dismiss");
     assert_eq!(err.status, StatusCode::NOT_FOUND);
+
+    app.cleanup().await;
 }
 
 /// Requirement 4.3: dismissing a nonexistent id 404s.
@@ -579,6 +601,8 @@ async fn dismiss_404_for_a_nonexistent_notification() {
         .await
         .expect_err("a nonexistent notification must 404 on dismiss");
     assert_eq!(err.status, StatusCode::NOT_FOUND);
+
+    app.cleanup().await;
 }
 
 /// Requirements 4.1, 4.4: `clear` dismisses every one of the recipient's
@@ -621,6 +645,8 @@ async fn clear_dismisses_every_notification_for_the_recipient() {
         .await
         .expect("list must succeed");
     assert!(page.items.is_empty());
+
+    app.cleanup().await;
 }
 
 /// Requirement 4.1: `clear` is idempotent — succeeds even with nothing to
@@ -635,6 +661,8 @@ async fn clear_succeeds_when_the_recipient_has_no_notifications() {
         .clear(&ctx_for(recipient))
         .await
         .expect("clear must succeed even with no notifications");
+
+    app.cleanup().await;
 }
 
 // -- one whole list page ---------------------------------------------------

@@ -282,6 +282,8 @@ async fn search_rejects_empty_query_with_422() {
         mock.fetched_urls().is_empty(),
         "an empty query must never reach remote resolution"
     );
+
+    app.cleanup().await;
 }
 
 // ---- 2.1, 2.2: type dispatch --------------------------------------------
@@ -331,6 +333,8 @@ async fn search_type_accounts_returns_empty_arrays_for_other_types() {
         json!([]),
         "hashtags must be [] (Requirement 2.2, 1.4), not omitted or null"
     );
+
+    app.cleanup().await;
 }
 
 /// Requirement 2.1: an unscoped (`type` omitted) search returns all three
@@ -363,6 +367,8 @@ async fn search_unscoped_returns_all_three_types() {
     assert_eq!(result["accounts"].as_array().unwrap().len(), 1);
     assert_eq!(result["statuses"].as_array().unwrap().len(), 1);
     assert_eq!(result["hashtags"].as_array().unwrap().len(), 1);
+
+    app.cleanup().await;
 }
 
 // ---- 6.1, 6.3: resolve gating -------------------------------------------
@@ -392,6 +398,8 @@ async fn search_resolve_true_adds_remote_account_to_results() {
         1,
         "the remotely-resolved account must appear in the results"
     );
+
+    app.cleanup().await;
 }
 
 /// Requirement 6.3: `resolve=false` (the default) against an `acct:` query
@@ -415,6 +423,8 @@ async fn search_resolve_false_never_fetches_remotely() {
         "resolve=false must never make a federation fetch (Requirement 6.3)"
     );
     assert_eq!(result["accounts"], json!([]));
+
+    app.cleanup().await;
 }
 
 /// Requirement 2.2 + this module's own documented "resolved candidates are
@@ -444,6 +454,8 @@ async fn search_resolved_account_is_not_leaked_when_type_excludes_accounts() {
         "a resolved account must never appear when type=hashtags was requested"
     );
     assert_eq!(result["hashtags"], json!([]));
+
+    app.cleanup().await;
 }
 
 // ---- 9.5: failure diagnostics / propagation -----------------------------
@@ -494,6 +506,8 @@ async fn search_backend_failure_propagates_as_err() {
         .await
         .expect_err("a SearchBackend failure must propagate, not be swallowed");
     assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    app.cleanup().await;
 }
 
 /// Requirement 6.4 (applied defensively at this layer, see this module's
@@ -517,6 +531,8 @@ async fn search_remote_resolution_failure_does_not_fail_the_whole_search() {
         .expect("a remote-resolution failure must not fail the whole search");
 
     assert_eq!(result["accounts"], json!([]));
+
+    app.cleanup().await;
 }
 
 // ---- 5.4: exclude_unreviewed accepted without altering behavior --------
@@ -549,6 +565,8 @@ async fn search_exclude_unreviewed_is_accepted_without_changing_results() {
         .expect("exclude_unreviewed=true must not be rejected");
 
     assert_eq!(result["hashtags"].as_array().unwrap().len(), 1);
+
+    app.cleanup().await;
 }
 
 // ---- 2.5, 3.4/4.6: limit/offset/account_id threaded through ------------
@@ -586,6 +604,8 @@ async fn search_threads_account_id_and_limit_offset_to_the_backend() {
         statuses[0]["id"].as_str().unwrap(),
         post_a.as_i64().to_string()
     );
+
+    app.cleanup().await;
 }
 
 // ---- 7.1, 7.4: engine-agnostic caller against the default PgSearchBackend --
@@ -617,4 +637,6 @@ async fn search_end_to_end_with_the_default_pg_backend() {
         .expect("PgSearchBackend-backed search must succeed");
 
     assert_eq!(result["statuses"].as_array().unwrap().len(), 1);
+
+    app.cleanup().await;
 }

@@ -327,6 +327,8 @@ async fn private_status_becomes_visible_to_a_real_follower_and_stays_invisible_t
         StatusCode::NOT_FOUND,
         "bob, no longer a follower, must lose visibility immediately: {body:?}"
     );
+
+    app.cleanup().await;
 }
 
 // ==========================================================================
@@ -468,6 +470,8 @@ async fn relationship_query_registry_reflects_real_local_and_remote_follower_sta
         "the remote follower must be resolved as a Recipient::Remote at the documented interim \
          inbox convention: {followers:?}"
     );
+
+    app.cleanup().await;
 }
 
 // ==========================================================================
@@ -666,4 +670,6 @@ async fn accounts_statuses_list_reveals_a_private_status_to_a_real_follower_and_
         "bob, no longer a follower, must lose visibility in alice's accounts-statuses list \
          immediately: {bob_ids_after_unfollow:?}"
     );
+
+    app.cleanup().await;
 }

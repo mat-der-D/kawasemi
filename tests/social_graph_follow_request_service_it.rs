@@ -278,6 +278,8 @@ async fn list_requests_is_empty_when_no_pending_requests() {
         .expect("list_requests must succeed");
 
     assert!(page.items.is_empty());
+
+    app.cleanup().await;
 }
 
 #[tokio::test]
@@ -311,6 +313,8 @@ async fn list_requests_returns_the_pending_requesters_account_json() {
         account.get("id").and_then(|v| v.as_str()),
         Some(requester.as_i64().to_string()).as_deref()
     );
+
+    app.cleanup().await;
 }
 
 #[tokio::test]
@@ -360,6 +364,8 @@ async fn list_requests_paginates_with_the_given_limit() {
         page.items[0].get("username").and_then(|v| v.as_str()),
         Some("carol")
     );
+
+    app.cleanup().await;
 }
 
 // --- authorize_request --------------------------------------------------------
@@ -408,6 +414,8 @@ async fn authorize_request_establishes_follow_and_delivers_accept_to_a_remote_re
         .await
         .expect_err("a repeat authorize must fail: nothing left to authorize");
     assert_eq!(err.status, StatusCode::NOT_FOUND);
+
+    app.cleanup().await;
 }
 
 #[tokio::test]
@@ -460,6 +468,8 @@ async fn authorize_request_delivers_locally_when_the_requester_is_local() {
     assert_eq!(http_sink.calls().len(), 0);
     let (_, activity, _) = &local_sink.calls()[0];
     assert_eq!(activity.parsed().activity_type, "Accept");
+
+    app.cleanup().await;
 }
 
 #[tokio::test]
@@ -478,6 +488,8 @@ async fn authorize_request_returns_not_found_when_no_pending_request_exists() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::NOT_FOUND);
     assert_eq!(http_sink.calls().len(), 0);
+
+    app.cleanup().await;
 }
 
 // --- reject_request ------------------------------------------------------------
@@ -516,6 +528,8 @@ async fn reject_request_drops_the_pending_request_and_delivers_reject() {
         .await
         .expect_err("a repeat reject must fail: nothing left to reject");
     assert_eq!(err.status, StatusCode::NOT_FOUND);
+
+    app.cleanup().await;
 }
 
 #[tokio::test]
@@ -534,4 +548,6 @@ async fn reject_request_returns_not_found_when_no_pending_request_exists() {
     assert_eq!(err.kind, ErrorKind::Client);
     assert_eq!(err.status, StatusCode::NOT_FOUND);
     assert_eq!(http_sink.calls().len(), 0);
+
+    app.cleanup().await;
 }
