@@ -36,31 +36,31 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::http::StatusCode;
 use time::OffsetDateTime;
 
-use super::{
+use kawasemi::accounts::account_service::{
     AccountService, MAX_PROFILE_FIELDS, MediaUploadInput, ProfileFieldInput, StatusesQueryInput,
     UpdateCredentialsInput,
 };
-use crate::accounts::model::{ProfileField, RelationshipView, RemoteAccount};
-use crate::accounts::ports::{
+use kawasemi::accounts::model::{ProfileField, RelationshipView, RemoteAccount};
+use kawasemi::accounts::ports::{
     AccountPortsRegistry, AccountStatusesProvider, RelationshipStateProvider, StatusesQuery,
 };
-use crate::accounts::profile_repository::find_profile;
-use crate::accounts::remote_fetcher::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
-use crate::accounts::remote_repository::upsert_remote;
-use crate::accounts::serializer::AccountSerializer;
-use crate::actor::model::{ActorState, ActorType, Handle, LocalActor};
-use crate::actor::owner::create_owner;
-use crate::actor::repository::insert_actor;
-use crate::api::pagination::{ForwardedOrigin, Page, PageParams};
-use crate::config::MediaConfig;
-use crate::domain::{AccountRef, Id};
-use crate::error::AppError;
-use crate::federation::signatures::MockFederationHttpClient;
-use crate::media::local_fs::LocalFsStore;
-use crate::media::media_repository::find_owned;
-use crate::media::service::MediaService;
-use crate::oauth::model::{RequestActorContext, ScopeSet};
-use crate::test_harness::{TestApp, spawn_test_app};
+use kawasemi::accounts::profile_repository::find_profile;
+use kawasemi::accounts::remote_fetcher::{DEFAULT_REMOTE_ACCOUNT_CACHE_TTL, RemoteAccountFetcher};
+use kawasemi::accounts::remote_repository::upsert_remote;
+use kawasemi::accounts::serializer::AccountSerializer;
+use kawasemi::actor::model::{ActorState, ActorType, Handle, LocalActor};
+use kawasemi::actor::owner::create_owner;
+use kawasemi::actor::repository::insert_actor;
+use kawasemi::api::pagination::{ForwardedOrigin, Page, PageParams};
+use kawasemi::config::MediaConfig;
+use kawasemi::domain::{AccountRef, Id};
+use kawasemi::error::AppError;
+use kawasemi::federation::signatures::MockFederationHttpClient;
+use kawasemi::media::local_fs::LocalFsStore;
+use kawasemi::media::media_repository::find_owned;
+use kawasemi::media::service::MediaService;
+use kawasemi::oauth::model::{RequestActorContext, ScopeSet};
+use kawasemi::test_harness::{TestApp, spawn_test_app};
 
 /// Creates a real owner + local actor row, returning the actor's `Id` — an
 /// exact copy of `profile_repository/tests.rs::create_test_actor` (this

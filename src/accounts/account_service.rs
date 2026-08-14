@@ -188,9 +188,17 @@
 //! comment). A standard RED -> GREEN -> REFACTOR cycle against a real
 //! Postgres instance (via `spawn_test_app`) is this crate's established
 //! verification method for this kind of module.
-
-#[cfg(test)]
-mod tests;
+//!
+//! ## Where this module's tests live
+//! There is no `account_service/tests.rs`. Every one of this module's own
+//! tests drives a real `AccountService` against a real Postgres schema and
+//! therefore requires a running instance (`spawn_test_app`); they all live in
+//! `tests/accounts_account_service_it.rs` — placed there by
+//! `.kiro/specs/test-placement-migration` task 7.1 so that steering
+//! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
+//! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
+//! A module with no `tests.rs` therefore means "no pure unit test applies
+//! here", not "untested".
 
 use std::sync::Arc;
 
