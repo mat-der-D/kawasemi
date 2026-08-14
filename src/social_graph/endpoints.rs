@@ -172,21 +172,19 @@
 //! to compile) -> GREEN (handlers implemented, tests pass) being this
 //! crate's already-established convention here.
 //!
-//! ## Testing strategy: `#[cfg(test)] mod tests` only, no new `tests/*_it.rs`
-//! (per this task's own explicit instruction)
-//! `tests.rs` builds its own small, test-only axum `Router` (mirroring
-//! `crate::oauth::middleware::tests`'s own "real, test-only `Router`
-//! dispatched via `tower::ServiceExt::oneshot` against a real,
-//! `spawn_test_app`-backed Postgres schema" precedent, and
-//! `follow_service/tests.rs`/`follow_request_service/tests.rs`/
-//! `mute_service/tests.rs`/`block_service/tests.rs`'s established
-//! `build_service`/`RecordingSink`/real-actor-row fixtures) rather than
-//! driving the real production router (nothing mounts this module onto it
-//! yet, task 5.2's job) or adding a new `tests/*_it.rs` integration test
-//! (explicitly out of this task's own boundary, reserved for task 6.1). Real
-//! Bearer tokens are issued through `crate::oauth::token_repository::issue_token`
-//! (mirrors `oauth::middleware::tests`'s own `issue_test_token` helper) — no
-//! handler here or in its tests hand-constructs a `RequestActorContext`.
+//! ## Testing strategy: split by whether a running instance is needed
+//! `tests/social_graph_endpoints_it.rs` builds its own small, test-only axum
+//! `Router` (mirroring `crate::oauth::middleware`'s own "real, test-only
+//! `Router` dispatched via `tower::ServiceExt::oneshot` against a real,
+//! `spawn_test_app`-backed Postgres schema" precedent, and the social-graph
+//! service tests' established `build_service`/`RecordingSink`/real-actor-row
+//! fixtures) rather than driving the real production router (nothing mounts
+//! this module onto it yet, task 5.2's job). Real Bearer tokens are issued
+//! through `crate::oauth::token_repository::issue_token` — no handler here
+//! or in its tests hand-constructs a `RequestActorContext`. This module's
+//! own `#[cfg(test)] mod tests` keeps only the pure, instance-free unit
+//! tests of the wire-shape parsing helpers (`parse_follow_options`,
+//! `parse_mute_options`, `parse_optional_limit`).
 
 #[cfg(test)]
 mod tests;
