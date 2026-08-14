@@ -1,6 +1,6 @@
 # Project Structure
 
-> Phase 1（MVP）の全 11 spec（core-runtime / actor-model / api-foundation / federation-core / media-pipeline / accounts-and-instance / statuses-core / social-graph / timelines / notifications / search）が実装済み。加えて、Phase 1 完了後の構造リファクタ（structural-refactor）により「組み立てコードの spec 境界ごとの複製」が解消されている。以下は実コードから確認された構成原則。
+> Phase 1（MVP）の全 11 spec（core-runtime / actor-model / api-foundation / federation-core / media-pipeline / accounts-and-instance / statuses-core / social-graph / timelines / notifications / search）が実装済み。加えて、Phase 1 完了後の構造リファクタ（structural-refactor）により「組み立てコードの spec 境界ごとの複製」が、テスト基盤の整理（test-infrastructure）により「後始末を呼び出し側の規律に依存する構造」が、それぞれ解消されている。以下は実コードから確認された構成原則。
 
 ## Organization Philosophy
 
@@ -58,8 +58,33 @@ clock / id generator / RNG / 署名鍵は具体実装に直接依存させず、
 
 - **単体テスト**：実装ファイルと同階層の `tests.rs` サブモジュールに置く（例：`src/actor/service.rs` → `src/actor/service/tests.rs`）。`#[cfg(test)] mod tests;` で親から宣言する。
 - **統合テスト**：`tests/` 直下、ファイル名は `_it.rs` サフィックス（例：`tests/actor_lifecycle_it.rs`）。DB込みの実起動インスタンスを要する検証はここに置く。
-- **TestHarness**：`src/test_harness.rs` の `spawn_test_app` が bootstrap と同じ構成要素（`db::establish_pool` / `migrate::apply_migrations` / `runtime::RuntimeContext::deterministic` / `bootstrap::wiring::compose_modules` / `state::AppState::new` / `server::build_router`）を再利用して実インスタンスを起動する。モジュール構築順そのものはここに書かれていない（`compose_modules` に一本化済み）。`bootstrap::bootstrap` 自体を直接再利用しないのは、待受アドレスを呼び出し側に返さないため。統合テストは `bootstrap` を再実装せず、この harness 経由で実体を起動する。
-- **連合ペアハーネス**：`src/federation/test_harness.rs` の `spawn_federation_pair`（自前インスタンスを 2 つ起動して Activity 往復を検証する）も、各インスタンスの構築で同じ `compose_modules` を通る。テストハーネスが本番と違う構成で起動していると、連合テストが検証しているものが本番の構成ではなくなる。
+- **TestHarness**：`src/test_harness.rs` の `spawn_test_app` が bootstrap と同じ構成要素（`runtime::RuntimeContext::deterministic` / `bootstrap::wiring::compose_modules` / `state::AppState::new` / `server::build_router`）を再利用して実インスタンスを起動する。モジュール構築順そのものはここに書かれていない（`compose_modules` に一本化済み）。`bootstrap::bootstrap` 自体を直接再利用しないのは、待受アドレスを呼び出し側に返さないため。統合テストは `bootstrap` を再実装せず、この harness 経由で実体を起動する。
+- **連合ペアハーネス**：`src/federation/test_harness.rs` の `spawn_federation_pair`（自前インスタンスを 2 つ起動して Activity 往復を検証する）も、各インスタンスの構築で同じ `compose_modules` と同じ隔離 DB 経路を通る。テストハーネスが本番と違う構成で起動していると、連合テストが検証しているものが本番の構成ではなくなる。
+
+### フィクスチャの 2 段階（安いほうを選ぶ）
+
+起動コストの異なる 2 段階がある。**実インスタンスが要らない検証で `spawn_test_app` を使わない。**
+
+| フィクスチャ | 得られるもの | 使いどころ |
+|---|---|---|
+| `test_harness::db_fixture::spawn_test_db` → `TestDb` | 隔離スキーマ＋マイグレーション適用済みプール、決定的 `RuntimeContext` | 実 SQL は要るが HTTP もルーターも要らない検証 |
+| `test_harness::spawn_test_app` → `TestApp` | 上記に加えて実 TCP リスナ・全モジュール・バックグラウンドループ | 実起動インスタンスを要する検証（＝ `tests/*_it.rs` に置くもの） |
+
+`TestDb` は `address` も `state` も `actor` も持たない。**型で下段を強制している**ので、実インスタンスが要るものを誤って `TestDb` に移すとコンパイルが通らない。
+
+移行時に注意する 2 経路（コンパイルは通るが挙動が変わる）：`TestApp` の `runtime.keys` は実 DB 由来の `DbSigningKeyProvider` だが `TestDb` は固定値の `FixedSigningKeyProvider`。また `spawn_test_app` は配送・プルーニング・メディアの各バックグラウンドループを起動するが `TestDb` は起動しない（キュー系テストで挙動が変わったらまずこれを疑う）。
+
+### 隔離とその回収
+
+- **隔離単位はスキーマ**。共有テスト DB 内に `kawasemi_test_harness_{nanos}_{seq}` という名前のスキーマを 1 フィクスチャにつき 1 つ作り、接続 URL の `search_path` で固定する（`kawasemi_test` ロールに `CREATEDB` 権限が無いため DB 単位の隔離は取れない）。
+- **隔離スキーマを作るフィクスチャは必ず `test_harness::establish_isolated_db` を通す。** schema 作成・プール確立・マイグレーション適用・起動時スイープがここに 1 実装だけある。複製すると、回収機構が接頭辞だけを手がかりに対象を決めている以上、**どの回収経路からも見えないスキーマ**が生まれる（実際に連合ペアハーネスが一度この状態になった）。
+- **後始末は呼び出し側の規律に依存させない**。`cleanup()` は明示的な解放経路で、返った時点で解放完了が保証される唯一の経路。呼ばなくてもリークしない — `Drop` がプールとスキーマ名を常駐リーパー（`test_harness/reaper.rs`）へ渡す。`Drop` は同期・非ブロッキング・無謬でなければならない（アンワインド中の destructor でパニックするとプロセスが abort する）ため、実行そのものを呼び出し側のランタイムから外に出している。
+- **プロセス起動時のスイープ**（`test_harness/sweep.rs`）が過去の実行の置き土産を回収する。事前の手動掃除は不要。判定はスキーマ名に埋め込まれたナノ秒時刻のみで行い（DB 側の管理テーブルを持たない）、閾値は 2 時間。**疑わしきはすべて残す**方向に非対称に倒してある — 誤って落とせば同時実行中の別プロセスの状態を黙って破壊するが、残し過ぎても次回の回収が遅れるだけだから。
+- スキーマ一覧に `LIKE 'kawasemi_test_harness_%'` を使わない。**`_` は LIKE のワイルドカード**なので見た目より広く一致する。
+
+### テスト専用資産を本番成果物に入れない
+
+`test_harness` は固定 KEK・固定パスフレーズ・固定トークンハッシュ鍵・テスト DB 接続先を持つため、モジュール宣言ごと `#[cfg(any(test, feature = "test-harness"))]` でゲートする（`src/lib.rs` と `src/federation.rs`）。宣言をゲートすることで配下のサブモジュール・定数まで丸ごと素の `cargo build` から外れる。`tests/*.rs` からは `Cargo.toml` の自己 dev-dependency（`features = ["test-harness"]`）経由で見える。ハーネス側に新しい公開項目を足すときは、この 3 条件が同時に成り立つことを確認する。
 
 ## Spec & Steering Layout
 

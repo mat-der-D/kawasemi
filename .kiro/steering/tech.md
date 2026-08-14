@@ -80,14 +80,17 @@ Mastodon 互換 API は **Opus による自律 TDD**（契約固定 → 実装 �
 - **検索の抽象化**：検索処理を抽象レイヤーの背後に置き、初期は標準 PostgreSQL の最小実装。`pg_bigm` 等の日本語拡張は任意オプションに留め、必須にしない。API 契約は Mastodon 検索 API の形に留める。
 - **横断サブシステム**：OAuth 2.0 サーバー・ページネーション規約（`Link` + `max_id`/`since_id`/`min_id`）・エラー/レート制限互換（`X-RateLimit-*`）・非同期メディアアップロード（`202` → ポーリング）は Phase 1 で実装済み。Streaming API（WebSocket）・Web Push（VAPID）は **Phase 2 予定・未実装**（`roadmap.md` 参照）。
 
-## テスト実行基盤の既知の問題
+## テスト実行基盤の既知事項
 
-フル並列でのテストスイート実行（`cargo test --lib` 等）を調査した際に見つかった、テスト実行基盤（アプリ本体のロジックではない）に関する既知事項。
+テスト実行基盤（アプリ本体のロジックではない）について、コードから読み取れない事情。
+フィクスチャの構造・隔離・回収そのものは `structure.md`「テストレイアウト」に記載する。
 
-- **RSA-2048 鍵生成が debug ビルドで低速**：1 鍵あたり約 10.8 秒かかっていた。`Cargo.toml` の `[profile.dev.package.*]` で `rsa` 等の関連クレートに `opt-level = 3` をオーバーライドして解消済み（約 22 倍高速化、テストスイート全体で約 2.4〜3 倍高速化）。
-- **`TestApp::cleanup()` 未実行時の孤立スキーマと接続リーク（解消済み）**：かつては `Drop for TestApp` がスキーマ削除のデタッチしかせず `pool.close()` を呼んでいなかったため、破棄ごとに接続が積み上がり、孤立スキーマも `kawasemi_test` DB に溜まり続けていた（664 件を手動 `DROP SCHEMA` で解消していた時期がある）。現在は二段構えで回収する：`Drop` はプールとスキーマ名を `src/test_harness/reaper.rs` の `HarnessReaper` に引き渡し（プールを閉じてからスキーマを削除する）、`src/test_harness/sweep.rs` の `sweep_orphans` がプロセスごとに一度、最初のフィクスチャ生成時（`establish_isolated_db`）に走って過去の実行が置き去りにしたスキーマを回収する。回収対象は接頭辞 `kawasemi_test_harness_` とスキーマ名に埋め込まれたナノ秒時刻で識別するので、隔離スキーマを作るフィクスチャはすべて `establish_isolated_db` を通す必要がある（`spawn_test_app` / `spawn_test_db` / `federation::test_harness` の連合ペアが該当）。事前のスキーマ掃除は不要で、`cargo test --lib` 実行後の残存は 0 件。
-- **`bootstrap_lifecycle_it` が `public` スキーマの不整合で恒久的に失敗する事象**：並行実行していた別プロセスが `public` スキーマの `_sqlx_migrations` に、実体を伴わないバージョン（8）の履歴行を残し、以後そのスキーマに対するマイグレーション適用が失敗し続けていた。該当テーブルと履歴行を直接 `DROP` して解消（コード修正ではなく DB 状態のクリーンアップ）。同様の中断（複数プロセスが同一スキーマへ同時にマイグレーションを試みる等）が起きると再発し得る。
-- **`federation::outbound::worker` のクレーム件数 0（原因特定済み・テスト固有）**：`run_once_marks_a_job_failed_immediately_when_sender_no_longer_resolves` が `summary.claimed == 0` で落ちることがある。原因は `spawn_test_app` が `federation_background.spawn()` により**本物の配送ワーカーのループ（200 ms 間隔）を同じプール・同じスキーマ上で常時走らせている**ことで、テスト自身の `run_once` より先にそのループが同じジョブをクレームするため。`claim_due` の `FOR UPDATE SKIP LOCKED` は仕様どおりに動作しており、ジョブ自体は正しく一度だけ処理されて `failed` に落ちる（失われる仕事はない）。プロダクションでは `claim_due` の呼び出し元は配送ループ 1 つだけなので、この競合は起きない — **プロダクションの欠陥ではない**。`max_connections` は原因ではなく競合の窓を広げる増幅器で、プール 1 では 5/5 決定的に失敗、現行のプール 2 では低頻度で再現する（独立した 2 回の計測で 34 回中 1 回・40 回中 1 回。単体実行でも起きるので、フル並列限定ではない）。詳細な証拠と修正方針の候補は `.kiro/specs/test-infrastructure/worker-claim-investigation.md`。修正自体は別 spec の範囲。
+- **RSA-2048 鍵生成が debug ビルドで低速**：1 鍵あたり約 10.8 秒かかっていた。`Cargo.toml` の `[profile.dev.package.*]` で `rsa` 等の関連クレートに `opt-level = 3` をオーバーライドして解消済み（約 22 倍高速化、テストスイート全体で約 2.4〜3 倍高速化）。**このオーバーライドを外すとテストスイートが数倍遅くなる。**
+- **`cargo test --lib` は単一プロセスで完走する。** かつては 256 件が `PoolTimedOut` で落ち、モジュール分割と事前のスキーマ掃除を手順書として踏む必要があったが、いずれも不要になった。真因は `Drop for TestApp` が `pool.close()` を呼んでいなかったこと（スキーマ削除のデタッチはしていたので「スキーマは消えるが接続は残る」状態だった）。回収機構は `structure.md`「隔離とその回収」を参照。
+- **`cargo build --tests` と `--all-features` は `target/debug/libkawasemi.rlib` を feature ON 版で上書きする。** 成果物の中身（テスト専用資産が入っていないこと等）を検査するときは、直前に必ず素の `cargo build` / `cargo build --release` を打つこと。さもないと偽の失敗を見る。
+- **共有テスト DB の状態を測るテストはテスト間分離を自前で持つこと。** `information_schema` や `pg_stat_activity` をサーバ全体で舐めると、兄弟テストの生存スキーマ・接続を自分の残骸と誤検出して flaky になる。観測対象は自分が作った名前に限定し（`= ANY($1)`）、必要なら排他ロックを取る。
+- **`bootstrap_lifecycle_it` が `public` スキーマの不整合で恒久的に失敗する事象**：並行実行していた別プロセスが `public` スキーマの `_sqlx_migrations` に、実体を伴わないバージョンの履歴行を残し、以後そのスキーマに対するマイグレーション適用が失敗し続けていた。該当テーブルと履歴行を直接 `DROP` して解消（コード修正ではなく DB 状態のクリーンアップ）。同様の中断（複数プロセスが同一スキーマへ同時にマイグレーションを試みる等）が起きると再発し得る。
+- **`federation::outbound::worker` のクレーム件数 0（原因特定済み・テスト固有・未修正）**：`run_once_marks_a_job_failed_immediately_when_sender_no_longer_resolves` が `summary.claimed == 0` で落ちることがある。原因は `spawn_test_app` が `federation_background.spawn()` により**本物の配送ワーカーのループを同じプール・同じスキーマ上で常時走らせている**ことで、テスト自身の `run_once` より先にそのループが同じジョブをクレームするため。`claim_due` の `FOR UPDATE SKIP LOCKED` は仕様どおりに動作しており、ジョブは正しく一度だけ処理される（失われる仕事はない）。プロダクションでは `claim_due` の呼び出し元は配送ループ 1 つだけなので、この競合は起きない — **プロダクションの欠陥ではない**。プールサイズは原因ではなく競合の窓を広げる増幅器で、プール 1 では決定的に失敗、現行のプール 2 では低頻度で再現する（独立した 2 回の計測で 34 回中 1 回・40 回中 1 回。単体実行でも起きるのでフル並列限定ではない）。**この 1 件が落ちても資源枯渇ではない。**
 
 ---
 _主要な設計判断とパターンのみを記載する。網羅的な依存一覧は記載しない。_

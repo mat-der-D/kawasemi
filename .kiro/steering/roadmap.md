@@ -55,7 +55,7 @@ kawasemi は一人鯖（single-user server）運用に特化した Fediverse サ
 Phase 1 完了後、機能追加ではない構造リファクタ spec を 1 本挟んでいる（この一覧はフィーチャー spec の分解なので、行としては含めない）。
 
 - [x] structural-refactor -- Phase 2 以降で複製が拡大し続ける構造的負債の除去（組み立てコードの単一実装化・横断ユーティリティの集約・合成ルートの一本化・一括取得・複合書き込みのトランザクション化）。Dependencies: Phase 1 全 spec
-- [ ] test-infrastructure -- テスト基盤の構造的負債の除去（TestApp 解放の型による強制・単体テストの TestApp 依存削減・孤立スキーマの起動時スイープ・test_harness の本番バイナリからの分離）。`cargo test --lib` の一括実行が単一プロセスで通ることを完了条件とする。Dependencies: structural-refactor
+- [x] test-infrastructure -- テスト基盤の構造的負債の除去（TestApp 解放の型による強制・単体テストの TestApp 依存削減・孤立スキーマの起動時スイープ・test_harness の本番バイナリからの分離）。`cargo test --lib` の一括実行が単一プロセスで通ることを完了条件とする。Dependencies: structural-refactor
 - [ ] test-placement-migration -- `src/**/tests.rs` に残る実起動インスタンス依存テスト 208 箇所 / 21 ファイルの `tests/*_it.rs` への移設。test-infrastructure の要件 4.5 からの明示的な繰り越し（同 spec 着手前 748 / 71 → 208 / 21 まで削減済み、新規追加ゼロ）。中心的な設計判断は移設が強制する可視性の緩和をどこまで許容するか。Dependencies: test-infrastructure
 
 ## Future Phases (briefs pending)
