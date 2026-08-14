@@ -19,9 +19,12 @@
 //! this crate's `tower = { features = ["util"] }` dev-dependency's intended
 //! use) -- proving the full observable behavior (status codes,
 //! `Content-Type`, JSON body shape) end to end, not just the handler
-//! functions' return values in isolation (which `src/federation/endpoints/
-//! webfinger/tests.rs` / `nodeinfo/tests.rs` already cover at the unit
-//! level).
+//! functions' return values in isolation (which
+//! `tests/federation_webfinger_endpoint_it.rs` — relocated out of
+//! `src/federation/endpoints/webfinger/tests.rs` by
+//! `.kiro/specs/test-placement-migration` task 2.2 — and
+//! `src/federation/endpoints/nodeinfo/tests.rs` already cover at the
+//! handler level).
 //!
 //! A real, Postgres-backed `ActorDirectory` is used throughout (via
 //! `spawn_test_app`), matching every other `ActorDirectory`-touching test in
@@ -42,7 +45,8 @@
 //! own boundary file's) already-proven single-actor WebFinger/NodeInfo/
 //! actor-GET-reachability smoke coverage. The tests below deliberately do
 //! *not* re-prove what is already proven elsewhere at the unit level
-//! (`src/federation/endpoints/*/tests.rs`), the test-local-router level (this
+//! (`src/federation/endpoints/*/tests.rs`,
+//! `tests/federation_webfinger_endpoint_it.rs`), the test-local-router level (this
 //! file's own tests above, `ap_get_outbox_it.rs`), or already thoroughly at
 //! the live-router level (`federation_bootstrap_it.rs`'s own downstream-
 //! registration test, which already asserts the *unregistered* 404/empty

@@ -118,7 +118,8 @@ fn sample_remote_account(
 }
 
 /// Creates a real `remote_accounts` row, returning its `Id` -- mirrors
-/// `follow_request_service/tests.rs::create_test_remote`. `promote_pending`/
+/// `tests/social_graph_follow_request_service_it.rs::create_test_remote`.
+/// `promote_pending`/
 /// `drop_pending` (task 3.2, `transitions.rs`'s own documented convention)
 /// derive the pending row's `FollowRequestDirection` from the `requester`'s
 /// own `AccountRef` variant (`Remote` -> `Inbound`) rather than accepting it
@@ -394,7 +395,7 @@ fn build_router(state: TestState) -> Router {
 }
 
 /// Registers a real `oauth_applications` row, returning its `Id` --
-/// mirrors `oauth::middleware::tests::register_test_app`.
+/// mirrors `tests/oauth_middleware_it.rs::register_test_app`.
 async fn register_test_app(app: &TestApp) -> Id {
     let key = app.state.config().oauth.token_hash_key.clone();
     let now = app.runtime.clock.now();
@@ -417,7 +418,7 @@ async fn register_test_app(app: &TestApp) -> Id {
 
 /// Issues a real access token bound to `actor_id` with `scopes`, returning
 /// its plaintext bearer value -- mirrors
-/// `oauth::middleware::tests::issue_test_token`. Never hand-constructs a
+/// `tests/oauth_middleware_it.rs::issue_test_token`. Never hand-constructs a
 /// `RequestActorContext`: every token these tests present was actually
 /// persisted and hashed through `token_repository::issue_token`.
 async fn issue_test_token(app: &TestApp, app_id: Id, actor_id: Id, scopes: &[&str]) -> String {
@@ -871,7 +872,8 @@ async fn list_follow_requests_returns_account_json_with_link_header() {
     let token = issue_test_token(&app, app_id, owner, &["read:follows"]).await;
 
     // Seed a real pending inbound request directly via `Transitions`
-    // (mirrors `follow_request_service/tests.rs`'s own established fixture
+    // (mirrors `tests/social_graph_follow_request_service_it.rs`'s own
+    // established fixture
     // technique -- there is no live inbound handler yet to produce this
     // state through the wire). The requester must be `Remote` -- see
     // `create_test_remote`'s own doc comment.

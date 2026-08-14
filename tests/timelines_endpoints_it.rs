@@ -7,12 +7,14 @@
 //! 7.1-7.4, 9.1-9.4).
 //!
 //! ## Why this file, given `tests/timeline_service_it.rs` and
-//! `src/timelines/endpoints/tests.rs` already exist
+//! `tests/timelines_endpoints_handler_it.rs` already exist
 //! This task's own brief is explicit that `_Boundary:_` names
 //! `TimelineEndpoints` alongside `TimelineService`/`TimelineFilter` — meaning
 //! HTTP-level coverage is required, not merely more service-level unit
 //! coverage (already exhaustively provided by `tests/timeline_service_it.rs`,
-//! task 4.2). `src/timelines/endpoints/tests.rs` (task 5.1) already covers
+//! task 4.2). `tests/timelines_endpoints_handler_it.rs` (task 5.1; formerly
+//! `src/timelines/endpoints/tests.rs`, moved by
+//! `.kiro/specs/test-placement-migration` task 7.2) already covers
 //! auth/scope/response-code/`Link`-header wiring, but deliberately against a
 //! *test-only* router it builds by hand (task 5.1's own module doc comment:
 //! "this task's own boundary explicitly forbids mounting them onto the real
@@ -47,7 +49,7 @@
 //!
 //! ## Fixture plumbing (duplicated per this crate's own documented
 //! sibling-test-file convention — see `tests/timeline_service_it.rs`'s/
-//! `src/timelines/endpoints/tests.rs`'s own doc comments) — largely mirrors
+//! `tests/timelines_endpoints_handler_it.rs`'s own doc comments) — largely mirrors
 //! those two files' established conventions, plus
 //! `tests/social_graph_visibility_query_it.rs`'s `create_remote_follower`
 //! convention (renamed `remote_actor_fixture` here) for a genuinely
@@ -262,7 +264,7 @@ async fn upsert_mute(app: &TestApp, muter: AccountRef, muted: AccountRef) {
 
 /// The real, fully-wired production router (`server::build_router`, exactly
 /// as `spawn_test_app` itself serves) — the whole point of this file over
-/// `src/timelines/endpoints/tests.rs`'s own hand-built test-only router (see
+/// `tests/timelines_endpoints_handler_it.rs`'s own hand-built test-only router (see
 /// this file's module doc comment).
 fn real_router(app: &TestApp) -> Router {
     server::build_router(app.state.clone())

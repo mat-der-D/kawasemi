@@ -57,7 +57,7 @@ use kawasemi::oauth::model::ScopeSet as ModelScopeSet;
 use kawasemi::oauth::token_repository::{self, NewAccessToken};
 use kawasemi::test_harness::{TestApp, spawn_test_app};
 
-// ---- Fixture plumbing (mirrors `notifications/service/tests.rs`'s own
+// ---- Fixture plumbing (mirrors `tests/notifications_service_it.rs`'s own
 // established `create_test_actor`/`sample_notification`/`seed_notification`
 // helpers) ------------------------------------------------------------------
 
@@ -156,7 +156,7 @@ async fn seed_notification(
 }
 
 /// Builds the `NotificationEndpointsState` these tests drive requests
-/// through — mirrors `notifications/service/tests.rs::build_service`'s own
+/// through — mirrors `tests/notifications_service_it.rs::build_service`'s own
 /// construction of `NotificationService` from `TestApp`'s already-wired
 /// `AccountService`/`LocalFsStore`, plus this module's own two additional
 /// `account_id`-resolution collaborators (`ActorDirectory`/`PgPool`, see
@@ -195,8 +195,8 @@ fn build_router(state: NotificationEndpointsState) -> Router {
 }
 
 /// Registers a real `oauth_applications` row, returning its `Id` — mirrors
-/// `social_graph::endpoints::tests::register_test_app`/`timelines::
-/// endpoints::tests::register_test_app`.
+/// `tests/social_graph_endpoints_it.rs::register_test_app`/
+/// `tests/timelines_endpoints_handler_it.rs::register_test_app`.
 async fn register_test_app(app: &TestApp) -> Id {
     let key = app.state.config().oauth.token_hash_key.clone();
     let now = app.runtime.clock.now();
@@ -218,8 +218,9 @@ async fn register_test_app(app: &TestApp) -> Id {
 }
 
 /// Issues a real access token bound to `actor_id` with `scopes`, returning
-/// its plaintext bearer value — mirrors `social_graph::endpoints::tests::
-/// issue_test_token`/`timelines::endpoints::tests::issue_test_token`. Never
+/// its plaintext bearer value — mirrors
+/// `tests/social_graph_endpoints_it.rs::issue_test_token`/
+/// `tests/timelines_endpoints_handler_it.rs::issue_test_token`. Never
 /// hand-constructs a `RequestActorContext`.
 async fn issue_test_token(app: &TestApp, app_id: Id, actor_id: Id, scopes: &[&str]) -> String {
     let key = app.state.config().oauth.token_hash_key.clone();

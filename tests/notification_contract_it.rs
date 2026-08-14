@@ -49,7 +49,7 @@
 //! `crate::notifications::service::NotificationService` -> the mounted
 //! `GET /api/v1/notifications`/`GET /api/v1/notifications/{id}` handlers
 //! (`crate::notifications::endpoints`) — the identical chain
-//! `src/notifications/tests.rs`'s own task-4.2 wiring test already proves
+//! `tests/notifications_module_it.rs`'s own task-4.2 wiring test already proves
 //! connects end to end for `favourite`, exercised here for every v1 kind
 //! and asserted against this file's own registered goldens.
 //!

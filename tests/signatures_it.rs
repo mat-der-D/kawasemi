@@ -5,9 +5,13 @@
 //! Every underlying signature component (`RequestSigner`, `SignatureSuite`,
 //! `HttpSignatureVerifier`, `DbFederationPublicKeyResolver`,
 //! `SignatureNegotiator`) already has dedicated unit/integration-style
-//! coverage under `src/federation/signatures/*/tests.rs` (each exercising
+//! coverage under `src/federation/signatures/*/tests.rs` and, for the
+//! parts needing a real running instance, `tests/
+//! federation_signatures_signer_it.rs`/`tests/
+//! federation_signatures_negotiation_it.rs` (relocated there by
+//! `.kiro/specs/test-placement-migration` task 2.1) — each exercising
 //! its own component against a hand-built fixture or a deterministic mock
-//! resolver). This file's job is different: prove the *assembled* pipeline
+//! resolver. This file's job is different: prove the *assembled* pipeline
 //! end to end, wired the same way task 5.4 wires it into the real, live
 //! `spawn_test_app()` instance --
 //!
@@ -105,7 +109,8 @@ fn test_domain(app: &TestApp) -> String {
 
 /// Builds a `RequestSigner` wired against `app`'s own real
 /// `ActorDirectory`/`SigningKeyProvider`/`Clock` -- the same construction
-/// task 5.4's bootstrap wiring and `src/federation/signatures/negotiation/tests.rs`'s
+/// task 5.4's bootstrap wiring and
+/// `tests/federation_signatures_negotiation_it.rs`'s
 /// own `negotiator_for` helper use.
 fn signer_for(app: &TestApp) -> RequestSigner {
     RequestSigner::new(
@@ -483,8 +488,9 @@ async fn double_knock_resend_succeeds_records_the_format_and_both_attempts_are_g
     // format guesses, are each genuinely valid, independently verifiable
     // signatures -- this is the load-bearing proof that the negotiator's
     // output round-trips through real receive-side verification, not just
-    // "carries the right header shape" (which `negotiation/tests.rs`'s own
-    // unit tests already check, without ever verifying the bytes).
+    // "carries the right header shape" (which
+    // `tests/federation_signatures_negotiation_it.rs`'s own tests already
+    // check, without ever verifying the bytes).
     let verify_mock = Arc::new(MockFederationHttpClient::new());
     verify_mock.queue_fetch_response(actor_document_response(
         &actor_uri,

@@ -48,7 +48,7 @@ use kawasemi::oauth::token_repository::{self, NewAccessToken};
 use kawasemi::runtime::RuntimeContext;
 use kawasemi::test_harness::{TestApp, spawn_test_app};
 
-// ---- Fixture plumbing (mirrors `src/oauth/middleware/tests.rs`'s and
+// ---- Fixture plumbing (mirrors `tests/oauth_middleware_it.rs`'s and
 // `src/media/service/tests.rs`'s already-established conventions; small
 // helper duplication across sibling test modules is this crate's own
 // documented convention — see tasks.md's Implementation Notes for 3.2). ----
@@ -57,7 +57,7 @@ use kawasemi::test_harness::{TestApp, spawn_test_app};
 /// independent of `spawn_test_app`'s own internal fixed key — `AuthState`
 /// takes the key explicitly, so these tests only need *a* fixed key
 /// consistently used for both issuance and resolution (mirrors
-/// `oauth/middleware/tests.rs::test_token_hash_key`).
+/// `tests/oauth_middleware_it.rs::test_token_hash_key`).
 fn test_token_hash_key() -> TokenHashKey {
     Secret::new([0x51; 32])
 }
@@ -87,7 +87,7 @@ async fn register_test_app(pool: &sqlx::PgPool, runtime: &RuntimeContext) -> Id 
 /// `media.actor_id` carries a real FK to actor-model (both are documented
 /// logical-only references), so a bare freshly-minted `Id` is a legitimate
 /// owning actor for these tests, mirroring
-/// `oauth/middleware/tests.rs::issue_test_token`'s own identical choice.
+/// `tests/oauth_middleware_it.rs::issue_test_token`'s own identical choice.
 async fn issue_test_token(
     pool: &sqlx::PgPool,
     runtime: &RuntimeContext,

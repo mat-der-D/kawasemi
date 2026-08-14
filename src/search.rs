@@ -272,7 +272,7 @@ type ProdSearchService = SearchService<
 /// [`service::SearchService`] (task 5.1) is generic over `B: SearchBackend,
 /// H: FederationHttpClient, R: RemoteActorResolver, M: LocalMentionResolver`
 /// because it must stay engine-agnostic *at the type level* for its own
-/// tests (`search::service::tests` swaps in `StubSearchBackend`/
+/// tests (`tests/search_service_it.rs` swaps in `StubSearchBackend`/
 /// `MockFederationHttpClient`/`FakeRemoteActors` without this crate's own
 /// `SearchService` code ever naming any of them — see `service.rs`'s own
 /// doc comment, "Engine-agnostic by construction"). That is a different

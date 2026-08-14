@@ -27,7 +27,7 @@
 //! catch_up_from_watermark`) -> `SearchHydrator` -> `SearchResultSerializer`.
 //!
 //! ## Relationship to already-existing coverage at other layers
-//! `src/search/endpoint/tests.rs` (task 5.2) already unit-tests 401/403/422/
+//! `tests/search_endpoint_it.rs` (task 5.2) already unit-tests 401/403/422/
 //! `type=hashtags` exclusion/malformed values against a *test-only* router
 //! mounting `crate::search::endpoint::search` in isolation with a
 //! `StubSearchBackend`; `tests/search_contract_it.rs` (task 6.1) already

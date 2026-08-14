@@ -10,7 +10,8 @@
 //! in-memory stub), `inbound/dedup/tests.rs` (the idempotency ledger alone),
 //! `inbound/block_policy/tests.rs` (`NoopBlockPolicy`'s own contract),
 //! `outbound/queue/tests.rs` (`DeliveryQueue`'s CRUD/state-transition
-//! primitives against a real Postgres schema), `outbound/worker/tests.rs`
+//! primitives against a real Postgres schema),
+//! `tests/federation_outbound_worker_it.rs`
 //! (`DeliveryWorker` driving a real queue through send/reschedule/fail), and
 //! `outbound/target/tests.rs` (`RecipientTargetResolver`'s dedup rule in
 //! memory). This file's own job is different: prove these compose correctly
@@ -38,7 +39,7 @@
 //!   *multiple* remote recipients sharing one shared inbox, proving
 //!   `RecipientTargetResolver`'s dedup rule collapses them into exactly one
 //!   persisted job before a directly-built [`DeliveryWorker`] (mirroring
-//!   `outbound/worker/tests.rs`'s own `worker_for` convention) sends to that
+//!   `tests/federation_outbound_worker_it.rs`'s own `worker_for` convention) sends to that
 //!   shared inbox exactly once (Requirements 11.1, 11.2, 11.4).
 //! - A directly-enqueued job's full retry lifecycle -- one real transient
 //!   failure, a simulated time-passing gap, a second real transient failure
@@ -50,12 +51,13 @@
 //!   `backoff_delay`'s own already-unit-tested pure formula in isolation.
 //!
 //! Every network boundary this file touches is [`MockFederationHttpClient`]
-//! (mirrors `signatures_it.rs`/`worker/tests.rs`'s own convention) -- no real
+//! (mirrors `signatures_it.rs`/`federation_outbound_worker_it.rs`'s own
+//! convention) -- no real
 //! HTTP call is ever made by this file's own directly-built
 //! `HttpSignatureVerifier`/`DeliveryWorker` instances. `spawn_test_app()`
 //! does also start its own live background delivery worker backed by the
 //! real `ReqwestFederationHttpClient` (`TEST_DELIVERY_POLL_INTERVAL`); this
-//! is the same precedent `outbound/worker/tests.rs` already accepts for its
+//! is the same precedent `tests/federation_outbound_worker_it.rs` already accepts for its
 //! own directly-enqueued-job scenarios, not something this file introduces.
 
 use std::future::Future;
@@ -87,13 +89,14 @@ use kawasemi::test_harness::{TestApp, spawn_test_app};
 
 // ==========================================================================
 // Fixtures (each integration test file is its own compiled crate, so these
-// deliberately duplicate `signatures_it.rs`/`worker/tests.rs`'s own
+// deliberately duplicate `signatures_it.rs`/`federation_outbound_worker_it.rs`'s own
 // conventions rather than sharing across files).
 // ==========================================================================
 
 /// Creates a real owner + a real local actor via `ActorService::create_actor`
 /// (real RSA-2048 signing key provisioning), resolved back through
-/// `ActorDirectory` -- mirrors `signatures_it.rs`'s/`worker/tests.rs`'s own
+/// `ActorDirectory` -- mirrors `signatures_it.rs`'s/
+/// `federation_outbound_worker_it.rs`'s own
 /// identical helper.
 async fn insert_actor_fixture(app: &TestApp, handle_str: &str) -> ResolvedActor {
     let owner_id = app.runtime.ids.next_id();
@@ -530,8 +533,8 @@ async fn actor_inbox_rejects_a_blocked_signer_while_shared_inbox_accepts_the_ide
 
 /// Builds a `DeliveryWorker` wired against `app`'s own real
 /// `DbDeliveryQueue`/`ActorDirectory`/`Clock`-backed `SignatureNegotiator`,
-/// with `mock` as the send boundary -- mirrors `outbound/worker/tests.rs`'s
-/// own `worker_for`.
+/// with `mock` as the send boundary -- mirrors
+/// `tests/federation_outbound_worker_it.rs`'s own `worker_for`.
 fn worker_for(
     app: &TestApp,
     mock: Arc<MockFederationHttpClient>,
@@ -712,7 +715,7 @@ async fn a_job_reschedules_with_widening_backoff_then_permanently_fails_at_the_a
     // `queue.rs`'s own doc comment -- so there is no wall-clock to actually
     // wait on; this directly bypasses the component under test the same way
     // `signatures_it.rs`'s `seed_cached_public_key` and
-    // `worker/tests.rs`'s attempts fast-forward already do) by winding
+    // `federation_outbound_worker_it.rs`'s attempts fast-forward already do) by winding
     // `next_attempt_at` back to `now` so the second `run_once` call below
     // finds this job due again.
     sqlx::query("UPDATE delivery_jobs SET next_attempt_at = $1 WHERE id = $2")
@@ -748,7 +751,8 @@ async fn a_job_reschedules_with_widening_backoff_then_permanently_fails_at_the_a
 
     // --- Fast-forward attempts to one below the documented cap, and wind
     // next_attempt_at back to now again, so the next failure is the one
-    // that exhausts the retry budget (mirrors `worker/tests.rs`'s own
+    // that exhausts the retry budget (mirrors
+    // `federation_outbound_worker_it.rs`'s own
     // attempts-fast-forward convention for this exact edge). ---
     sqlx::query("UPDATE delivery_jobs SET attempts = $1, next_attempt_at = $2 WHERE id = $3")
         .bind(DEFAULT_MAX_DELIVERY_ATTEMPTS - 1)

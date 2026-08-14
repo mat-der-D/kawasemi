@@ -5,16 +5,18 @@
 //! notification_show_dismiss_it.rs`, "単一取得・他者宛 404・dismiss/clear・
 //! 消去後除外・スコープ（統合）"). Requirements 3.1-3.2, 4.1-4.4, 9.1-9.4.
 //!
-//! ## Relationship to `src/notifications/endpoints/tests.rs` (task 4.1) and
+//! ## Relationship to `tests/notifications_endpoints_it.rs` (task 4.1) and
 //! `tests/notification_list_it.rs`/`tests/notification_contract_it.rs`
 //! (task 5.2's own sibling / task 5.1) — why this file, given all three
 //! already exist
 //! Mirrors `tests/notification_list_it.rs`'s own identical "why this file"
 //! reasoning (see that file's own doc comment) for the `show`/`clear`/
-//! `dismiss` handlers specifically: `src/notifications/endpoints/tests.rs`
-//! (task 4.1) already covers these three handlers' auth/scope/response-code
+//! `dismiss` handlers specifically: `tests/notifications_endpoints_it.rs`
+//! (task 4.1; formerly `src/notifications/endpoints/tests.rs`, moved by
+//! `.kiro/specs/test-placement-migration` task 4.1) already covers these
+//! three handlers' auth/scope/response-code
 //! wiring, but only against a hand-built, test-only `Router` (that task's
-//! own explicit boundary, "Not wired into the module tree yet") — task 4.2
+//! own explicit boundary) — task 4.2
 //! has since mounted them for real, so this file is the first to drive
 //! `show_notification`/`clear_notifications`/`dismiss_notification` through
 //! the *real, fully-wired* production router

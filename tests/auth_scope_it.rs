@@ -5,7 +5,9 @@
 //!
 //! `src/oauth/scope.rs`'s own unit tests already prove
 //! `ScopeSet::is_satisfied_by`'s inclusion judgment as a pure function, and
-//! `src/oauth/middleware/tests.rs` (task 6.4) already proves
+//! `tests/oauth_middleware_it.rs` (task 6.4; formerly
+//! `src/oauth/middleware/tests.rs`, moved by
+//! `.kiro/specs/test-placement-migration` task 7.2) already proves
 //! `BearerAuthMiddleware`'s extractors against a minimal, middleware-only
 //! `AuthState` router dispatched via `tower::ServiceExt::oneshot`, not the
 //! real production router. `tests/api_foundation_wiring_it.rs` (task 7.1)
@@ -53,7 +55,7 @@
 //! ## Revocation via the real, mounted `POST /oauth/revoke` endpoint
 //! Mirrors `tests/api_foundation_wiring_it.rs`'s own choice: revoking through
 //! real HTTP (rather than calling `token_repository::revoke_token` directly,
-//! as `src/oauth/middleware/tests.rs`'s unit-level tests do) additionally
+//! as `tests/oauth_middleware_it.rs`'s own middleware-level tests do) additionally
 //! proves the revoke endpoint and the Bearer middleware observe the same
 //! underlying row.
 //!

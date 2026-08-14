@@ -11,7 +11,7 @@
 //! the real, fully-assembled router (`crate::server::build_router(app.state.clone())`,
 //! the exact `AppState` `spawn_test_app` itself serves) in-process via
 //! `tower::ServiceExt::oneshot`, rather than a test-local router the way
-//! `src/timelines/endpoints/tests.rs` (task 5.1) necessarily had to, since
+//! `tests/timelines_endpoints_handler_it.rs` (task 5.1) necessarily had to, since
 //! nothing mounted `TimelinesModule` onto the real application until this
 //! task.
 //!
@@ -147,7 +147,7 @@ async fn issue_test_token(app: &TestApp, app_id: Id, actor_id: Id, scopes: &[&st
 /// from `app`'s own `AppState` — the exact same value `spawn_test_app` itself
 /// serves over its bound TCP listener — so this file's requests observe the
 /// real `TimelinesModule` wiring task 5.2 adds, not a test-local substitute
-/// (unlike task 5.1's own `src/timelines/endpoints/tests.rs`, which
+/// (unlike task 5.1's own `tests/timelines_endpoints_handler_it.rs`, which
 /// necessarily built its own router since nothing mounted this module onto
 /// the real one before this task).
 fn real_router(app: &TestApp) -> Router {

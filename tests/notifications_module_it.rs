@@ -31,10 +31,10 @@
 //! Both sets are kept as-is; neither is a re-verification of the other's
 //! subject.
 //!
-//! The fixture plumbing below mirrors `src/social_graph/tests.rs`'s own
-//! established helpers. Each `tests/*.rs` file is its own compiled crate, so
-//! such plumbing is duplicated rather than imported — this crate's own
-//! documented convention.
+//! The fixture plumbing below mirrors `tests/social_graph_module_it.rs`'s
+//! own established helpers. Each `tests/*.rs` file is its own compiled
+//! crate, so such plumbing is duplicated rather than imported — this
+//! crate's own documented convention.
 
 use axum::Router;
 use axum::body::Body;
@@ -51,7 +51,7 @@ use kawasemi::oauth::token_repository::{self, NewAccessToken};
 use kawasemi::server;
 use kawasemi::test_harness::{TestApp, spawn_test_app};
 
-// ---- Fixture plumbing (mirrors `src/social_graph/tests.rs`'s own
+// ---- Fixture plumbing (mirrors `tests/social_graph_module_it.rs`'s own
 // established helpers). ----
 
 async fn create_test_actor(app: &TestApp, handle: &str) -> Id {

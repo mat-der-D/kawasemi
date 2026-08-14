@@ -40,7 +40,7 @@
 //!
 //! ## Task 6.2 additions: `exclude_unreviewed=true` acceptance through the
 //! real, full pipeline (Requirement 5.4)
-//! `src/search/service/tests.rs::
+//! `tests/search_service_it.rs::
 //! search_exclude_unreviewed_is_accepted_without_changing_results` already
 //! proves `SearchService::search` accepts `exclude_unreviewed=true` without
 //! rejecting the request or altering its (minimal-implementation) hashtag

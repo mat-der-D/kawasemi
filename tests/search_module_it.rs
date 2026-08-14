@@ -2,10 +2,10 @@
 //! AppState, Server`) — see `src/search.rs`'s own doc comment ("Task 5.3")
 //! for what [`kawasemi::search::build_search_module`] does.
 //!
-//! Mirrors `kawasemi::notifications::tests`'s own established "prove the
+//! Mirrors `tests/notifications_module_it.rs`'s own established "prove the
 //! composition-root wiring itself, via the real fully-assembled router"
 //! technique for the structurally identical situation (task 4.2's own
-//! wiring test, `src/notifications/tests.rs`'s own doc comment), and
+//! wiring test; see that file's own doc comment), and
 //! deliberately narrow — proving the wiring itself connects (this task's
 //! own observable completion condition: "起動後に `/api/v2/search` が一連で
 //! 機能し、既定バックエンドが必須拡張なしで配線され、`X-RateLimit-*`
@@ -69,7 +69,7 @@ use kawasemi::statuses::model::Status;
 use kawasemi::statuses::status_repository::insert_status;
 use kawasemi::test_harness::{TestApp, spawn_test_app};
 
-// ---- Fixture plumbing (mirrors `kawasemi::notifications::tests`'s own
+// ---- Fixture plumbing (mirrors `tests/notifications_module_it.rs`'s own
 // established helpers). ----
 
 async fn create_test_actor(app: &TestApp, handle: &str) -> Id {

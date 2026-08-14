@@ -12,7 +12,7 @@
 //! `structure.md`'s test layout rule ("DB込みの実起動インスタンスを要する検証
 //! は `tests/` 直下の `*_it.rs` に置く") holds in fact and not only on paper.
 //! The helpers below mirror
-//! `search/hydrator/tests.rs`'/`search/remote_resolver/tests.rs`'
+//! `tests/search_hydrator_it.rs`'/`search/remote_resolver/tests.rs`'
 //! established convention (`create_test_actor` is an exact copy of those
 //! modules' own helper of the same name; `resolver_for`/`FakeRemoteActors`
 //! mirror `search/remote_resolver/tests.rs`'s own per-module-owned copies,

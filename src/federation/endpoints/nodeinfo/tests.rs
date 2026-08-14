@@ -2,8 +2,10 @@
 //! 5.1, `Boundary: nodeinfo`).
 //!
 //! Pure in-memory logic -- no DB, no HTTP; plain `#[tokio::test]`s calling
-//! the handlers directly (mirrors `webfinger/tests.rs`'s "not wired into a
-//! router yet" testing convention).
+//! the handlers directly (mirrors `tests/federation_webfinger_endpoint_it.rs`'s
+//! "not wired into a router yet" testing convention, which lived in
+//! `webfinger/tests.rs` until
+//! `.kiro/specs/test-placement-migration` task 2.2 relocated it).
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;

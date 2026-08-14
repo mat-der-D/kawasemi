@@ -468,7 +468,7 @@ async fn assemble_one_matches_a_single_element_batch() {
 // -- custom emoji ------------------------------------------------------------
 
 /// Seeds a locally-registered custom emoji, mirroring
-/// `statuses::endpoints::tests`'s identical test-local helper.
+/// `tests/statuses_endpoints_it.rs`'s identical test-local helper.
 async fn seed_custom_emoji(app: &TestApp, shortcode: &str) {
     let now = app.runtime.clock.now();
     let url = format!("https://example.test/emoji/{shortcode}.png");

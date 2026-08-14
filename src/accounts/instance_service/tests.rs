@@ -7,7 +7,7 @@
 //! seeding `instance_settings` directly with raw `sqlx::query` `INSERT`s
 //! (this crate never seeds that table itself — see
 //! `settings_repository.rs`'s own doc comment, "Read-only, by
-//! construction"). Also mirrors `src/accounts/account_service/tests.rs`'s
+//! construction"). Also mirrors `tests/accounts_account_service_it.rs`'s
 //! own `media_config` fixture convention: a small, explicit `MediaConfig`
 //! built here rather than reused from `test_harness.rs`'s own (private)
 //! default, so `configuration.media_attachments`' expected values are

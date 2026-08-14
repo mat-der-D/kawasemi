@@ -435,8 +435,9 @@ pub(crate) async fn establish_isolated_db() -> IsolatedDb {
     // no test needs more.
     //
     // Not 1: at a single connection
-    // `federation::outbound::worker::tests::run_once_marks_a_job_failed_
-    // immediately_when_sender_no_longer_resolves` deterministically claims
+    // `tests/federation_outbound_worker_it.rs`'s
+    // `run_once_marks_a_job_failed_immediately_when_sender_no_longer_resolves`
+    // deterministically claims
     // zero jobs. That is not a `claim_due` defect: this fixture also starts
     // the real delivery-worker loop (`federation_background.spawn()` below,
     // polling every `TEST_DELIVERY_POLL_INTERVAL`), so two workers compete

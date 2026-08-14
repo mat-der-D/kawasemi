@@ -37,8 +37,8 @@
 //! [`stub_router`]/[`pg_router`] then mount the identical, unmodified
 //! `crate::search::endpoint::search` handler (task 5.2, never touched by
 //! this task) via the identical, unmodified `SearchEndpointsState<B, H, R,
-//! M>` (task 5.2) onto a small per-file router -- the same technique `src/
-//! search/endpoint/tests.rs`'s own `build_router` already established for
+//! M>` (task 5.2) onto a small per-file router -- the same technique
+//! `tests/search_endpoint_it.rs`'s own `build_router` already established for
 //! testing this handler with a substituted backend, just reused here at the
 //! full-pipeline (real production `RemoteResolver`/`SearchHydrator`, real
 //! `TestApp`-backed Postgres data) rather than mocked-collaborator level.

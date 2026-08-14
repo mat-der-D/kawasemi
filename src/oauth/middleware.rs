@@ -127,9 +127,9 @@
 //! directly (`OptionalActor` vs. `RequiredActor` as a handler parameter)
 //! without needing two separately-layered sub-routers. `require_scope`
 //! likewise stays a plain function callers invoke inside their own handler
-//! body (as `tests.rs::scoped_probe` does) rather than a third extractor
-//! type, because the *required* `ScopeSet` a route demands is itself
-//! per-endpoint data an extractor has no way to receive.
+//! body (as `tests/oauth_middleware_it.rs`'s `scoped_probe` does) rather
+//! than a third extractor type, because the *required* `ScopeSet` a route
+//! demands is itself per-endpoint data an extractor has no way to receive.
 //!
 //! ## Where this module's tests live
 //! The integration test file `tests/oauth_middleware_it.rs` proves all of
@@ -282,7 +282,8 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 /// AuthState: FromRef<S>` bound on each impl below does. This is what lets
 /// these two extractors be used directly inside a handler mounted on
 /// `Router<AppState>` (task 7.1's production router), not only inside this
-/// module's own `AuthState`-only test router (`tests.rs`'s `test_router`,
+/// module's own `AuthState`-only test router
+/// (`tests/oauth_middleware_it.rs`'s `test_router`,
 /// which keeps working unchanged: `AuthState: FromRef<AuthState>` holds via
 /// axum-core's blanket reflexive `impl<T: Clone> FromRef<T> for T`).
 #[derive(Clone)]

@@ -16,7 +16,7 @@
 //!
 //! The helpers below mirror `search/hydrator/tests.rs`'s own established
 //! convention (`create_test_actor` is an exact copy of
-//! `notifications/service/tests.rs`'s helper of the same name;
+//! `tests/notifications_service_it.rs`'s helper of the same name;
 //! `sample_status`/`create_test_status` are a parameterized variant of that
 //! same module's identical helpers, since these tests need to vary
 //! `visibility`/`content` per case, and are *duplicated* rather than moved
@@ -64,7 +64,7 @@ fn account_ref_id(account_ref: &AccountRef) -> Id {
 }
 
 /// Creates a real owner + local actor row, returning the actor's `Id` — an
-/// exact copy of `notifications/service/tests.rs::create_test_actor`.
+/// exact copy of `tests/notifications_service_it.rs::create_test_actor`.
 async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
     let now = app.runtime.clock.now();
     let owner_id = app.runtime.ids.next_id();

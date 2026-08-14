@@ -33,7 +33,7 @@
 //! The tests above prove `PgSearchBackend::search_statuses` itself performs
 //! no visibility filtering at all (by design — see this file's own doc
 //! comment, "Scope: visibility is NOT enforced by this backend") and
-//! `src/search/hydrator/tests.rs` already proves `SearchHydrator::
+//! `tests/search_hydrator_it.rs` already proves `SearchHydrator::
 //! hydrate_statuses` excludes an invisible candidate id in isolation — but
 //! always by handing hand-picked ids directly to `hydrate_statuses`, never
 //! by actually running them through `PgSearchBackend::search_statuses`'s own

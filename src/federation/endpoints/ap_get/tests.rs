@@ -3,8 +3,8 @@
 //!
 //! [`actor_get`]/[`object_get`] themselves need a real `ActorDirectory`
 //! (owner-non-exposing actor resolution has no narrow mockable port
-//! anywhere in this spec, mirrors `document/tests.rs`'s/`webfinger/tests.rs`'s
-//! established precedent) plus a `SignatureVerifier` and the two document
+//! anywhere in this spec, mirrors `document/tests.rs`'s/
+//! `tests/federation_webfinger_endpoint_it.rs`'s established precedent) plus a `SignatureVerifier` and the two document
 //! registries wired together — that full end-to-end proof, including every
 //! one of this task's own observable completion conditions, lives in
 //! `tests/ap_get_outbox_it.rs`. This module only proves the pure logic that

@@ -32,7 +32,7 @@
 //! deterministic `RuntimeContext` for the `RemoteAccountRepository`/
 //! `RemoteAccountFetcher` calls underneath `show_account`. This mirrors the
 //! exact same already-reviewed convention
-//! `src/accounts/account_service/tests.rs` (task 5.1/5.4) and
+//! `tests/accounts_account_service_it.rs` (task 5.1/5.4) and
 //! `src/accounts/remote_fetcher/tests.rs` (task 4) already established for
 //! this identical class of test — this file adds the specific scenarios task
 //! 7.2 names (a genuinely fresh successful fetch producing a
@@ -71,7 +71,7 @@ fn origin() -> ForwardedOrigin {
 /// A `LocalFsStore` never actually touched — this file's `AccountService`
 /// never exercises avatar/header upload ingestion (`update_credentials` is
 /// out of this task's own scope), mirroring
-/// `src/accounts/account_service/tests.rs::store`'s identical precedent.
+/// `tests/accounts_account_service_it.rs::store`'s identical precedent.
 fn store() -> LocalFsStore {
     LocalFsStore::new(PathBuf::from(
         "/nonexistent-kawasemi-remote-fetch-it-test-root",
@@ -94,7 +94,7 @@ fn media_config() -> MediaConfig {
 /// Builds an `AccountService` against `app`'s own real pool/`ActorDirectory`/
 /// `RuntimeContext`, paired with `mock` as the `FederationHttpClient`
 /// `RemoteAccountFetcher` fetches through — mirrors
-/// `src/accounts/account_service/tests.rs::service`'s identical helper.
+/// `tests/accounts_account_service_it.rs::service`'s identical helper.
 fn service(
     app: &TestApp,
     mock: Arc<MockFederationHttpClient>,

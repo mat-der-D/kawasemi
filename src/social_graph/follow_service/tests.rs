@@ -5,8 +5,9 @@
 //!
 //! Mirrors `interaction_service/tests.rs`'s established convention
 //! (`crate::test_harness::db_fixture::spawn_test_db`, a `RecordingSink` `DeliverySink`
-//! double capturing every dispatched Activity) and `account_service/
-//! tests.rs`'s `create_test_actor`/`sample_remote_account` helpers (this
+//! double capturing every dispatched Activity) and
+//! `tests/accounts_account_service_it.rs`'s
+//! `create_test_actor`/`sample_remote_account` helpers (this
 //! service needs *real* `actor`/`account_profiles`/`remote_accounts` rows,
 //! not mocks, since target existence/lock resolution is real business logic
 //! under test here — unlike `InteractionService`'s tests, which mock actor
@@ -35,7 +36,7 @@ use crate::test_harness::db_fixture::{TestDb, spawn_test_db};
 // --- Test fixtures ----------------------------------------------------------
 
 /// Creates a real owner + local actor row, returning the actor's `Id` — an
-/// exact copy of `account_service/tests.rs::create_test_actor` (this
+/// exact copy of `tests/accounts_account_service_it.rs::create_test_actor` (this
 /// module's own tests need the identical real-actor shape `ActorDirectory`
 /// resolves against).
 async fn create_test_actor(db: &TestDb, handle: &str) -> Id {

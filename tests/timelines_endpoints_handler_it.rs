@@ -192,7 +192,7 @@ fn build_router(state: TimelineEndpointsState) -> Router {
 }
 
 /// Registers a real `oauth_applications` row, returning its `Id` — mirrors
-/// `social_graph::endpoints::tests::register_test_app`.
+/// `tests/social_graph_endpoints_it.rs::register_test_app`.
 async fn register_test_app(app: &TestApp) -> Id {
     let key = app.state.config().oauth.token_hash_key.clone();
     let now = app.runtime.clock.now();
@@ -215,7 +215,7 @@ async fn register_test_app(app: &TestApp) -> Id {
 
 /// Issues a real access token bound to `actor_id` with `scopes`, returning
 /// its plaintext bearer value — mirrors
-/// `social_graph::endpoints::tests::issue_test_token`. Never hand-constructs
+/// `tests/social_graph_endpoints_it.rs::issue_test_token`. Never hand-constructs
 /// a `RequestActorContext`.
 async fn issue_test_token(app: &TestApp, app_id: Id, actor_id: Id, scopes: &[&str]) -> String {
     let key = app.state.config().oauth.token_hash_key.clone();

@@ -29,8 +29,8 @@
 //! neither subsumes the other.
 //!
 //! The fixture plumbing below mirrors
-//! `src/social_graph/follow_request_service/tests.rs`'s own established
-//! conventions (`create_test_actor` is an exact copy of that module's own
+//! `tests/social_graph_follow_request_service_it.rs`'s own established
+//! conventions (`create_test_actor` is an exact copy of that file's own
 //! helper of the same name) and seeds `Notification` rows directly via
 //! `kawasemi::notifications::repository::insert_dedup` — this service never
 //! generates notifications itself, that being `NotificationGenerator`'s
@@ -59,7 +59,8 @@ use kawasemi::statuses::tag_repository::{associate_tag, upsert_tag};
 use kawasemi::test_harness::{TestApp, spawn_test_app};
 
 /// Creates a real owner + local actor row, returning the actor's `Id` — an
-/// exact copy of `follow_request_service/tests.rs::create_test_actor`.
+/// exact copy of
+/// `tests/social_graph_follow_request_service_it.rs::create_test_actor`.
 async fn create_test_actor(app: &TestApp, handle: &str) -> Id {
     let now = app.runtime.clock.now();
     let owner_id = app.runtime.ids.next_id();
@@ -668,8 +669,8 @@ async fn clear_succeeds_when_the_recipient_has_no_notifications() {
 // -- one whole list page ---------------------------------------------------
 
 /// Seeds a locally-registered custom emoji — an exact copy of
-/// `statuses/account_provider/tests.rs`'s and `statuses/render_assembler/
-/// tests.rs`'s identical test-local helper.
+/// `tests/statuses_account_provider_it.rs`'s and
+/// `statuses/render_assembler/tests.rs`'s identical test-local helper.
 async fn seed_custom_emoji(app: &TestApp, shortcode: &str) {
     let now = app.runtime.clock.now();
     let url = format!("https://example.test/emoji/{shortcode}.png");

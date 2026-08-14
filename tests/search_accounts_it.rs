@@ -28,7 +28,7 @@
 //!
 //! Task 3.1's own tests above prove `PgSearchBackend::search_accounts`
 //! itself never filters by `following` (by design) and task 4.2's own
-//! `src/search/hydrator/tests.rs` already proves `SearchHydrator::
+//! `tests/search_hydrator_it.rs` already proves `SearchHydrator::
 //! hydrate_accounts`'s `following_only` filter and dedup logic in isolation
 //! — but always against a *stub* `RelationshipStateProvider`
 //! (`SelectiveFollowingProvider`), never the real, `follows`-table-backed
@@ -55,7 +55,7 @@
 //! remote-resolution candidate that happens to coincide with an
 //! already-matched backend result — a `resolve=true`/WebFinger-mocking
 //! scenario that is task 6.3's own boundary (`search_resolve_it`), not this
-//! task's. `src/search/hydrator/tests.rs::
+//! task's. `tests/search_hydrator_it.rs::
 //! hydrate_accounts_dedups_duplicate_refs_and_renders_every_distinct_account`
 //! already exercises the dedup logic itself as a real, DB-backed test
 //! (`spawn_test_app`, per this repo's own "unit tests in `<file>/tests.rs`"

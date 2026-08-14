@@ -36,7 +36,8 @@ use kawasemi::test_harness::{TestApp, spawn_test_app};
 
 /// Creates a real owner + a real local actor (via `ActorService::create_actor`,
 /// which provisions a real, currently valid RSA-2048 signing key) under
-/// `handle` — mirrors `signer/tests.rs`'s own `create_signable_actor`.
+/// `handle` — mirrors
+/// `tests/federation_signatures_signer_it.rs`'s own `create_signable_actor`.
 async fn create_signable_actor(app: &TestApp, handle: &str) -> ResolvedActor {
     let owner_id = app.runtime.ids.next_id();
     let now = app.runtime.clock.now();
@@ -68,7 +69,8 @@ async fn create_signable_actor(app: &TestApp, handle: &str) -> ResolvedActor {
 /// Builds a `SignatureNegotiator` wired against `app`'s own real
 /// `ActorDirectory`/`SigningKeyProvider`/`Clock`-backed `RequestSigner`, `app`'s
 /// real pool (the `instance_signature_capabilities` capability store), and
-/// `mock` as the send boundary — mirrors `signer/tests.rs`'s `signer_for`.
+/// `mock` as the send boundary — mirrors
+/// `tests/federation_signatures_signer_it.rs`'s `signer_for`.
 fn negotiator_for(
     app: &TestApp,
     mock: Arc<MockFederationHttpClient>,

@@ -5,15 +5,16 @@
 //! ン・types/exclude_types/account_id フィルタ・消去済み除外・スコープ
 //! （統合）"). Requirements 2.1-2.5, 9.1-9.4.
 //!
-//! ## Relationship to `src/notifications/endpoints/tests.rs` (task 4.1) and
+//! ## Relationship to `tests/notifications_endpoints_it.rs` (task 4.1) and
 //! `tests/notification_contract_it.rs` (task 5.1) — why this file, given
 //! both already exist
-//! `src/notifications/endpoints/tests.rs` (task 4.1, 24 tests) already
+//! `tests/notifications_endpoints_it.rs` (task 4.1, 24 tests; formerly
+//! `src/notifications/endpoints/tests.rs`, moved by
+//! `.kiro/specs/test-placement-migration` task 4.1) already
 //! exercises `list_notifications`'s auth/scope/`types[]`/`exclude_types[]`/
 //! `account_id`/`Link`-header wiring in detail — but, by that task's own
-//! explicit boundary (its own doc comment, "Not wired into the module tree
-//! yet"), only against a *hand-built, test-only* `Router` it constructs
-//! itself in-module, never through `crate::server::build_router`. Task 4.2
+//! explicit boundary, only against a *hand-built, test-only* `Router` it
+//! constructs itself in-file, never through `crate::server::build_router`. Task 4.2
 //! has since landed (`.kiro/specs/notifications/tasks.md`'s "4.2 モジュー
 //! ル配線" is `[x]`) and mounted these handlers for real
 //! (`src/server.rs::notifications_router`), so this file is the first to

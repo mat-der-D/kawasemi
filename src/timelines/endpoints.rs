@@ -151,9 +151,12 @@
 //! similar") and directs following whatever the most recent sibling
 //! endpoint task actually did; `social_graph::endpoints`'s task 5.1 (the
 //! most recent such task) defines no `router()` function of its own either
-//! — its `tests.rs` builds a test-only router directly by calling
-//! `Router::new().route(...)` with its handlers. This module follows that
-//! same precedent: no `router()` function here, so task 5.2 (`TimelinesModule`
+//! — its integration tests build a test-only router directly by calling
+//! `Router::new().route(...)` with its handlers
+//! (`tests/social_graph_endpoints_it.rs`, moved out of that module's
+//! `tests.rs` by `.kiro/specs/test-placement-migration` task 5.1).
+//! This module follows that same precedent: no `router()` function here,
+//! so task 5.2 (`TimelinesModule`
 //! wiring, `src/server.rs`) is unblocked to build `timelines_router()` there
 //! exactly the way it builds every other module's router, with no
 //! now-orphaned, never-called function left behind by this task.

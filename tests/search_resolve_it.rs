@@ -26,10 +26,12 @@
 //! sandbox-safe, and not what this task's own dispatch brief asks for
 //! ("`FederationHttpClient` モック").
 //!
-//! This file therefore follows `src/search/endpoint/tests.rs`'s/`src/search/
-//! service/tests.rs`'s/`src/search/remote_resolver/tests.rs`'s own already-
-//! reviewed, established convention exactly (mirrored here at the
-//! `tests/*.rs` integration layer instead of as a `#[cfg(test)]` submodule):
+//! This file therefore follows `tests/search_endpoint_it.rs`'s/
+//! `tests/search_service_it.rs`'s/`src/search/remote_resolver/tests.rs`'s own
+//! already-reviewed, established convention exactly (the first two were
+//! themselves moved out of `src/search/endpoint/tests.rs`/
+//! `src/search/service/tests.rs` by
+//! `.kiro/specs/test-placement-migration` tasks 3.1/3.2):
 //! a small, test-only axum `Router` mounts the real
 //! `crate::search::endpoint::search` handler directly, closing over a
 //! `SearchEndpointsState<PgSearchBackend, MockFederationHttpClient,
@@ -52,7 +54,7 @@
 //! `FakeRemoteActors`/`ok_response`/`jrd_document`/`actor_document`/
 //! `note_document`/`register_test_app`/`issue_test_token` are direct,
 //! intentional per-file copies of `src/search/remote_resolver/tests.rs`'s/
-//! `src/search/service/tests.rs`'s/`src/search/endpoint/tests.rs`'s own
+//! `tests/search_service_it.rs`'s/`tests/search_endpoint_it.rs`'s own
 //! identically named helpers -- each `tests/*.rs` file is its own compiled
 //! crate (cannot import another test file's private items), and this
 //! crate's own established convention is exactly this kind of small,
@@ -218,8 +220,8 @@ fn remote_resolver_for(
 }
 
 /// Builds a real [`SearchHydrator`] from `app`'s real accounts/media/
-/// statuses collaborators -- mirrors `crate::search::endpoint::tests::
-/// build_hydrator`.
+/// statuses collaborators -- mirrors
+/// `tests/search_endpoint_it.rs::build_hydrator`.
 fn build_hydrator(app: &TestApp) -> SearchHydrator {
     SearchHydrator::new(
         app.pool.clone(),
